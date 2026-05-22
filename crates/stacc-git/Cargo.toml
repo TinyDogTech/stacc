@@ -1,0 +1,10 @@
+[package]
+name = "stacc-git"
+version = "0.0.0"
+description = "Typed wrappers over the git CLI for stacc."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]

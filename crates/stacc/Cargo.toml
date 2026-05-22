@@ -1,0 +1,16 @@
+[package]
+name = "stacc"
+version = "0.0.0"
+description = "Stacked-diff CLI for AI coding agents."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# This crate produces the `stacc` executable. A package can hold one library
+# and any number of binaries; here we declare the single binary explicitly.
+[[bin]]
+name = "stacc"
+path = "src/main.rs"
+
+[dependencies]

@@ -1,0 +1,10 @@
+[package]
+name = "stacc-state"
+version = "0.0.0"
+description = "Stack state storage in the refs/stacc/ git ref."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
