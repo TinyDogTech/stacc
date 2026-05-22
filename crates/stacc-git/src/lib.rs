@@ -168,6 +168,159 @@ impl Git {
     }
 }
 
+impl Git {
+    /// Write `content` as a blob object and return its hash.
+    pub fn hash_object(&self, content: &[u8]) -> Result<String, GitError> {
+        self.run_with_stdin(&["hash-object", "-w", "--stdin"], content)
+    }
+
+    /// Build a tree from `(path, blob_hash)` entries and return its hash.
+    /// Paths may contain `/`; git creates the intermediate subtrees.
+    pub fn write_tree(&self, entries: &[(&str, &str)]) -> Result<String, GitError> {
+        let index = self
+            .git_dir()?
+            .join(format!("stacc-index-{}", std::process::id()));
+
+        let build = || -> Result<String, GitError> {
+            for (path, hash) in entries {
+                let cacheinfo = format!("100644,{hash},{path}");
+                let args = ["update-index", "--add", "--cacheinfo", cacheinfo.as_str()];
+                let output = self
+                    .command(&args)
+                    .env("GIT_INDEX_FILE", &index)
+                    .output()
+                    .map_err(|source| GitError::Spawn { source })?;
+                if !output.status.success() {
+                    return Err(self.command_error(&args, &output));
+                }
+            }
+            let args = ["write-tree"];
+            let output = self
+                .command(&args)
+                .env("GIT_INDEX_FILE", &index)
+                .output()
+                .map_err(|source| GitError::Spawn { source })?;
+            if !output.status.success() {
+                return Err(self.command_error(&args, &output));
+            }
+            Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        };
+
+        let result = build();
+        let _ = std::fs::remove_file(&index);
+        result
+    }
+
+    /// Create a commit object for `tree`, optionally parented on `parent`.
+    pub fn commit_tree(
+        &self,
+        tree: &str,
+        parent: Option<&str>,
+        message: &str,
+    ) -> Result<String, GitError> {
+        let mut args = vec!["commit-tree", tree, "-m", message];
+        if let Some(parent) = parent {
+            args.push("-p");
+            args.push(parent);
+        }
+        let output = self
+            .command(&args)
+            .env("GIT_AUTHOR_NAME", "stacc")
+            .env("GIT_AUTHOR_EMAIL", "stacc@localhost")
+            .env("GIT_COMMITTER_NAME", "stacc")
+            .env("GIT_COMMITTER_EMAIL", "stacc@localhost")
+            .output()
+            .map_err(|source| GitError::Spawn { source })?;
+        if !output.status.success() {
+            return Err(self.command_error(&args, &output));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
+    /// Point `name` at `new`. When `old` is given, the move only succeeds if
+    /// the ref currently equals it — a compare-and-swap.
+    pub fn update_ref(&self, name: &str, new: &str, old: Option<&str>) -> Result<(), GitError> {
+        let mut args = vec!["update-ref", name, new];
+        if let Some(old) = old {
+            args.push(old);
+        }
+        self.run(&args).map(|_| ())
+    }
+
+    /// The commit a ref points at, or `None` if the ref does not exist.
+    pub fn ref_commit(&self, name: &str) -> Result<Option<String>, GitError> {
+        let args = ["rev-parse", "--verify", "--quiet", name];
+        let output = self
+            .command(&args)
+            .output()
+            .map_err(|source| GitError::Spawn { source })?;
+        match output.status.code() {
+            Some(0) => Ok(Some(
+                String::from_utf8_lossy(&output.stdout).trim().to_string(),
+            )),
+            Some(1) => Ok(None),
+            _ => Err(self.command_error(&args, &output)),
+        }
+    }
+
+    /// Read the blob at `<rev>:<path>`, or `None` if it is not present.
+    pub fn read_blob(&self, rev: &str, path: &str) -> Result<Option<String>, GitError> {
+        let spec = format!("{rev}:{path}");
+        let output = self
+            .command(&["cat-file", "-p", spec.as_str()])
+            .output()
+            .map_err(|source| GitError::Spawn { source })?;
+        if output.status.success() {
+            Ok(Some(String::from_utf8_lossy(&output.stdout).to_string()))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// List the entry names directly under `<rev>:<path>`.
+    pub fn list_tree(&self, rev: &str, path: &str) -> Result<Vec<String>, GitError> {
+        let spec = format!("{rev}:{path}");
+        let output = self
+            .command(&["ls-tree", "--name-only", spec.as_str()])
+            .output()
+            .map_err(|source| GitError::Spawn { source })?;
+        if !output.status.success() {
+            return Ok(Vec::new());
+        }
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(|line| line.to_string())
+            .collect())
+    }
+
+    fn run_with_stdin(&self, args: &[&str], input: &[u8]) -> Result<String, GitError> {
+        use std::io::Write;
+        let mut child = self
+            .command(args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|source| GitError::Spawn { source })?;
+
+        child
+            .stdin
+            .take()
+            .expect("stdin is piped")
+            .write_all(input)
+            .map_err(|source| GitError::Spawn { source })?;
+
+        let output = child
+            .wait_with_output()
+            .map_err(|source| GitError::Spawn { source })?;
+
+        if !output.status.success() {
+            return Err(self.command_error(args, &output));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -307,5 +460,61 @@ mod tests {
         );
         repo.push("origin", "main").unwrap();
         repo.fetch("origin", "main").unwrap();
+    }
+
+    #[test]
+    fn objects_round_trip_through_tree_and_ref() {
+        let (_tmp, repo) = init_repo();
+        let repo_blob = repo.hash_object(b"{\"trunk\":\"main\"}").unwrap();
+        let branch_blob = repo.hash_object(b"{\"base\":\"x\"}").unwrap();
+        let tree = repo
+            .write_tree(&[
+                ("repo", repo_blob.as_str()),
+                ("branches/feature", branch_blob.as_str()),
+            ])
+            .unwrap();
+        let commit = repo.commit_tree(&tree, None, "state").unwrap();
+        repo.update_ref("refs/stacc/data", &commit, None).unwrap();
+
+        assert_eq!(repo.ref_commit("refs/stacc/data").unwrap(), Some(commit));
+        assert_eq!(
+            repo.read_blob("refs/stacc/data", "repo").unwrap().as_deref(),
+            Some("{\"trunk\":\"main\"}")
+        );
+        assert_eq!(
+            repo.list_tree("refs/stacc/data", "branches").unwrap(),
+            vec!["feature".to_string()]
+        );
+    }
+
+    #[test]
+    fn read_blob_absent_is_none() {
+        let (_tmp, repo) = init_repo();
+        assert_eq!(repo.read_blob("HEAD", "nope").unwrap(), None);
+    }
+
+    #[test]
+    fn ref_commit_missing_is_none() {
+        let (_tmp, repo) = init_repo();
+        assert_eq!(repo.ref_commit("refs/stacc/data").unwrap(), None);
+    }
+
+    #[test]
+    fn update_ref_cas_rejects_stale_old() {
+        let (_tmp, repo) = init_repo();
+        let blob = repo.hash_object(b"a").unwrap();
+        let tree = repo.write_tree(&[("k", blob.as_str())]).unwrap();
+        let c1 = repo.commit_tree(&tree, None, "one").unwrap();
+        repo.update_ref("refs/stacc/data", &c1, None).unwrap();
+
+        let blob2 = repo.hash_object(b"b").unwrap();
+        let tree2 = repo.write_tree(&[("k", blob2.as_str())]).unwrap();
+        let c2 = repo.commit_tree(&tree2, Some(c1.as_str()), "two").unwrap();
+
+        let zero = "0000000000000000000000000000000000000000";
+        assert!(repo.update_ref("refs/stacc/data", &c2, Some(zero)).is_err());
+        repo.update_ref("refs/stacc/data", &c2, Some(c1.as_str()))
+            .unwrap();
+        assert_eq!(repo.ref_commit("refs/stacc/data").unwrap(), Some(c2));
     }
 }
