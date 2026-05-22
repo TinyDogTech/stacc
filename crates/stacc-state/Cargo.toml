@@ -10,3 +10,8 @@ authors.workspace = true
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
+thiserror = { workspace = true }
+stacc-git = { path = "../stacc-git" }
+
+[dev-dependencies]
+tempfile = { workspace = true }
