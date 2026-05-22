@@ -421,6 +421,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
 dependencies = [
  "serde_core",
+ "serde_derive",
 ]
 
 [[package]]
@@ -489,6 +490,13 @@ version = "0.0.0"
 [[package]]
 name = "stacc-state"
 version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "stacc-git",
+ "tempfile",
+ "thiserror",
+]
 
 [[package]]
 name = "strsim"
