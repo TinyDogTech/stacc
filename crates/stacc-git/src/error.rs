@@ -15,3 +15,21 @@ pub enum GitError {
         stderr: String,
     },
 }
+
+/// A rebase that stopped on a conflict and is waiting to be resolved.
+#[derive(Debug, Error)]
+#[error("rebase of `{branch}` stopped on a conflict")]
+pub struct RebaseInterrupt {
+    pub branch: String,
+}
+
+/// The outcome of a rebase that didn't succeed: either an ordinary git failure
+/// or a recoverable conflict the caller can resolve and continue.
+#[derive(Debug, Error)]
+pub enum RebaseError {
+    #[error(transparent)]
+    Git(#[from] GitError),
+
+    #[error(transparent)]
+    Interrupt(#[from] RebaseInterrupt),
+}
