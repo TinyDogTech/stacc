@@ -1,0 +1,87 @@
+//! Command-line interface definition.
+//!
+//! We use clap's *derive* API: the CLI is described as Rust structs and enums
+//! annotated with attributes, and clap generates the parser, `--help`, and
+//! validation from them.
+
+use clap::{Parser, Subcommand, ValueEnum};
+
+/// stacc — a stacked-diff CLI for AI coding agents.
+#[derive(Debug, Parser)]
+#[command(name = "stacc", version, long_about = None)]
+pub struct Cli {
+    /// Flags shared by every subcommand (flattened in, so they read as if
+    /// declared directly on `Cli`).
+    #[command(flatten)]
+    pub global: GlobalArgs,
+
+    #[command(subcommand)]
+    pub command: Command,
+}
+
+/// Flags accepted by every subcommand. `global = true` lets them appear before
+/// or after the subcommand name (`stacc --format json log` or `stacc log
+/// --format json`).
+#[derive(Debug, clap::Args)]
+pub struct GlobalArgs {
+    /// Output format.
+    #[arg(long, value_enum, default_value = "pretty", global = true)]
+    pub format: OutputFormat,
+
+    /// When to use colored output.
+    #[arg(long, value_enum, default_value = "auto", global = true)]
+    pub color: ColorChoice,
+
+    /// Never prompt; fail with a structured error instead.
+    #[arg(long, global = true)]
+    pub no_interactive: bool,
+}
+
+/// How command output is rendered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum OutputFormat {
+    /// Human-readable, possibly colored.
+    Pretty,
+    /// Machine-readable JSON.
+    Json,
+}
+
+/// When to colorize human-readable output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ColorChoice {
+    /// Color only when writing to a terminal.
+    Auto,
+    Always,
+    Never,
+}
+
+/// The top-level commands. Each is a stub until its own ticket (STA-7+).
+#[derive(Debug, Subcommand)]
+pub enum Command {
+    /// Detect trunk and remote, and initialize the state ref.
+    Init,
+    /// Track the current branch as part of a stack.
+    Track,
+    /// Push branches and create or update PRs.
+    Submit,
+    /// Pull upstream changes, detect merges, and restack.
+    Sync,
+    /// Print the stack.
+    Log,
+    /// Show the current branch's position and PR status.
+    Status,
+}
+
+impl Command {
+    /// The command's name as the user typed it (used in output).
+    pub fn name(&self) -> &'static str {
+        match self {
+            Command::Init => "init",
+            Command::Track => "track",
+            Command::Submit => "submit",
+            Command::Sync => "sync",
+            Command::Log => "log",
+            Command::Status => "status",
+        }
+    }
+}

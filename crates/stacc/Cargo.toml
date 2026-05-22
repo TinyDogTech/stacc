@@ -14,3 +14,7 @@ name = "stacc"
 path = "src/main.rs"
 
 [dependencies]
+clap = { workspace = true }
+miette = { workspace = true }
+thiserror = { workspace = true }
+serde_json = { workspace = true }

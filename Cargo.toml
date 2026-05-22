@@ -14,5 +14,10 @@ repository = "https://github.com/TinyDogTech/stacc"
 authors = ["Jillian Kozyra <jilliankozyra@gmail.com>"]
 
 # Shared dependency versions. Crates opt in with `foo = { workspace = true }`
-# so the whole workspace pins one version of each. Populated as crates need deps.
+# so the whole workspace pins one version of each.
 [workspace.dependencies]
+clap = { version = "4", features = ["derive"] }
+miette = { version = "7", features = ["fancy"] }
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
