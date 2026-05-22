@@ -1,0 +1,18 @@
+# Workspace root. This manifest has no [package] of its own — it only groups
+# the member crates under crates/ so they build, test, and share dependency
+# versions together. This is called a "virtual workspace".
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+# Values every member crate can inherit with `key.workspace = true`, so we set
+# edition/license/etc. in one place instead of repeating them per crate.
+[workspace.package]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/TinyDogTech/stacc"
+authors = ["Jillian Kozyra <jilliankozyra@gmail.com>"]
+
+# Shared dependency versions. Crates opt in with `foo = { workspace = true }`
+# so the whole workspace pins one version of each. Populated as crates need deps.
+[workspace.dependencies]

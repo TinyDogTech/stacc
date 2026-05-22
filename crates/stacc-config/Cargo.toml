@@ -1,0 +1,10 @@
+[package]
+name = "stacc-config"
+version = "0.0.0"
+description = "Configuration and trunk/remote autodetection for stacc."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]

@@ -1,0 +1,10 @@
+[package]
+name = "stacc-core"
+version = "0.0.0"
+description = "Stack operations for stacc: submit, sync, restack."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
