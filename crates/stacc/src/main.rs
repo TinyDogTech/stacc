@@ -25,7 +25,8 @@ fn main() -> ExitCode {
 fn run(cli: &Cli) -> Result<(), Error> {
     match &cli.command {
         Command::Init(args) => commands::init(args, cli.global.format),
-        Command::Track | Command::Submit | Command::Sync | Command::Log | Command::Status => {
+        Command::Track(args) => commands::track(args, cli.global.format),
+        Command::Submit | Command::Sync | Command::Log | Command::Status => {
             Err(Error::NotImplemented(cli.command.name()))
         }
     }
