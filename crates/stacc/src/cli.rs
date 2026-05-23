@@ -58,7 +58,7 @@ pub enum Command {
     /// Detect trunk and remote, and initialize the state ref.
     Init(InitArgs),
     /// Track the current branch as part of a stack.
-    Track,
+    Track(TrackArgs),
     /// Push branches and create or update PRs.
     Submit,
     /// Pull upstream changes, detect merges, and restack.
@@ -80,12 +80,20 @@ pub struct InitArgs {
     pub remote: Option<String>,
 }
 
+/// Arguments for `stacc track`.
+#[derive(Debug, clap::Args)]
+pub struct TrackArgs {
+    /// Branch this one is stacked on (defaults to the trunk).
+    #[arg(long)]
+    pub base: Option<String>,
+}
+
 impl Command {
     /// The command's name as the user typed it (used in output).
     pub fn name(&self) -> &'static str {
         match self {
             Command::Init(_) => "init",
-            Command::Track => "track",
+            Command::Track(_) => "track",
             Command::Submit => "submit",
             Command::Sync => "sync",
             Command::Log => "log",

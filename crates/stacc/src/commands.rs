@@ -5,9 +5,9 @@ use std::path::Path;
 use serde_json::json;
 use stacc_config::{detect, read_file, resolve, Overrides};
 use stacc_git::Git;
-use stacc_state::{RepoConfig, StateStore};
+use stacc_state::{Base, BranchState, RepoConfig, StateStore};
 
-use crate::cli::{InitArgs, OutputFormat};
+use crate::cli::{InitArgs, OutputFormat, TrackArgs};
 use crate::error::Error;
 
 /// `stacc init` — detect trunk/remote, then record them in the state ref.
@@ -54,4 +54,49 @@ fn report(format: OutputFormat, status: &str, repo: &RepoConfig) {
             println!("{verb} stacc (trunk: {}, remote: {})", repo.trunk, repo.remote);
         }
     }
+}
+
+/// `stacc track` — record the current branch and its base in the state ref.
+pub fn track(args: &TrackArgs, format: OutputFormat) -> Result<(), Error> {
+    let git = Git::open(".");
+    let store = StateStore::new(git.clone());
+
+    let mut state = store.load()?;
+    let trunk = match &state.repo {
+        Some(repo) => repo.trunk.clone(),
+        None => {
+            return Err(Error::Usage(
+                "stacc is not initialized; run `stacc init` first".into(),
+            ))
+        }
+    };
+
+    let branch = git.current_branch()?;
+    if branch == trunk {
+        return Err(Error::Usage(format!("cannot track the trunk branch `{trunk}`")));
+    }
+
+    let base = args.base.clone().unwrap_or(trunk);
+    let base_hash = git.rev_parse(&base)?;
+
+    state.branches.insert(
+        branch.clone(),
+        BranchState {
+            base: Base {
+                name: base.clone(),
+                hash: base_hash,
+            },
+            pr: None,
+        },
+    );
+    store.save(&state)?;
+
+    match format {
+        OutputFormat::Json => println!(
+            "{}",
+            json!({ "status": "tracked", "branch": branch, "base": base })
+        ),
+        OutputFormat::Pretty => println!("Tracking {branch} (base: {base})"),
+    }
+    Ok(())
 }

@@ -23,6 +23,13 @@ pub enum Error {
 
     #[error(transparent)]
     State(#[from] stacc_state::StateError),
+
+    #[error(transparent)]
+    Git(#[from] stacc_git::GitError),
+
+    #[error("{0}")]
+    #[diagnostic(code(stacc::usage))]
+    Usage(String),
 }
 
 impl Error {
@@ -35,6 +42,8 @@ impl Error {
             }),
             Error::Config(err) => json!({ "error": "config", "message": err.to_string() }),
             Error::State(err) => json!({ "error": "state", "message": err.to_string() }),
+            Error::Git(err) => json!({ "error": "git", "message": err.to_string() }),
+            Error::Usage(msg) => json!({ "error": "usage", "message": msg }),
         }
     }
 }
