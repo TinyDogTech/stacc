@@ -1,8 +1,9 @@
 //! Implementations of the CLI subcommands.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
-use serde_json::json;
+use serde_json::{json, Value};
 use stacc_config::{detect, read_file, resolve, Overrides};
 use stacc_git::Git;
 use stacc_state::{Base, BranchState, RepoConfig, StateStore};
@@ -99,4 +100,83 @@ pub fn track(args: &TrackArgs, format: OutputFormat) -> Result<(), Error> {
         OutputFormat::Pretty => println!("Tracking {branch} (base: {base})"),
     }
     Ok(())
+}
+
+/// `stacc log` — render the tracked stack from the state ref.
+pub fn log(format: OutputFormat) -> Result<(), Error> {
+    let git = Git::open(".");
+    let store = StateStore::new(git);
+    let state = store.load()?;
+
+    let trunk = match &state.repo {
+        Some(repo) => repo.trunk.clone(),
+        None => {
+            return Err(Error::Usage(
+                "stacc is not initialized; run `stacc init` first".into(),
+            ))
+        }
+    };
+
+    // Group tracked branches by the base they're stacked on.
+    let mut children: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for (name, branch) in &state.branches {
+        children
+            .entry(branch.base.name.as_str())
+            .or_default()
+            .push(name.as_str());
+    }
+
+    match format {
+        OutputFormat::Json => {
+            let stack = stack_json(&trunk, &children, &state.branches);
+            println!("{}", json!({ "trunk": trunk, "stack": stack }));
+        }
+        OutputFormat::Pretty => {
+            println!("{trunk}");
+            print_stack(&trunk, &children, &state.branches, 1);
+        }
+    }
+    Ok(())
+}
+
+fn print_stack(
+    node: &str,
+    children: &BTreeMap<&str, Vec<&str>>,
+    branches: &BTreeMap<String, BranchState>,
+    depth: usize,
+) {
+    let Some(kids) = children.get(node) else {
+        return;
+    };
+    for &kid in kids {
+        let indent = "  ".repeat(depth);
+        let pr = branches
+            .get(kid)
+            .and_then(|b| b.pr.as_ref())
+            .map(|pr| format!(" (#{})", pr.number))
+            .unwrap_or_default();
+        println!("{indent}{kid}{pr}");
+        print_stack(kid, children, branches, depth + 1);
+    }
+}
+
+fn stack_json(
+    node: &str,
+    children: &BTreeMap<&str, Vec<&str>>,
+    branches: &BTreeMap<String, BranchState>,
+) -> Vec<Value> {
+    let Some(kids) = children.get(node) else {
+        return Vec::new();
+    };
+    kids.iter()
+        .map(|&kid| {
+            let pr = branches.get(kid).and_then(|b| b.pr.as_ref()).map(|p| p.number);
+            json!({
+                "name": kid,
+                "base": node,
+                "pr": pr,
+                "children": stack_json(kid, children, branches),
+            })
+        })
+        .collect()
 }
