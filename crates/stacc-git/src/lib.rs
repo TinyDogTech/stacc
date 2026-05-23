@@ -293,6 +293,32 @@ impl Git {
             .collect())
     }
 
+    /// The configured remote names (e.g. `["origin"]`).
+    pub fn remotes(&self) -> Result<Vec<String>, GitError> {
+        Ok(self
+            .run(&["remote"])?
+            .lines()
+            .map(|line| line.to_string())
+            .collect())
+    }
+
+    /// Resolve a symbolic ref to its short target, or `None` if `name` is not a
+    /// symbolic ref.
+    pub fn symbolic_ref(&self, name: &str) -> Result<Option<String>, GitError> {
+        let args = ["symbolic-ref", "--quiet", "--short", name];
+        let output = self
+            .command(&args)
+            .output()
+            .map_err(|source| GitError::Spawn { source })?;
+        match output.status.code() {
+            Some(0) => Ok(Some(
+                String::from_utf8_lossy(&output.stdout).trim().to_string(),
+            )),
+            Some(1) => Ok(None),
+            _ => Err(self.command_error(&args, &output)),
+        }
+    }
+
     fn run_with_stdin(&self, args: &[&str], input: &[u8]) -> Result<String, GitError> {
         use std::io::Write;
         let mut child = self
@@ -516,5 +542,23 @@ mod tests {
         repo.update_ref("refs/stacc/data", &c2, Some(c1.as_str()))
             .unwrap();
         assert_eq!(repo.ref_commit("refs/stacc/data").unwrap(), Some(c2));
+    }
+
+    #[test]
+    fn remotes_lists_configured_remotes() {
+        let (tmp, repo) = init_repo();
+        assert!(repo.remotes().unwrap().is_empty());
+        run_git(
+            tmp.path(),
+            &["remote", "add", "origin", "https://example.com/r.git"],
+        );
+        assert_eq!(repo.remotes().unwrap(), vec!["origin".to_string()]);
+    }
+
+    #[test]
+    fn symbolic_ref_resolves_head_and_rejects_direct() {
+        let (_tmp, repo) = init_repo();
+        assert_eq!(repo.symbolic_ref("HEAD").unwrap().as_deref(), Some("main"));
+        assert_eq!(repo.symbolic_ref("refs/heads/main").unwrap(), None);
     }
 }
