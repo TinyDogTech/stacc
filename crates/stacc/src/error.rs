@@ -1,8 +1,8 @@
 //! Error types for the CLI.
 //!
-//! `thiserror` derives the standard `Error` trait from an enum, and miette's
-//! `Diagnostic` adds an error code and a help note for pretty rendering. The
-//! `as_json` method produces the machine-readable form for `--format json`.
+//! `thiserror` derives the standard `Error` trait, miette's `Diagnostic` adds
+//! pretty rendering, and `as_json` produces the machine-readable form for
+//! `--format json`. Errors from the library crates are wrapped via `#[from]`.
 
 use miette::Diagnostic;
 use serde_json::{json, Value};
@@ -17,6 +17,12 @@ pub enum Error {
         help("This command is scaffolded but not wired up yet.")
     )]
     NotImplemented(&'static str),
+
+    #[error(transparent)]
+    Config(#[from] stacc_config::ConfigError),
+
+    #[error(transparent)]
+    State(#[from] stacc_state::StateError),
 }
 
 impl Error {
@@ -27,6 +33,8 @@ impl Error {
                 "error": "not_implemented",
                 "command": command,
             }),
+            Error::Config(err) => json!({ "error": "config", "message": err.to_string() }),
+            Error::State(err) => json!({ "error": "state", "message": err.to_string() }),
         }
     }
 }

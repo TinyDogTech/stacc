@@ -18,3 +18,9 @@ clap = { workspace = true }
 miette = { workspace = true }
 thiserror = { workspace = true }
 serde_json = { workspace = true }
+stacc-config = { path = "../stacc-config" }
+stacc-git = { path = "../stacc-git" }
+stacc-state = { path = "../stacc-state" }
+
+[dev-dependencies]
+tempfile = { workspace = true }

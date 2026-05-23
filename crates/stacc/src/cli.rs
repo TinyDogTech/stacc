@@ -10,8 +10,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 #[derive(Debug, Parser)]
 #[command(name = "stacc", version, long_about = None)]
 pub struct Cli {
-    /// Flags shared by every subcommand (flattened in, so they read as if
-    /// declared directly on `Cli`).
+    /// Flags shared by every subcommand.
     #[command(flatten)]
     pub global: GlobalArgs,
 
@@ -19,9 +18,7 @@ pub struct Cli {
     pub command: Command,
 }
 
-/// Flags accepted by every subcommand. `global = true` lets them appear before
-/// or after the subcommand name (`stacc --format json log` or `stacc log
-/// --format json`).
+/// Flags accepted by every subcommand.
 #[derive(Debug, clap::Args)]
 pub struct GlobalArgs {
     /// Output format.
@@ -55,11 +52,11 @@ pub enum ColorChoice {
     Never,
 }
 
-/// The top-level commands. Each is a stub until its own ticket (STA-7+).
+/// The top-level commands.
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Detect trunk and remote, and initialize the state ref.
-    Init,
+    Init(InitArgs),
     /// Track the current branch as part of a stack.
     Track,
     /// Push branches and create or update PRs.
@@ -72,11 +69,22 @@ pub enum Command {
     Status,
 }
 
+/// Arguments for `stacc init`.
+#[derive(Debug, clap::Args)]
+pub struct InitArgs {
+    /// Override the detected trunk branch.
+    #[arg(long)]
+    pub trunk: Option<String>,
+    /// Override the detected remote.
+    #[arg(long)]
+    pub remote: Option<String>,
+}
+
 impl Command {
     /// The command's name as the user typed it (used in output).
     pub fn name(&self) -> &'static str {
         match self {
-            Command::Init => "init",
+            Command::Init(_) => "init",
             Command::Track => "track",
             Command::Submit => "submit",
             Command::Sync => "sync",

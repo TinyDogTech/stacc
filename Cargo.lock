@@ -473,6 +473,10 @@ dependencies = [
  "clap",
  "miette",
  "serde_json",
+ "stacc-config",
+ "stacc-git",
+ "stacc-state",
+ "tempfile",
  "thiserror",
 ]
 
