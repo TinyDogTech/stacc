@@ -97,16 +97,3 @@ pub struct SubmitArgs {
     pub description: Option<String>,
 }
 
-impl Command {
-    /// The command's name as the user typed it (used in output).
-    pub fn name(&self) -> &'static str {
-        match self {
-            Command::Init(_) => "init",
-            Command::Track(_) => "track",
-            Command::Submit(_) => "submit",
-            Command::Sync => "sync",
-            Command::Log => "log",
-            Command::Status => "status",
-        }
-    }
-}

@@ -10,14 +10,6 @@ use thiserror::Error;
 
 #[derive(Debug, Error, Diagnostic)]
 pub enum Error {
-    /// A command exists in the CLI but has no behavior yet.
-    #[error("`{0}` is not implemented yet")]
-    #[diagnostic(
-        code(stacc::not_implemented),
-        help("This command is scaffolded but not wired up yet.")
-    )]
-    NotImplemented(&'static str),
-
     #[error(transparent)]
     Config(#[from] stacc_config::ConfigError),
 
@@ -39,10 +31,6 @@ impl Error {
     /// The machine-readable JSON form, used by `--format json`.
     pub fn as_json(&self) -> Value {
         match self {
-            Error::NotImplemented(command) => json!({
-                "error": "not_implemented",
-                "command": command,
-            }),
             Error::Config(err) => json!({ "error": "config", "message": err.to_string() }),
             Error::State(err) => json!({ "error": "state", "message": err.to_string() }),
             Error::Git(err) => json!({ "error": "git", "message": err.to_string() }),

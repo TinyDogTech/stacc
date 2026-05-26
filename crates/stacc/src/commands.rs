@@ -1,6 +1,6 @@
 //! Implementations of the CLI subcommands.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use serde_json::{json, Value};
@@ -362,4 +362,104 @@ fn resolve_description(value: &str) -> Result<String, Error> {
             .map_err(|e| Error::Usage(format!("failed to read description file `{path}`: {e}"))),
         None => Ok(value.to_string()),
     }
+}
+
+/// `stacc sync` — reconcile merged PRs into the stack.
+///
+/// Stage 1: detect branches whose PR has merged, re-parent their children onto
+/// the nearest surviving base, and drop the merged branches from state. Fetch +
+/// restack of the working branches arrive in a later stage.
+pub fn sync(format: OutputFormat) -> Result<(), Error> {
+    let git = Git::open(".");
+    let store = StateStore::new(git.clone());
+    let mut state = store.load()?;
+    let repo = state
+        .repo
+        .clone()
+        .ok_or_else(|| Error::Usage("stacc is not initialized; run `stacc init` first".into()))?;
+
+    // Branches that have a recorded PR.
+    let with_prs: Vec<(String, u64)> = state
+        .branches
+        .iter()
+        .filter_map(|(name, b)| b.pr.as_ref().map(|pr| (name.clone(), pr.number)))
+        .collect();
+
+    // Ask GitHub which of those PRs have merged.
+    let mut merged: BTreeSet<String> = BTreeSet::new();
+    if !with_prs.is_empty() {
+        let (owner, repo_name) = stacc_github::parse_remote(&git.remote_url(&repo.remote)?)
+            .ok_or_else(|| Error::Usage(format!("remote `{}` is not a GitHub URL", repo.remote)))?;
+        let github = GitHub::from_env()?;
+        for (name, number) in &with_prs {
+            if github.get_pull_request(&owner, &repo_name, *number)?.state == PrState::Merged {
+                merged.insert(name.clone());
+            }
+        }
+    }
+
+    // Re-parent children of merged branches onto the nearest surviving base.
+    let mut reparented: Vec<(String, String)> = Vec::new();
+    for (name, branch) in &state.branches {
+        if merged.contains(name) {
+            continue;
+        }
+        let new_base = resolve_base(&state.branches, &merged, branch.base.name.clone());
+        if new_base != branch.base.name {
+            reparented.push((name.clone(), new_base));
+        }
+    }
+    for (name, new_base) in &reparented {
+        if let Some(branch) = state.branches.get_mut(name) {
+            branch.base.name = new_base.clone();
+        }
+    }
+    for name in &merged {
+        state.branches.remove(name);
+    }
+
+    store.save(&state)?;
+
+    match format {
+        OutputFormat::Json => {
+            let merged_list: Vec<&String> = merged.iter().collect();
+            let reparented_list: Vec<serde_json::Value> = reparented
+                .iter()
+                .map(|(branch, base)| json!({ "branch": branch, "base": base }))
+                .collect();
+            println!(
+                "{}",
+                json!({ "merged": merged_list, "reparented": reparented_list })
+            );
+        }
+        OutputFormat::Pretty => {
+            if merged.is_empty() && reparented.is_empty() {
+                println!("Already up to date.");
+            } else {
+                for name in &merged {
+                    println!("Merged, untracked: {name}");
+                }
+                for (name, base) in &reparented {
+                    println!("Re-parented {name} -> {base}");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Follow `base` up the stack, skipping any merged branches, to the nearest
+/// surviving base (eventually the trunk).
+fn resolve_base(
+    branches: &BTreeMap<String, BranchState>,
+    merged: &BTreeSet<String>,
+    mut base: String,
+) -> String {
+    while merged.contains(&base) {
+        match branches.get(&base) {
+            Some(branch) => base = branch.base.name.clone(),
+            None => break,
+        }
+    }
+    base
 }

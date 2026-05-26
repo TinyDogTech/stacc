@@ -29,7 +29,7 @@ fn run(cli: &Cli) -> Result<(), Error> {
         Command::Log => commands::log(cli.global.format),
         Command::Status => commands::status(cli.global.format),
         Command::Submit(args) => commands::submit(args, cli.global.format),
-        Command::Sync => Err(Error::NotImplemented(cli.command.name())),
+        Command::Sync => commands::sync(cli.global.format),
     }
 }
 
