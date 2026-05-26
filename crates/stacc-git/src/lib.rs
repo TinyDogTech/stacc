@@ -157,7 +157,7 @@ impl Git {
         self.run(&["fetch", remote, refspec]).map(|_| ())
     }
 
-    fn git_dir(&self) -> Result<PathBuf, GitError> {
+    pub fn git_dir(&self) -> Result<PathBuf, GitError> {
         let dir = self.run(&["rev-parse", "--git-dir"])?;
         Ok(self.dir.join(dir))
     }
@@ -317,6 +317,15 @@ impl Git {
     /// The body (the message after the subject) of `rev`'s tip commit.
     pub fn commit_body(&self, rev: &str) -> Result<String, GitError> {
         self.run(&["log", "-1", "--format=%b", rev])
+    }
+
+    /// Paths with unresolved merge conflicts in the working tree.
+    pub fn conflicted_files(&self) -> Result<Vec<String>, GitError> {
+        Ok(self
+            .run(&["diff", "--name-only", "--diff-filter=U"])?
+            .lines()
+            .map(|line| line.to_string())
+            .collect())
     }
 
     /// Resolve a symbolic ref to its short target, or `None` if `name` is not a
