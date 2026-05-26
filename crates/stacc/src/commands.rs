@@ -6,6 +6,7 @@ use std::path::Path;
 use serde_json::{json, Value};
 use stacc_config::{detect, read_file, resolve, Overrides};
 use stacc_git::Git;
+use stacc_github::{GitHub, PrState};
 use stacc_state::{Base, BranchState, RepoConfig, StateStore};
 
 use crate::cli::{InitArgs, OutputFormat, TrackArgs};
@@ -179,4 +180,87 @@ fn stack_json(
             })
         })
         .collect()
+}
+
+/// `stacc status` — the current branch's position in the stack and its PR state.
+pub fn status(format: OutputFormat) -> Result<(), Error> {
+    let git = Git::open(".");
+    let store = StateStore::new(git.clone());
+    let state = store.load()?;
+    let repo = state
+        .repo
+        .clone()
+        .ok_or_else(|| Error::Usage("stacc is not initialized; run `stacc init` first".into()))?;
+
+    let branch = git.current_branch()?;
+
+    if branch == repo.trunk {
+        match format {
+            OutputFormat::Json => println!("{}", json!({ "branch": branch, "trunk": true })),
+            OutputFormat::Pretty => println!("{branch} (trunk)"),
+        }
+        return Ok(());
+    }
+
+    let Some(branch_state) = state.branches.get(&branch) else {
+        match format {
+            OutputFormat::Json => println!("{}", json!({ "branch": branch, "tracked": false })),
+            OutputFormat::Pretty => println!("{branch} (not tracked)"),
+        }
+        return Ok(());
+    };
+
+    let children: Vec<&str> = state
+        .branches
+        .iter()
+        .filter(|(_, b)| b.base.name == branch)
+        .map(|(name, _)| name.as_str())
+        .collect();
+
+    // Fetch the live PR state only when a PR is recorded for this branch.
+    let pr = match &branch_state.pr {
+        Some(pr) => {
+            let url = git.remote_url(&repo.remote)?;
+            let (owner, repo_name) = stacc_github::parse_remote(&url).ok_or_else(|| {
+                Error::Usage(format!("remote `{}` is not a GitHub URL", repo.remote))
+            })?;
+            let live = GitHub::from_env()?.get_pull_request(&owner, &repo_name, pr.number)?;
+            Some((pr.number, live.state))
+        }
+        None => None,
+    };
+
+    match format {
+        OutputFormat::Json => {
+            let pr_json =
+                pr.map(|(number, state)| json!({ "number": number, "state": pr_state_str(state) }));
+            println!(
+                "{}",
+                json!({
+                    "branch": branch,
+                    "base": branch_state.base.name,
+                    "children": children,
+                    "pr": pr_json,
+                })
+            );
+        }
+        OutputFormat::Pretty => {
+            println!("{branch} (base: {})", branch_state.base.name);
+            if let Some((number, state)) = pr {
+                println!("  PR #{number}: {}", pr_state_str(state));
+            }
+            if !children.is_empty() {
+                println!("  children: {}", children.join(", "));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn pr_state_str(state: PrState) -> &'static str {
+    match state {
+        PrState::Open => "open",
+        PrState::Closed => "closed",
+        PrState::Merged => "merged",
+    }
 }

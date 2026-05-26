@@ -27,6 +27,9 @@ pub enum Error {
     #[error(transparent)]
     Git(#[from] stacc_git::GitError),
 
+    #[error(transparent)]
+    Github(#[from] stacc_github::GitHubError),
+
     #[error("{0}")]
     #[diagnostic(code(stacc::usage))]
     Usage(String),
@@ -43,6 +46,7 @@ impl Error {
             Error::Config(err) => json!({ "error": "config", "message": err.to_string() }),
             Error::State(err) => json!({ "error": "state", "message": err.to_string() }),
             Error::Git(err) => json!({ "error": "git", "message": err.to_string() }),
+            Error::Github(err) => json!({ "error": "github", "message": err.to_string() }),
             Error::Usage(msg) => json!({ "error": "usage", "message": msg }),
         }
     }

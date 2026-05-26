@@ -302,6 +302,11 @@ impl Git {
             .collect())
     }
 
+    /// The URL configured for `remote` (e.g. its fetch URL).
+    pub fn remote_url(&self, remote: &str) -> Result<String, GitError> {
+        self.run(&["remote", "get-url", remote])
+    }
+
     /// Resolve a symbolic ref to its short target, or `None` if `name` is not a
     /// symbolic ref.
     pub fn symbolic_ref(&self, name: &str) -> Result<Option<String>, GitError> {
