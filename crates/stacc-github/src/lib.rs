@@ -95,12 +95,15 @@ impl GitHub {
         }
     }
 
-    /// Build a client from `GITHUB_TOKEN` or `GH_TOKEN` in the environment.
+    /// Build a client from `GITHUB_TOKEN`/`GH_TOKEN` in the environment.
+    /// `GITHUB_API_URL` overrides the base URL (for GitHub Enterprise or tests).
     pub fn from_env() -> Result<Self, GitHubError> {
         let token = std::env::var("GITHUB_TOKEN")
             .or_else(|_| std::env::var("GH_TOKEN"))
             .map_err(|_| GitHubError::MissingToken)?;
-        Ok(Self::new(token))
+        let base_url =
+            std::env::var("GITHUB_API_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
+        Ok(Self::with_base_url(token, base_url))
     }
 
     /// The login of the authenticated user (`GET /user`). Proves the token works.

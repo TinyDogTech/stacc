@@ -1618,10 +1618,12 @@ name = "stacc"
 version = "0.0.0"
 dependencies = [
  "clap",
+ "httpmock",
  "miette",
  "serde_json",
  "stacc-config",
  "stacc-git",
+ "stacc-github",
  "stacc-state",
  "tempfile",
  "thiserror 2.0.18",
