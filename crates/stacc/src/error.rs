@@ -10,14 +10,6 @@ use thiserror::Error;
 
 #[derive(Debug, Error, Diagnostic)]
 pub enum Error {
-    /// A command exists in the CLI but has no behavior yet.
-    #[error("`{0}` is not implemented yet")]
-    #[diagnostic(
-        code(stacc::not_implemented),
-        help("This command is scaffolded but not wired up yet.")
-    )]
-    NotImplemented(&'static str),
-
     #[error(transparent)]
     Config(#[from] stacc_config::ConfigError),
 
@@ -30,6 +22,10 @@ pub enum Error {
     #[error(transparent)]
     Github(#[from] stacc_github::GitHubError),
 
+    #[error("rebase conflict on `{branch}`; resolve it, then re-run `stacc sync`")]
+    #[diagnostic(code(stacc::conflict))]
+    Conflict { branch: String },
+
     #[error("{0}")]
     #[diagnostic(code(stacc::usage))]
     Usage(String),
@@ -39,14 +35,11 @@ impl Error {
     /// The machine-readable JSON form, used by `--format json`.
     pub fn as_json(&self) -> Value {
         match self {
-            Error::NotImplemented(command) => json!({
-                "error": "not_implemented",
-                "command": command,
-            }),
             Error::Config(err) => json!({ "error": "config", "message": err.to_string() }),
             Error::State(err) => json!({ "error": "state", "message": err.to_string() }),
             Error::Git(err) => json!({ "error": "git", "message": err.to_string() }),
             Error::Github(err) => json!({ "error": "github", "message": err.to_string() }),
+            Error::Conflict { branch } => json!({ "error": "conflict", "branch": branch }),
             Error::Usage(msg) => json!({ "error": "usage", "message": msg }),
         }
     }

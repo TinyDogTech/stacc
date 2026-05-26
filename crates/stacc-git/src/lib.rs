@@ -22,8 +22,10 @@ impl Git {
     fn command(&self, args: &[&str]) -> Command {
         let mut cmd = Command::new("git");
         cmd.arg("-C").arg(&self.dir).args(args);
-        // stacc is non-interactive: git must never open an editor.
+        // stacc is non-interactive: git must never open an editor or prompt for
+        // credentials (fail fast instead).
         cmd.env("GIT_EDITOR", "true");
+        cmd.env("GIT_TERMINAL_PROMPT", "0");
         cmd
     }
 

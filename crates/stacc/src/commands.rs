@@ -1,11 +1,11 @@
 //! Implementations of the CLI subcommands.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use serde_json::{json, Value};
 use stacc_config::{detect, read_file, resolve, Overrides};
-use stacc_git::Git;
+use stacc_git::{Git, RebaseError};
 use stacc_github::{GitHub, NewPullRequest, PrState, PullRequestUpdate};
 use stacc_state::{Base, BranchState, PullRequest, RepoConfig, StateStore};
 
@@ -362,4 +362,180 @@ fn resolve_description(value: &str) -> Result<String, Error> {
             .map_err(|e| Error::Usage(format!("failed to read description file `{path}`: {e}"))),
         None => Ok(value.to_string()),
     }
+}
+
+/// `stacc sync` — reconcile merged PRs and restack the stack.
+///
+/// Detects branches whose PR has merged (re-parenting their children and
+/// dropping them), pulls the trunk from upstream, then restacks the remaining
+/// branches bottom-up onto their bases.
+pub fn sync(format: OutputFormat) -> Result<(), Error> {
+    let git = Git::open(".");
+    let store = StateStore::new(git.clone());
+    let mut state = store.load()?;
+    let repo = state
+        .repo
+        .clone()
+        .ok_or_else(|| Error::Usage("stacc is not initialized; run `stacc init` first".into()))?;
+
+    // Branches that have a recorded PR.
+    let with_prs: Vec<(String, u64)> = state
+        .branches
+        .iter()
+        .filter_map(|(name, b)| b.pr.as_ref().map(|pr| (name.clone(), pr.number)))
+        .collect();
+
+    // Ask GitHub which of those PRs have merged.
+    let mut merged: BTreeSet<String> = BTreeSet::new();
+    if !with_prs.is_empty() {
+        let (owner, repo_name) = stacc_github::parse_remote(&git.remote_url(&repo.remote)?)
+            .ok_or_else(|| Error::Usage(format!("remote `{}` is not a GitHub URL", repo.remote)))?;
+        let github = GitHub::from_env()?;
+        for (name, number) in &with_prs {
+            if github.get_pull_request(&owner, &repo_name, *number)?.state == PrState::Merged {
+                merged.insert(name.clone());
+            }
+        }
+    }
+
+    // Re-parent children of merged branches onto the nearest surviving base.
+    let mut reparented: Vec<(String, String)> = Vec::new();
+    for (name, branch) in &state.branches {
+        if merged.contains(name) {
+            continue;
+        }
+        let new_base = resolve_base(&state.branches, &merged, branch.base.name.clone());
+        if new_base != branch.base.name {
+            reparented.push((name.clone(), new_base));
+        }
+    }
+    for (name, new_base) in &reparented {
+        if let Some(branch) = state.branches.get_mut(name) {
+            branch.base.name = new_base.clone();
+        }
+    }
+    for name in &merged {
+        state.branches.remove(name);
+    }
+
+    // Pull the trunk from upstream (best-effort: a restack still works offline).
+    if let Err(err) = fast_forward_trunk(&git, &repo.remote, &repo.trunk) {
+        eprintln!("warning: could not update trunk from `{}`: {err}", repo.remote);
+    }
+
+    // Restack the remaining branches bottom-up onto their bases.
+    let mut restacked: Vec<String> = Vec::new();
+    for branch in topo_order(&state.branches, &repo.trunk) {
+        let base = state.branches[&branch].base.clone();
+        let base_tip = git.rev_parse(&base.name)?;
+        if git.is_ancestor(&base_tip, &branch)? {
+            continue; // already on top of its base
+        }
+        match git.rebase_onto(&base_tip, &base.hash, &branch) {
+            Ok(()) => {}
+            Err(RebaseError::Interrupt(interrupt)) => {
+                return Err(Error::Conflict {
+                    branch: interrupt.branch,
+                })
+            }
+            Err(RebaseError::Git(err)) => return Err(err.into()),
+        }
+        if let Some(b) = state.branches.get_mut(&branch) {
+            b.base.hash = base_tip.clone();
+        }
+        restacked.push(branch);
+    }
+
+    store.save(&state)?;
+    if let Err(err) = store.push(&repo.remote) {
+        eprintln!("warning: could not push state to `{}`: {err}", repo.remote);
+    }
+
+    match format {
+        OutputFormat::Json => {
+            let merged_list: Vec<&String> = merged.iter().collect();
+            let reparented_list: Vec<serde_json::Value> = reparented
+                .iter()
+                .map(|(branch, base)| json!({ "branch": branch, "base": base }))
+                .collect();
+            println!(
+                "{}",
+                json!({
+                    "merged": merged_list,
+                    "reparented": reparented_list,
+                    "restacked": restacked,
+                })
+            );
+        }
+        OutputFormat::Pretty => {
+            if merged.is_empty() && reparented.is_empty() && restacked.is_empty() {
+                println!("Already up to date.");
+            } else {
+                for name in &merged {
+                    println!("Merged, untracked: {name}");
+                }
+                for (name, base) in &reparented {
+                    println!("Re-parented {name} -> {base}");
+                }
+                for name in &restacked {
+                    println!("Restacked {name}");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Follow `base` up the stack, skipping any merged branches, to the nearest
+/// surviving base (eventually the trunk).
+fn resolve_base(
+    branches: &BTreeMap<String, BranchState>,
+    merged: &BTreeSet<String>,
+    mut base: String,
+) -> String {
+    while merged.contains(&base) {
+        match branches.get(&base) {
+            Some(branch) => base = branch.base.name.clone(),
+            None => break,
+        }
+    }
+    base
+}
+
+/// Fetch the trunk from `remote` and fast-forward the local trunk to it.
+fn fast_forward_trunk(git: &Git, remote: &str, trunk: &str) -> Result<(), Error> {
+    git.fetch(remote, trunk)?;
+    let remote_tip = git.rev_parse(&format!("{remote}/{trunk}"))?;
+    let local_tip = git.rev_parse(trunk)?;
+    if local_tip != remote_tip && git.is_ancestor(&local_tip, &remote_tip)? {
+        git.update_ref(
+            &format!("refs/heads/{trunk}"),
+            &remote_tip,
+            Some(local_tip.as_str()),
+        )?;
+    }
+    Ok(())
+}
+
+/// Order the tracked branches bottom-up: a branch appears after its base.
+fn topo_order(branches: &BTreeMap<String, BranchState>, trunk: &str) -> Vec<String> {
+    let mut emitted: BTreeSet<String> = BTreeSet::new();
+    let mut order: Vec<String> = Vec::new();
+    loop {
+        let mut progressed = false;
+        for (name, branch) in branches {
+            if emitted.contains(name) {
+                continue;
+            }
+            if branch.base.name == trunk || emitted.contains(&branch.base.name) {
+                order.push(name.clone());
+                emitted.insert(name.clone());
+                progressed = true;
+            }
+        }
+        if !progressed {
+            break;
+        }
+    }
+    order
 }
