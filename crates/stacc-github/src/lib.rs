@@ -24,6 +24,8 @@ pub struct PullRequest {
     pub number: u64,
     pub url: String,
     pub state: PrState,
+    pub title: String,
+    pub body: String,
 }
 
 /// Fields for creating a pull request.
@@ -54,6 +56,10 @@ struct RawPullRequest {
     state: String,
     #[serde(default)]
     merged: bool,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    body: Option<String>,
 }
 
 impl From<RawPullRequest> for PullRequest {
@@ -69,6 +75,8 @@ impl From<RawPullRequest> for PullRequest {
             number: raw.number,
             url: raw.html_url,
             state,
+            title: raw.title,
+            body: raw.body.unwrap_or_default(),
         }
     }
 }
@@ -222,34 +230,22 @@ mod tests {
         assert_eq!(parse_remote("not a url"), None);
     }
 
+    fn raw(state: &str, merged: bool) -> RawPullRequest {
+        RawPullRequest {
+            number: 1,
+            html_url: "u".into(),
+            state: state.into(),
+            merged,
+            title: "t".into(),
+            body: None,
+        }
+    }
+
     #[test]
     fn pr_state_mapping_covers_all_states() {
-        let merged: PullRequest = RawPullRequest {
-            number: 1,
-            html_url: "u".into(),
-            state: "closed".into(),
-            merged: true,
-        }
-        .into();
-        assert_eq!(merged.state, PrState::Merged);
-
-        let closed: PullRequest = RawPullRequest {
-            number: 1,
-            html_url: "u".into(),
-            state: "closed".into(),
-            merged: false,
-        }
-        .into();
-        assert_eq!(closed.state, PrState::Closed);
-
-        let open: PullRequest = RawPullRequest {
-            number: 1,
-            html_url: "u".into(),
-            state: "open".into(),
-            merged: false,
-        }
-        .into();
-        assert_eq!(open.state, PrState::Open);
+        assert_eq!(PullRequest::from(raw("closed", true)).state, PrState::Merged);
+        assert_eq!(PullRequest::from(raw("closed", false)).state, PrState::Closed);
+        assert_eq!(PullRequest::from(raw("open", false)).state, PrState::Open);
     }
 
     #[test]

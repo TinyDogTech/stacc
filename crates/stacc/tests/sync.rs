@@ -184,7 +184,7 @@ fn sync_restacks_onto_advanced_trunk() {
 }
 
 #[test]
-fn sync_surfaces_conflict() {
+fn sync_conflict_writes_context_then_continue_completes() {
     let tmp = repo();
     assert!(stacc(tmp.path(), &["init"]).status.success());
 
@@ -197,9 +197,32 @@ fn sync_surfaces_conflict() {
     commit_file(tmp.path(), "conflict.txt", "main\n", "trunk edit");
     run_git(tmp.path(), &["checkout", "-q", "feature"]);
 
+    // First sync: conflict -> structured error + context + continuation files.
     let out = stacc(tmp.path(), &["sync", "--format", "json"]);
     assert!(!out.status.success());
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains(r#""error":"conflict""#), "got: {s}");
     assert!(s.contains(r#""branch":"feature""#), "got: {s}");
+
+    let git_dir = tmp.path().join(".git");
+    let ctx_path = git_dir.join("stacc-conflict-context.json");
+    assert!(ctx_path.exists(), "context file missing");
+    let ctx = std::fs::read_to_string(&ctx_path).unwrap();
+    assert!(ctx.contains(r#""branch": "feature""#), "ctx: {ctx}");
+    assert!(ctx.contains("conflict.txt"), "ctx: {ctx}");
+    assert!(git_dir.join("stacc-continue.json").exists(), "continuation missing");
+
+    // Resolve the conflict, then continue.
+    write(tmp.path(), "conflict.txt", "resolved\n");
+    run_git(tmp.path(), &["add", "conflict.txt"]);
+
+    let out2 = stacc(tmp.path(), &["sync", "--continue", "--format", "json"]);
+    assert!(out2.status.success(), "stderr: {}", String::from_utf8_lossy(&out2.stderr));
+    let s2 = String::from_utf8_lossy(&out2.stdout);
+    assert!(s2.contains(r#""restacked":["feature"]"#), "got: {s2}");
+
+    // Artifacts cleared; feature now sits on the advanced trunk.
+    assert!(!git_dir.join("stacc-continue.json").exists());
+    assert!(!ctx_path.exists());
+    assert!(git_ok(tmp.path(), &["merge-base", "--is-ancestor", "main", "feature"]));
 }

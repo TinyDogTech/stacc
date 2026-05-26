@@ -62,7 +62,7 @@ pub enum Command {
     /// Push branches and create or update PRs.
     Submit(SubmitArgs),
     /// Pull upstream changes, detect merges, and restack.
-    Sync,
+    Sync(SyncArgs),
     /// Print the stack.
     Log,
     /// Show the current branch's position and PR status.
@@ -95,5 +95,13 @@ pub struct SubmitArgs {
     /// Defaults to the branch's latest commit body.
     #[arg(long)]
     pub description: Option<String>,
+}
+
+/// Arguments for `stacc sync`.
+#[derive(Debug, clap::Args)]
+pub struct SyncArgs {
+    /// Resume a sync that stopped on a conflict, after resolving it.
+    #[arg(long = "continue")]
+    pub continue_: bool,
 }
 

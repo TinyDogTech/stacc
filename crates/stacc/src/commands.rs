@@ -7,9 +7,9 @@ use serde_json::{json, Value};
 use stacc_config::{detect, read_file, resolve, Overrides};
 use stacc_git::{Git, RebaseError};
 use stacc_github::{GitHub, NewPullRequest, PrState, PullRequestUpdate};
-use stacc_state::{Base, BranchState, PullRequest, RepoConfig, StateStore};
+use stacc_state::{Base, BranchState, PullRequest, RepoConfig, State, StateStore};
 
-use crate::cli::{InitArgs, OutputFormat, SubmitArgs, TrackArgs};
+use crate::cli::{InitArgs, OutputFormat, SubmitArgs, SyncArgs, TrackArgs};
 use crate::error::Error;
 
 /// `stacc init` — detect trunk/remote, then record them in the state ref.
@@ -369,7 +369,7 @@ fn resolve_description(value: &str) -> Result<String, Error> {
 /// Detects branches whose PR has merged (re-parenting their children and
 /// dropping them), pulls the trunk from upstream, then restacks the remaining
 /// branches bottom-up onto their bases.
-pub fn sync(format: OutputFormat) -> Result<(), Error> {
+pub fn sync(args: &SyncArgs, format: OutputFormat) -> Result<(), Error> {
     let git = Git::open(".");
     let store = StateStore::new(git.clone());
     let mut state = store.load()?;
@@ -377,6 +377,10 @@ pub fn sync(format: OutputFormat) -> Result<(), Error> {
         .repo
         .clone()
         .ok_or_else(|| Error::Usage("stacc is not initialized; run `stacc init` first".into()))?;
+
+    if args.continue_ {
+        return sync_continue(&git, &store, &mut state, &repo, format);
+    }
 
     // Branches that have a recorded PR.
     let with_prs: Vec<(String, u64)> = state
@@ -423,38 +427,113 @@ pub fn sync(format: OutputFormat) -> Result<(), Error> {
         eprintln!("warning: could not update trunk from `{}`: {err}", repo.remote);
     }
 
-    // Restack the remaining branches bottom-up onto their bases.
+    // Pull-and-restack the remaining branches bottom-up onto their bases.
+    let order = topo_order(&state.branches, &repo.trunk);
+    let restacked = restack(&git, &store, &mut state, &repo, &order)?;
+
+    store.save(&state)?;
+    finish_sync(&git, &store, &repo);
+    report_sync(format, &merged, &reparented, &restacked);
+    Ok(())
+}
+
+/// Finish the in-progress rebase, then replay the remaining branches.
+fn sync_continue(
+    git: &Git,
+    store: &StateStore,
+    state: &mut State,
+    repo: &RepoConfig,
+    format: OutputFormat,
+) -> Result<(), Error> {
+    let remaining = read_continuation(git)?;
+
+    match git.rebase_continue() {
+        Ok(()) => {}
+        Err(RebaseError::Interrupt(_)) => {
+            // Still conflicting on the same branch; the context file stands.
+            let branch = remaining.first().cloned().unwrap_or_default();
+            return Err(Error::Conflict { branch });
+        }
+        Err(RebaseError::Git(err)) => return Err(err.into()),
+    }
+
+    // The first entry's rebase just completed: record its new base hash.
     let mut restacked: Vec<String> = Vec::new();
-    for branch in topo_order(&state.branches, &repo.trunk) {
-        let base = state.branches[&branch].base.clone();
+    if let Some(first) = remaining.first() {
+        if let Some(base_name) = state.branches.get(first).map(|b| b.base.name.clone()) {
+            let base_tip = git.rev_parse(&base_name)?;
+            if let Some(b) = state.branches.get_mut(first) {
+                b.base.hash = base_tip;
+            }
+        }
+        restacked.push(first.clone());
+    }
+
+    let rest: Vec<String> = remaining.into_iter().skip(1).collect();
+    restacked.extend(restack(git, store, state, repo, &rest)?);
+
+    store.save(state)?;
+    finish_sync(git, store, repo);
+    report_sync(format, &BTreeSet::new(), &[], &restacked);
+    Ok(())
+}
+
+/// Restack `order` bottom-up. On a conflict, persist the remaining work plus a
+/// context file, then return `Error::Conflict`.
+fn restack(
+    git: &Git,
+    store: &StateStore,
+    state: &mut State,
+    repo: &RepoConfig,
+    order: &[String],
+) -> Result<Vec<String>, Error> {
+    let mut restacked = Vec::new();
+    for (idx, branch) in order.iter().enumerate() {
+        let Some(base) = state.branches.get(branch).map(|b| b.base.clone()) else {
+            continue;
+        };
         let base_tip = git.rev_parse(&base.name)?;
-        if git.is_ancestor(&base_tip, &branch)? {
+        if git.is_ancestor(&base_tip, branch)? {
             continue; // already on top of its base
         }
-        match git.rebase_onto(&base_tip, &base.hash, &branch) {
+        match git.rebase_onto(&base_tip, &base.hash, branch) {
             Ok(()) => {}
-            Err(RebaseError::Interrupt(interrupt)) => {
+            Err(RebaseError::Interrupt(_)) => {
+                store.save(state)?;
+                write_continuation(git, &order[idx..])?;
+                write_conflict_context(git, state, repo, branch);
                 return Err(Error::Conflict {
-                    branch: interrupt.branch,
-                })
+                    branch: branch.clone(),
+                });
             }
             Err(RebaseError::Git(err)) => return Err(err.into()),
         }
-        if let Some(b) = state.branches.get_mut(&branch) {
+        if let Some(b) = state.branches.get_mut(branch) {
             b.base.hash = base_tip.clone();
         }
-        restacked.push(branch);
+        restacked.push(branch.clone());
     }
+    Ok(restacked)
+}
 
-    store.save(&state)?;
+/// Push the state ref (best-effort) and clear any conflict artifacts.
+fn finish_sync(git: &Git, store: &StateStore, repo: &RepoConfig) {
     if let Err(err) = store.push(&repo.remote) {
         eprintln!("warning: could not push state to `{}`: {err}", repo.remote);
     }
+    clear_conflict_artifacts(git);
+}
 
+fn report_sync(
+    format: OutputFormat,
+    merged: &BTreeSet<String>,
+    reparented: &[(String, String)],
+    restacked: &[String],
+) {
     match format {
         OutputFormat::Json => {
             let merged_list: Vec<&String> = merged.iter().collect();
-            let reparented_list: Vec<serde_json::Value> = reparented
+            let reparented_list: Vec<Value> = reparented
                 .iter()
                 .map(|(branch, base)| json!({ "branch": branch, "base": base }))
                 .collect();
@@ -471,19 +550,72 @@ pub fn sync(format: OutputFormat) -> Result<(), Error> {
             if merged.is_empty() && reparented.is_empty() && restacked.is_empty() {
                 println!("Already up to date.");
             } else {
-                for name in &merged {
+                for name in merged {
                     println!("Merged, untracked: {name}");
                 }
-                for (name, base) in &reparented {
+                for (name, base) in reparented {
                     println!("Re-parented {name} -> {base}");
                 }
-                for name in &restacked {
+                for name in restacked {
                     println!("Restacked {name}");
                 }
             }
         }
     }
-    Ok(())
+}
+
+/// Record the branches still to restack so `sync --continue` can resume.
+fn write_continuation(git: &Git, remaining: &[String]) -> Result<(), Error> {
+    let path = git.git_dir()?.join("stacc-continue.json");
+    let json = serde_json::to_string(remaining).unwrap_or_default();
+    std::fs::write(&path, json)
+        .map_err(|e| Error::Usage(format!("failed to write continuation: {e}")))
+}
+
+fn read_continuation(git: &Git) -> Result<Vec<String>, Error> {
+    let path = git.git_dir()?.join("stacc-continue.json");
+    let text = std::fs::read_to_string(&path)
+        .map_err(|_| Error::Usage("no sync in progress to continue".into()))?;
+    serde_json::from_str(&text).map_err(|e| Error::Usage(format!("corrupt continuation: {e}")))
+}
+
+fn clear_conflict_artifacts(git: &Git) {
+    if let Ok(dir) = git.git_dir() {
+        let _ = std::fs::remove_file(dir.join("stacc-continue.json"));
+        let _ = std::fs::remove_file(dir.join("stacc-conflict-context.json"));
+    }
+}
+
+/// Best-effort: write the conflict context for an agent to read and resolve.
+fn write_conflict_context(git: &Git, state: &State, repo: &RepoConfig, branch: &str) {
+    let base = state
+        .branches
+        .get(branch)
+        .map(|b| b.base.name.clone())
+        .unwrap_or_default();
+    let conflicted = git.conflicted_files().unwrap_or_default();
+    let base_pr = fetch_base_pr(git, repo, state, &base).unwrap_or(Value::Null);
+    let context = json!({
+        "branch": branch,
+        "base": base,
+        "conflicted_files": conflicted,
+        "base_pr": base_pr,
+    });
+    if let Ok(dir) = git.git_dir() {
+        let _ = std::fs::write(
+            dir.join("stacc-conflict-context.json"),
+            serde_json::to_string_pretty(&context).unwrap_or_default(),
+        );
+    }
+}
+
+/// The base branch's PR (number/title/body), if it has one. `None` on any
+/// failure — the context is best-effort.
+fn fetch_base_pr(git: &Git, repo: &RepoConfig, state: &State, base: &str) -> Option<Value> {
+    let number = state.branches.get(base)?.pr.as_ref()?.number;
+    let (owner, name) = stacc_github::parse_remote(&git.remote_url(&repo.remote).ok()?)?;
+    let pr = GitHub::from_env().ok()?.get_pull_request(&owner, &name, number).ok()?;
+    Some(json!({ "number": pr.number, "title": pr.title, "body": pr.body }))
 }
 
 /// Follow `base` up the stack, skipping any merged branches, to the nearest
