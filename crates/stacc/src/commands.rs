@@ -6,10 +6,10 @@ use std::path::Path;
 use serde_json::{json, Value};
 use stacc_config::{detect, read_file, resolve, Overrides};
 use stacc_git::Git;
-use stacc_github::{GitHub, PrState};
-use stacc_state::{Base, BranchState, RepoConfig, StateStore};
+use stacc_github::{GitHub, NewPullRequest, PrState, PullRequestUpdate};
+use stacc_state::{Base, BranchState, PullRequest, RepoConfig, StateStore};
 
-use crate::cli::{InitArgs, OutputFormat, TrackArgs};
+use crate::cli::{InitArgs, OutputFormat, SubmitArgs, TrackArgs};
 use crate::error::Error;
 
 /// `stacc init` — detect trunk/remote, then record them in the state ref.
@@ -262,5 +262,104 @@ fn pr_state_str(state: PrState) -> &'static str {
         PrState::Open => "open",
         PrState::Closed => "closed",
         PrState::Merged => "merged",
+    }
+}
+
+/// `stacc submit` — push the current branch and create or update its PR.
+pub fn submit(args: &SubmitArgs, format: OutputFormat) -> Result<(), Error> {
+    let git = Git::open(".");
+    let store = StateStore::new(git.clone());
+    let mut state = store.load()?;
+    let repo = state
+        .repo
+        .clone()
+        .ok_or_else(|| Error::Usage("stacc is not initialized; run `stacc init` first".into()))?;
+
+    let branch = git.current_branch()?;
+    if branch == repo.trunk {
+        return Err(Error::Usage("cannot submit the trunk branch".into()));
+    }
+    let base = match state.branches.get(&branch) {
+        Some(branch_state) => branch_state.base.name.clone(),
+        None => {
+            return Err(Error::Usage(format!(
+                "branch `{branch}` is not tracked; run `stacc track` first"
+            )))
+        }
+    };
+
+    let (owner, repo_name) = stacc_github::parse_remote(&git.remote_url(&repo.remote)?)
+        .ok_or_else(|| Error::Usage(format!("remote `{}` is not a GitHub URL", repo.remote)))?;
+    let github = GitHub::from_env()?;
+
+    // Push the branch before opening/updating its PR (GitHub needs the ref).
+    git.push(&repo.remote, &branch)?;
+
+    let title = git.commit_subject(&branch)?;
+    let body = match &args.description {
+        Some(value) => resolve_description(value)?,
+        None => git.commit_body(&branch)?,
+    };
+
+    let existing = state
+        .branches
+        .get(&branch)
+        .and_then(|b| b.pr.as_ref().map(|pr| pr.number));
+
+    let pr = match existing {
+        Some(number) => github.update_pull_request(
+            &owner,
+            &repo_name,
+            number,
+            &PullRequestUpdate {
+                title: Some(title),
+                body: Some(body),
+                base: Some(base),
+            },
+        )?,
+        None => github.create_pull_request(
+            &owner,
+            &repo_name,
+            &NewPullRequest {
+                title,
+                head: branch.clone(),
+                base,
+                body,
+            },
+        )?,
+    };
+
+    if let Some(branch_state) = state.branches.get_mut(&branch) {
+        branch_state.pr = Some(PullRequest {
+            number: pr.number,
+            url: Some(pr.url.clone()),
+        });
+    }
+    store.save(&state)?;
+
+    match format {
+        OutputFormat::Json => println!(
+            "{}",
+            json!({
+                "status": if existing.is_some() { "updated" } else { "created" },
+                "branch": branch,
+                "number": pr.number,
+                "url": pr.url,
+            })
+        ),
+        OutputFormat::Pretty => {
+            let verb = if existing.is_some() { "Updated" } else { "Created" };
+            println!("{verb} PR #{} for {branch}: {}", pr.number, pr.url);
+        }
+    }
+    Ok(())
+}
+
+/// Resolve a `--description` value: `@path` reads a file, anything else is literal.
+fn resolve_description(value: &str) -> Result<String, Error> {
+    match value.strip_prefix('@') {
+        Some(path) => std::fs::read_to_string(path)
+            .map_err(|e| Error::Usage(format!("failed to read description file `{path}`: {e}"))),
+        None => Ok(value.to_string()),
     }
 }

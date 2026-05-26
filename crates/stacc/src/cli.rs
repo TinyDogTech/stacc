@@ -60,7 +60,7 @@ pub enum Command {
     /// Track the current branch as part of a stack.
     Track(TrackArgs),
     /// Push branches and create or update PRs.
-    Submit,
+    Submit(SubmitArgs),
     /// Pull upstream changes, detect merges, and restack.
     Sync,
     /// Print the stack.
@@ -88,13 +88,22 @@ pub struct TrackArgs {
     pub base: Option<String>,
 }
 
+/// Arguments for `stacc submit`.
+#[derive(Debug, clap::Args)]
+pub struct SubmitArgs {
+    /// PR body: a literal string, or `@path` to read from a file.
+    /// Defaults to the branch's latest commit body.
+    #[arg(long)]
+    pub description: Option<String>,
+}
+
 impl Command {
     /// The command's name as the user typed it (used in output).
     pub fn name(&self) -> &'static str {
         match self {
             Command::Init(_) => "init",
             Command::Track(_) => "track",
-            Command::Submit => "submit",
+            Command::Submit(_) => "submit",
             Command::Sync => "sync",
             Command::Log => "log",
             Command::Status => "status",

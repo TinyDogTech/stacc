@@ -307,6 +307,16 @@ impl Git {
         self.run(&["remote", "get-url", remote])
     }
 
+    /// The subject line of `rev`'s tip commit.
+    pub fn commit_subject(&self, rev: &str) -> Result<String, GitError> {
+        self.run(&["log", "-1", "--format=%s", rev])
+    }
+
+    /// The body (the message after the subject) of `rev`'s tip commit.
+    pub fn commit_body(&self, rev: &str) -> Result<String, GitError> {
+        self.run(&["log", "-1", "--format=%b", rev])
+    }
+
     /// Resolve a symbolic ref to its short target, or `None` if `name` is not a
     /// symbolic ref.
     pub fn symbolic_ref(&self, name: &str) -> Result<Option<String>, GitError> {

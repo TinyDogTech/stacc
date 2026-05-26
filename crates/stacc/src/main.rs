@@ -28,7 +28,8 @@ fn run(cli: &Cli) -> Result<(), Error> {
         Command::Track(args) => commands::track(args, cli.global.format),
         Command::Log => commands::log(cli.global.format),
         Command::Status => commands::status(cli.global.format),
-        Command::Submit | Command::Sync => Err(Error::NotImplemented(cli.command.name())),
+        Command::Submit(args) => commands::submit(args, cli.global.format),
+        Command::Sync => Err(Error::NotImplemented(cli.command.name())),
     }
 }
 
