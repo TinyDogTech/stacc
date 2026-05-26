@@ -67,6 +67,10 @@ pub enum Command {
     Log,
     /// Show the current branch's position and PR status.
     Status,
+
+    /// Any other subcommand is proxied to `git` (e.g. `commit`, `rebase`, `push`).
+    #[command(external_subcommand)]
+    External(Vec<String>),
 }
 
 /// Arguments for `stacc init`.

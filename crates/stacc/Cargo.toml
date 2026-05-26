@@ -13,6 +13,11 @@ authors.workspace = true
 name = "stacc"
 path = "src/main.rs"
 
+# `st` is a short alias: the same binary under a second name.
+[[bin]]
+name = "st"
+path = "src/main.rs"
+
 [dependencies]
 clap = { workspace = true }
 miette = { workspace = true }
