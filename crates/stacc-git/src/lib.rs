@@ -279,11 +279,12 @@ impl Git {
         }
     }
 
-    /// List the entry names directly under `<rev>:<path>`.
+    /// List the leaf blob paths under `<rev>:<path>`, recursively — so a nested
+    /// entry comes back as its full path (e.g. `jillian/foo`), not just `jillian`.
     pub fn list_tree(&self, rev: &str, path: &str) -> Result<Vec<String>, GitError> {
         let spec = format!("{rev}:{path}");
         let output = self
-            .command(&["ls-tree", "--name-only", spec.as_str()])
+            .command(&["ls-tree", "-r", "--name-only", spec.as_str()])
             .output()
             .map_err(|source| GitError::Spawn { source })?;
         if !output.status.success() {
@@ -523,6 +524,7 @@ mod tests {
             .write_tree(&[
                 ("repo", repo_blob.as_str()),
                 ("branches/feature", branch_blob.as_str()),
+                ("branches/jillian/foo", branch_blob.as_str()),
             ])
             .unwrap();
         let commit = repo.commit_tree(&tree, None, "state").unwrap();
@@ -533,9 +535,10 @@ mod tests {
             repo.read_blob("refs/stacc/data", "repo").unwrap().as_deref(),
             Some("{\"trunk\":\"main\"}")
         );
+        // Recursive listing: a slashed branch name comes back as a full path.
         assert_eq!(
             repo.list_tree("refs/stacc/data", "branches").unwrap(),
-            vec!["feature".to_string()]
+            vec!["feature".to_string(), "jillian/foo".to_string()]
         );
     }
 

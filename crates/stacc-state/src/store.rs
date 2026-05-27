@@ -210,4 +210,32 @@ mod tests {
         store.fetch("origin").unwrap();
         assert_eq!(store.load().unwrap(), sample_state());
     }
+
+    #[test]
+    fn slashed_branch_name_roundtrips() {
+        let (_tmp, store) = init_repo();
+        let mut state = State {
+            repo: Some(RepoConfig {
+                trunk: "main".into(),
+                remote: "origin".into(),
+            }),
+            ..State::default()
+        };
+        // A `user/feature`-style name nests under branches/ in the tree.
+        state.branches.insert(
+            "jillian/foo".to_string(),
+            BranchState {
+                base: Base {
+                    name: "main".into(),
+                    hash: "abc".into(),
+                },
+                pr: None,
+            },
+        );
+        store.save(&state).unwrap();
+
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded, state);
+        assert!(loaded.branches.contains_key("jillian/foo"));
+    }
 }
