@@ -1,7 +1,8 @@
 //! Configuration: autodetection of trunk and remote, with precedence
 //! resolution over command-line flags and a config file.
 
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use stacc_git::{Git, GitError};
@@ -51,6 +52,30 @@ pub fn read_file(path: &Path) -> Result<Overrides, ConfigError> {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Overrides::default()),
         Err(err) => Err(err.into()),
     }
+}
+
+/// Read the `[aliases]` table from `path`. Best-effort: a missing file, an
+/// absent table, or invalid TOML all yield an empty map (an alias misconfig
+/// shouldn't bring down `stacc --version`).
+pub fn aliases_from_file(path: &Path) -> BTreeMap<String, String> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return BTreeMap::new();
+    };
+
+    #[derive(Default, Deserialize)]
+    struct Wrap {
+        #[serde(default)]
+        aliases: BTreeMap<String, String>,
+    }
+
+    toml::from_str::<Wrap>(&text).unwrap_or_default().aliases
+}
+
+/// The user-global stacc config path, conventionally at
+/// `~/.config/stacc/config.toml`.
+pub fn user_config_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_default();
+    PathBuf::from(home).join(".config/stacc/config.toml")
 }
 
 /// Detect the trunk and remote from the repository.

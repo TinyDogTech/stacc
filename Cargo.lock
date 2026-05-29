@@ -1621,6 +1621,7 @@ dependencies = [
  "httpmock",
  "miette",
  "serde_json",
+ "shlex",
  "stacc-config",
  "stacc-git",
  "stacc-github",
