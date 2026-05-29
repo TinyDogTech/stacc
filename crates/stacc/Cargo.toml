@@ -7,11 +7,9 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
-# This crate produces the `stacc` executable. A package can hold one library
-# and any number of binaries; here we declare the single binary explicitly.
-[[bin]]
-name = "stacc"
-path = "src/main.rs"
+# Cargo auto-detects the targets: src/lib.rs (the library), src/main.rs (the
+# `stacc` binary), and src/bin/st.rs (the `st` short alias). Both binaries are
+# thin wrappers over the library's `run()`.
 
 [dependencies]
 clap = { workspace = true }
