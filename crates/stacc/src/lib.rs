@@ -3,6 +3,7 @@
 //! The CLI logic lives in this library so the `stacc` and `st` binaries can
 //! both be thin wrappers around [`run`].
 
+use std::collections::{BTreeMap, HashSet};
 use std::process::ExitCode;
 
 use clap::Parser;
@@ -14,9 +15,29 @@ mod error;
 use cli::{Cli, Command, OutputFormat};
 use error::Error;
 
+/// Names that stacc always handles itself. These always shadow any user alias.
+const BUILTINS: &[&str] = &["init", "track", "log", "status", "submit", "sync"];
+
 /// Parse the command line, dispatch, and return the process exit code.
 pub fn run() -> ExitCode {
-    let cli = Cli::parse();
+    // Aliases load best-effort: user-global first, then repo-local (repo wins).
+    let mut aliases =
+        stacc_config::aliases_from_file(&stacc_config::user_config_path());
+    aliases.extend(stacc_config::aliases_from_file(std::path::Path::new(
+        ".stacc.toml",
+    )));
+
+    // Rewrite argv through the alias table before clap sees any of it.
+    let raw: Vec<String> = std::env::args().collect();
+    let args = match expand_aliases(raw, &aliases) {
+        Ok(a) => a,
+        Err(err) => {
+            eprintln!("stacc: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let cli = Cli::parse_from(args);
 
     // Unknown subcommands are proxied straight to git.
     if let Command::External(args) = &cli.command {
@@ -61,5 +82,132 @@ fn proxy_to_git(args: &[String]) -> ExitCode {
             eprintln!("stacc: failed to run git: {err}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[derive(Debug)]
+enum AliasError {
+    Cycle(String),
+    BadTokens(String),
+}
+
+impl std::fmt::Display for AliasError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AliasError::Cycle(name) => {
+                write!(f, "alias cycle: `{name}` expands back to itself")
+            }
+            AliasError::BadTokens(name) => {
+                write!(f, "alias `{name}` has invalid shell syntax")
+            }
+        }
+    }
+}
+
+/// Expand `args[1]` through the alias table, repeatedly, until it's a built-in
+/// stacc command, an unknown name (clap's external_subcommand will route it to
+/// git), or empty.
+fn expand_aliases(
+    mut args: Vec<String>,
+    aliases: &BTreeMap<String, String>,
+) -> Result<Vec<String>, AliasError> {
+    let mut seen: HashSet<String> = HashSet::new();
+    loop {
+        if args.len() < 2 {
+            return Ok(args);
+        }
+        let cmd = args[1].clone();
+        // Built-ins win — never expanded.
+        if BUILTINS.contains(&cmd.as_str()) {
+            return Ok(args);
+        }
+        // Not an alias? Leave it; clap's external_subcommand passes it to git.
+        let Some(expansion) = aliases.get(&cmd) else {
+            return Ok(args);
+        };
+        if !seen.insert(cmd.clone()) {
+            return Err(AliasError::Cycle(cmd));
+        }
+        let tokens =
+            shlex::split(expansion).ok_or_else(|| AliasError::BadTokens(cmd.clone()))?;
+
+        // Replace argv[1] with the expansion, keeping argv[0] and any trailing
+        // arguments the user typed after the alias.
+        let argv0 = args.remove(0);
+        args.remove(0); // the alias name
+        let mut next = Vec::with_capacity(1 + tokens.len() + args.len());
+        next.push(argv0);
+        next.extend(tokens);
+        next.append(&mut args);
+        args = next;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn aliases(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    fn argv(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn no_alias_passes_through() {
+        let a = aliases(&[]);
+        let out = expand_aliases(argv(&["stacc", "ci", "-m", "x"]), &a).unwrap();
+        assert_eq!(out, argv(&["stacc", "ci", "-m", "x"]));
+    }
+
+    #[test]
+    fn simple_alias_expands() {
+        let a = aliases(&[("st", "status")]);
+        let out = expand_aliases(argv(&["stacc", "st", "--format", "json"]), &a).unwrap();
+        assert_eq!(out, argv(&["stacc", "status", "--format", "json"]));
+    }
+
+    #[test]
+    fn multi_token_alias_with_quotes_expands_via_shlex() {
+        let a = aliases(&[("body", "submit --description \"my body\"")]);
+        let out = expand_aliases(argv(&["stacc", "body"]), &a).unwrap();
+        assert_eq!(
+            out,
+            argv(&["stacc", "submit", "--description", "my body"])
+        );
+    }
+
+    #[test]
+    fn builtin_shadows_alias() {
+        // A user trying to override `status` is silently ignored.
+        let a = aliases(&[("status", "log")]);
+        let out = expand_aliases(argv(&["stacc", "status"]), &a).unwrap();
+        assert_eq!(out, argv(&["stacc", "status"]));
+    }
+
+    #[test]
+    fn recursive_alias_resolves() {
+        let a = aliases(&[("a", "b"), ("b", "status")]);
+        let out = expand_aliases(argv(&["stacc", "a"]), &a).unwrap();
+        assert_eq!(out, argv(&["stacc", "status"]));
+    }
+
+    #[test]
+    fn cyclic_alias_errors() {
+        let a = aliases(&[("a", "b"), ("b", "a")]);
+        let err = expand_aliases(argv(&["stacc", "a"]), &a).unwrap_err();
+        assert!(matches!(err, AliasError::Cycle(_)));
+    }
+
+    #[test]
+    fn no_args_after_program_is_ok() {
+        let a = aliases(&[("st", "status")]);
+        let out = expand_aliases(argv(&["stacc"]), &a).unwrap();
+        assert_eq!(out, argv(&["stacc"]));
     }
 }
