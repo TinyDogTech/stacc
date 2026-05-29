@@ -496,7 +496,21 @@ fn restack(
         if git.is_ancestor(&base_tip, branch)? {
             continue; // already on top of its base
         }
-        match git.rebase_onto(&base_tip, &base.hash, branch) {
+        // Prefer the recorded base hash if it's still reachable from the
+        // branch; otherwise (stale, force-pushed away, or invalid) recover via
+        // `merge-base --fork-point` using the base's reflog.
+        let recorded_ok = git.is_ancestor(&base.hash, branch).unwrap_or(false);
+        let upstream = if recorded_ok {
+            base.hash.clone()
+        } else {
+            git.fork_point(&base.name, branch)?.ok_or_else(|| {
+                Error::Usage(format!(
+                    "cannot recover the fork point of `{branch}` from `{}`; rebase manually",
+                    base.name
+                ))
+            })?
+        };
+        match git.rebase_onto(&base_tip, &upstream, branch) {
             Ok(()) => {}
             Err(RebaseError::Interrupt(_)) => {
                 store.save(state)?;
