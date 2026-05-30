@@ -1,6 +1,6 @@
 //! Implementations of the CLI subcommands.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
 
 use serde_json::{json, Value};
@@ -385,7 +385,6 @@ pub fn submit(args: &SubmitArgs, format: OutputFormat) -> Result<(), Error> {
 /// branches in **bottom-up** order — base before dependent — so each push/PR
 /// sees its parent already on the remote.
 fn downstack_chain(state: &State, current: &str, trunk: &str) -> Result<Vec<String>, Error> {
-    use std::collections::HashSet;
     let mut chain = Vec::new();
     let mut visited: HashSet<String> = HashSet::new();
     let mut name = current.to_string();
