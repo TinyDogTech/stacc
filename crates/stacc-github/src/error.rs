@@ -2,7 +2,7 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum GitHubError {
-    #[error("no GitHub token found; set GITHUB_TOKEN or GH_TOKEN")]
+    #[error("no GitHub token found; run `stacc auth login` or set GITHUB_TOKEN")]
     MissingToken,
 
     #[error("GitHub API returned status {status}: {body}")]
@@ -16,6 +16,15 @@ pub enum GitHubError {
 
     #[error("unexpected GitHub response: {0}")]
     Unexpected(String),
+
+    #[error("device flow expired before authorization completed")]
+    DeviceFlowExpired,
+
+    #[error("device flow was denied by the user")]
+    DeviceFlowDenied,
+
+    #[error("keyring error: {0}")]
+    Keyring(String),
 }
 
 impl GitHubError {
