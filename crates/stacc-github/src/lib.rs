@@ -1,7 +1,9 @@
 //! Synchronous GitHub REST API client (via `ureq`) with PAT authentication.
 
+pub mod auth;
 mod error;
 
+pub use auth::{clear_token, load_token, store_token, DeviceCode, DeviceFlow};
 pub use error::GitHubError;
 
 use serde::de::DeserializeOwned;
@@ -103,12 +105,15 @@ impl GitHub {
         }
     }
 
-    /// Build a client from `GITHUB_TOKEN`/`GH_TOKEN` in the environment.
+    /// Resolve the access token from `GITHUB_TOKEN`/`GH_TOKEN`, falling back
+    /// to the OS keychain entry written by `stacc auth login`.
     /// `GITHUB_API_URL` overrides the base URL (for GitHub Enterprise or tests).
     pub fn from_env() -> Result<Self, GitHubError> {
         let token = std::env::var("GITHUB_TOKEN")
-            .or_else(|_| std::env::var("GH_TOKEN"))
-            .map_err(|_| GitHubError::MissingToken)?;
+            .ok()
+            .or_else(|| std::env::var("GH_TOKEN").ok())
+            .or_else(auth::load_token)
+            .ok_or(GitHubError::MissingToken)?;
         let base_url =
             std::env::var("GITHUB_API_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
         Ok(Self::with_base_url(token, base_url))

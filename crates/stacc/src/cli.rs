@@ -67,10 +67,30 @@ pub enum Command {
     Log,
     /// Show the current branch's position and PR status.
     Status,
+    /// Manage the GitHub access token.
+    Auth(AuthArgs),
 
     /// Any other subcommand is proxied to `git` (e.g. `commit`, `rebase`, `push`).
     #[command(external_subcommand)]
     External(Vec<String>),
+}
+
+/// Arguments for `stacc auth`.
+#[derive(Debug, clap::Args)]
+pub struct AuthArgs {
+    #[command(subcommand)]
+    pub action: AuthAction,
+}
+
+/// Sub-actions under `stacc auth`.
+#[derive(Debug, Subcommand)]
+pub enum AuthAction {
+    /// Run OAuth device flow and store the token in the OS keychain.
+    Login,
+    /// Clear the stored token (env-var auth, if any, is untouched).
+    Logout,
+    /// Report which auth source is active and which user it identifies.
+    Status,
 }
 
 /// Arguments for `stacc init`.
