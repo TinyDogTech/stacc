@@ -184,6 +184,46 @@ fn sync_restacks_onto_advanced_trunk() {
 }
 
 #[test]
+fn sync_uses_fork_point_when_recorded_base_is_stale() {
+    let tmp = repo();
+    assert!(stacc(tmp.path(), &["init"]).status.success());
+
+    run_git(tmp.path(), &["checkout", "-q", "-b", "feature"]);
+    commit_file(tmp.path(), "f.txt", "feature\n", "feature commit");
+
+    // Advance the trunk so there's something to restack onto.
+    run_git(tmp.path(), &["checkout", "-q", "main"]);
+    commit_file(tmp.path(), "m.txt", "main\n", "trunk commit");
+    run_git(tmp.path(), &["checkout", "-q", "feature"]);
+
+    // Poison the recorded base hash with the zero-OID — not a valid commit at
+    // all. Without fork-point recovery the rebase would bail with `fatal:
+    // invalid upstream 0000…`; with it, sync should use the base's reflog to
+    // find the real divergence point and complete.
+    let store = StateStore::new(Git::open(tmp.path()));
+    let mut state = store.load().unwrap();
+    state.branches.insert(
+        "feature".to_string(),
+        BranchState {
+            base: Base {
+                name: "main".into(),
+                hash: "0000000000000000000000000000000000000000".into(),
+            },
+            pr: None,
+        },
+    );
+    store.save(&state).unwrap();
+
+    let out = stacc(tmp.path(), &["sync", "--format", "json"]);
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains(r#""restacked":["feature"]"#), "got: {s}");
+    assert!(git_ok(tmp.path(), &["merge-base", "--is-ancestor", "main", "feature"]));
+    assert!(git_ok(tmp.path(), &["cat-file", "-e", "feature:f.txt"]));
+    assert!(git_ok(tmp.path(), &["cat-file", "-e", "feature:m.txt"]));
+}
+
+#[test]
 fn sync_conflict_writes_context_then_continue_completes() {
     let tmp = repo();
     assert!(stacc(tmp.path(), &["init"]).status.success());
