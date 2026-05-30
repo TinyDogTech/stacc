@@ -152,6 +152,14 @@ impl Git {
         self.run(&["push", remote, refspec]).map(|_| ())
     }
 
+    /// Push `refspec` to `remote` with `--force-with-lease`. Refuses to clobber
+    /// a ref whose remote tip moved out from under us — the safe-by-default
+    /// force push for re-submitting a rebased branch.
+    pub fn push_force_with_lease(&self, remote: &str, refspec: &str) -> Result<(), GitError> {
+        self.run(&["push", "--force-with-lease", remote, refspec])
+            .map(|_| ())
+    }
+
     /// Fetch `refspec` from `remote`.
     pub fn fetch(&self, remote: &str, refspec: &str) -> Result<(), GitError> {
         self.run(&["fetch", remote, refspec]).map(|_| ())

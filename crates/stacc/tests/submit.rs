@@ -254,6 +254,55 @@ fn submit_walks_the_downstack() {
 }
 
 #[test]
+fn submit_re_pushes_a_rebased_branch_via_lease() {
+    // Plain push would refuse a non-fast-forward after a rebase. The lease
+    // push accepts it because the local remote-tracking ref still matches the
+    // remote's tip — we're the ones who put it there.
+    let (tmp, _bare) = setup();
+    assert!(stacc(tmp.path(), &["init"]).status.success());
+    run_git(tmp.path(), &["checkout", "-q", "-b", "feature"]);
+    run_git(tmp.path(), &["commit", "-q", "--allow-empty", "-m", "Add feature"]);
+    assert!(stacc(tmp.path(), &["track"]).status.success());
+
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(httpmock::Method::POST)
+            .path("/repos/TinyDogTech/stacc/pulls");
+        then.status(201).json_body(pr_body(31));
+    });
+    server.mock(|when, then| {
+        when.method(httpmock::Method::PATCH)
+            .path("/repos/TinyDogTech/stacc/pulls/31");
+        then.status(200).json_body(pr_body(31));
+    });
+
+    // First submit — creates the PR and lands `feature` on the bare remote.
+    let out = stacc_env(
+        tmp.path(),
+        &["submit", "--format", "json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+
+    // Amend the commit — rewrites history, so a plain push would now be
+    // rejected as non-fast-forward.
+    run_git(
+        tmp.path(),
+        &["commit", "-q", "--allow-empty", "--amend", "-m", "Add feature, revised"],
+    );
+
+    // Re-submit — lease push lets the rewritten ref overwrite the old tip.
+    let out = stacc_env(
+        tmp.path(),
+        &["submit", "--format", "json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains(r#""status":"updated""#), "got: {s}");
+}
+
+#[test]
 fn submit_description_applies_only_to_current_branch() {
     let (tmp, _bare) = setup();
     assert!(stacc(tmp.path(), &["init"]).status.success());
