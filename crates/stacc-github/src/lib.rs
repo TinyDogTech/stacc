@@ -120,7 +120,7 @@ impl GitHub {
         value
             .get("login")
             .and_then(|login| login.as_str())
-            .map(|login| login.to_string())
+            .map(ToString::to_string)
             .ok_or_else(|| GitHubError::Unexpected("missing `login` in /user response".into()))
     }
 

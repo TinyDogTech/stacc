@@ -473,7 +473,7 @@ pub fn sync(args: &SyncArgs, format: OutputFormat) -> Result<(), Error> {
     }
     for (name, new_base) in &reparented {
         if let Some(branch) = state.branches.get_mut(name) {
-            branch.base.name = new_base.clone();
+            branch.base.name.clone_from(new_base);
         }
     }
     for name in &merged {
@@ -581,7 +581,7 @@ fn restack(
             Err(RebaseError::Git(err)) => return Err(err.into()),
         }
         if let Some(b) = state.branches.get_mut(branch) {
-            b.base.hash = base_tip.clone();
+            b.base.hash.clone_from(&base_tip);
         }
         restacked.push(branch.clone());
     }
