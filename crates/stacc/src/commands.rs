@@ -265,7 +265,8 @@ fn pr_state_str(state: PrState) -> &'static str {
     }
 }
 
-/// `stacc submit` — push the current branch and create or update its PR.
+/// `stacc submit` — push the current branch and its ancestors up to the trunk,
+/// creating or updating each branch's PR with its parent as the base.
 pub fn submit(args: &SubmitArgs, format: OutputFormat) -> Result<(), Error> {
     let git = Git::open(".");
     let store = StateStore::new(git.clone());
@@ -275,84 +276,142 @@ pub fn submit(args: &SubmitArgs, format: OutputFormat) -> Result<(), Error> {
         .clone()
         .ok_or_else(|| Error::Usage("stacc is not initialized; run `stacc init` first".into()))?;
 
-    let branch = git.current_branch()?;
-    if branch == repo.trunk {
+    let current = git.current_branch()?;
+    if current == repo.trunk {
         return Err(Error::Usage("cannot submit the trunk branch".into()));
     }
-    let base = match state.branches.get(&branch) {
-        Some(branch_state) => branch_state.base.name.clone(),
-        None => {
-            return Err(Error::Usage(format!(
-                "branch `{branch}` is not tracked; run `stacc track` first"
-            )))
-        }
-    };
+
+    // Walk the downstack bottom-up so each PR's base ref is already on the
+    // remote when we open the PR (the lowest base is always the trunk).
+    let chain = downstack_chain(&state, &current, &repo.trunk)?;
 
     let (owner, repo_name) = stacc_github::parse_remote(&git.remote_url(&repo.remote)?)
         .ok_or_else(|| Error::Usage(format!("remote `{}` is not a GitHub URL", repo.remote)))?;
     let github = GitHub::from_env()?;
 
-    // Push the branch before opening/updating its PR (GitHub needs the ref).
-    git.push(&repo.remote, &branch)?;
+    // (branch, created?, number, url) for each branch we acted on.
+    let mut results: Vec<(String, bool, u64, String)> = Vec::new();
 
-    let title = git.commit_subject(&branch)?;
-    let body = match &args.description {
-        Some(value) => resolve_description(value)?,
-        None => git.commit_body(&branch)?,
-    };
+    for branch in &chain {
+        let is_current = branch == &current;
+        let base = state
+            .branches
+            .get(branch)
+            .expect("branch is in chain")
+            .base
+            .name
+            .clone();
 
-    let existing = state
-        .branches
-        .get(&branch)
-        .and_then(|b| b.pr.as_ref().map(|pr| pr.number));
+        git.push(&repo.remote, branch)?;
 
-    let pr = match existing {
-        Some(number) => github.update_pull_request(
-            &owner,
-            &repo_name,
-            number,
-            &PullRequestUpdate {
-                title: Some(title),
-                body: Some(body),
-                base: Some(base),
-            },
-        )?,
-        None => github.create_pull_request(
-            &owner,
-            &repo_name,
-            &NewPullRequest {
-                title,
-                head: branch.clone(),
-                base,
-                body,
-            },
-        )?,
-    };
+        let title = git.commit_subject(branch)?;
+        // --description applies to the branch the user is actually submitting;
+        // ancestors fall back to their own commit body.
+        let body = if is_current {
+            match &args.description {
+                Some(value) => resolve_description(value)?,
+                None => git.commit_body(branch)?,
+            }
+        } else {
+            git.commit_body(branch)?
+        };
 
-    if let Some(branch_state) = state.branches.get_mut(&branch) {
-        branch_state.pr = Some(PullRequest {
-            number: pr.number,
-            url: Some(pr.url.clone()),
-        });
+        let existing = state
+            .branches
+            .get(branch)
+            .and_then(|b| b.pr.as_ref().map(|pr| pr.number));
+
+        let pr = match existing {
+            Some(number) => github.update_pull_request(
+                &owner,
+                &repo_name,
+                number,
+                &PullRequestUpdate {
+                    title: Some(title),
+                    body: Some(body),
+                    base: Some(base),
+                },
+            )?,
+            None => github.create_pull_request(
+                &owner,
+                &repo_name,
+                &NewPullRequest {
+                    title,
+                    head: branch.clone(),
+                    base,
+                    body,
+                },
+            )?,
+        };
+
+        if let Some(branch_state) = state.branches.get_mut(branch) {
+            branch_state.pr = Some(PullRequest {
+                number: pr.number,
+                url: Some(pr.url.clone()),
+            });
+        }
+
+        results.push((branch.clone(), existing.is_none(), pr.number, pr.url));
     }
+
     store.save(&state)?;
 
     match format {
-        OutputFormat::Json => println!(
-            "{}",
-            json!({
-                "status": if existing.is_some() { "updated" } else { "created" },
-                "branch": branch,
-                "number": pr.number,
-                "url": pr.url,
-            })
-        ),
+        OutputFormat::Json => {
+            let list: Vec<serde_json::Value> = results
+                .iter()
+                .map(|(branch, created, number, url)| {
+                    json!({
+                        "status": if *created { "created" } else { "updated" },
+                        "branch": branch,
+                        "number": number,
+                        "url": url,
+                    })
+                })
+                .collect();
+            println!("{}", json!({ "submitted": list }));
+        }
         OutputFormat::Pretty => {
-            let verb = if existing.is_some() { "Updated" } else { "Created" };
-            println!("{verb} PR #{} for {branch}: {}", pr.number, pr.url);
+            for (branch, created, number, url) in &results {
+                let verb = if *created { "Created" } else { "Updated" };
+                println!("{verb} PR #{number} for {branch}: {url}");
+            }
         }
     }
     Ok(())
+}
+
+/// Walk from `current` up the base chain to the trunk (exclusive). Returns the
+/// branches in **bottom-up** order — base before dependent — so each push/PR
+/// sees its parent already on the remote.
+fn downstack_chain(state: &State, current: &str, trunk: &str) -> Result<Vec<String>, Error> {
+    use std::collections::HashSet;
+    let mut chain = Vec::new();
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut name = current.to_string();
+    loop {
+        if name == trunk {
+            break;
+        }
+        if !visited.insert(name.clone()) {
+            return Err(Error::Usage(format!(
+                "circular base chain reached at `{name}`"
+            )));
+        }
+        match state.branches.get(&name) {
+            Some(bs) => {
+                chain.push(name.clone());
+                name = bs.base.name.clone();
+            }
+            None => {
+                return Err(Error::Usage(format!(
+                    "branch `{name}` is not tracked; run `stacc track` first"
+                )));
+            }
+        }
+    }
+    chain.reverse();
+    Ok(chain)
 }
 
 /// Resolve a `--description` value: `@path` reads a file, anything else is literal.

@@ -191,3 +191,108 @@ fn submit_rejects_trunk() {
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains("trunk"), "got: {s}");
 }
+
+#[test]
+fn submit_walks_the_downstack() {
+    let (tmp, _bare) = setup();
+    assert!(stacc(tmp.path(), &["init"]).status.success());
+
+    // 2-deep stack: main -> feature-1 -> feature-2 (the branch we submit from).
+    run_git(tmp.path(), &["checkout", "-q", "-b", "feature-1"]);
+    run_git(tmp.path(), &["commit", "-q", "--allow-empty", "-m", "f1"]);
+    assert!(stacc(tmp.path(), &["track"]).status.success());
+
+    run_git(tmp.path(), &["checkout", "-q", "-b", "feature-2"]);
+    run_git(tmp.path(), &["commit", "-q", "--allow-empty", "-m", "f2"]);
+    assert!(stacc(tmp.path(), &["track", "--base", "feature-1"]).status.success());
+
+    let server = MockServer::start();
+    // feature-1's PR — base must be the trunk.
+    let mock_f1 = server.mock(|when, then| {
+        when.method(httpmock::Method::POST)
+            .path("/repos/TinyDogTech/stacc/pulls")
+            .body_contains(r#""head":"feature-1""#)
+            .body_contains(r#""base":"main""#);
+        then.status(201).json_body(pr_body(11));
+    });
+    // feature-2's PR — base must be its parent, not the trunk.
+    let mock_f2 = server.mock(|when, then| {
+        when.method(httpmock::Method::POST)
+            .path("/repos/TinyDogTech/stacc/pulls")
+            .body_contains(r#""head":"feature-2""#)
+            .body_contains(r#""base":"feature-1""#);
+        then.status(201).json_body(pr_body(12));
+    });
+
+    let out = stacc_env(
+        tmp.path(),
+        &["submit", "--format", "json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains(r#""number":11"#), "got: {s}");
+    assert!(s.contains(r#""number":12"#), "got: {s}");
+    mock_f1.assert();
+    mock_f2.assert();
+
+    // Both PR numbers landed back in state.
+    let show = Command::new("git")
+        .arg("-C")
+        .arg(tmp.path())
+        .args(["show", "refs/stacc/data:branches/feature-1"])
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&show.stdout).contains(r#""number": 11"#));
+    let show = Command::new("git")
+        .arg("-C")
+        .arg(tmp.path())
+        .args(["show", "refs/stacc/data:branches/feature-2"])
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&show.stdout).contains(r#""number": 12"#));
+}
+
+#[test]
+fn submit_description_applies_only_to_current_branch() {
+    let (tmp, _bare) = setup();
+    assert!(stacc(tmp.path(), &["init"]).status.success());
+
+    run_git(tmp.path(), &["checkout", "-q", "-b", "feature-1"]);
+    run_git(tmp.path(), &["commit", "-q", "--allow-empty", "-m", "f1"]);
+    assert!(stacc(tmp.path(), &["track"]).status.success());
+
+    run_git(tmp.path(), &["checkout", "-q", "-b", "feature-2"]);
+    run_git(tmp.path(), &["commit", "-q", "--allow-empty", "-m", "f2"]);
+    assert!(stacc(tmp.path(), &["track", "--base", "feature-1"]).status.success());
+
+    let server = MockServer::start();
+    // feature-1 (ancestor) — body must stay empty. The matcher requires the
+    // literal JSON fragment `"body":""`, so if --description ever leaked to
+    // feature-1 the matcher would miss, the POST would 404, and submit would
+    // fail. That's the negative assertion.
+    let mock_f1 = server.mock(|when, then| {
+        when.method(httpmock::Method::POST)
+            .path("/repos/TinyDogTech/stacc/pulls")
+            .body_contains(r#""head":"feature-1""#)
+            .body_contains(r#""body":"""#);
+        then.status(201).json_body(pr_body(21));
+    });
+    // feature-2 (the current branch) — body MUST carry the description.
+    let mock_f2 = server.mock(|when, then| {
+        when.method(httpmock::Method::POST)
+            .path("/repos/TinyDogTech/stacc/pulls")
+            .body_contains(r#""head":"feature-2""#)
+            .body_contains("Top branch description");
+        then.status(201).json_body(pr_body(22));
+    });
+
+    let out = stacc_env(
+        tmp.path(),
+        &["submit", "--description", "Top branch description", "--format", "json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    mock_f1.assert();
+    mock_f2.assert();
+}
