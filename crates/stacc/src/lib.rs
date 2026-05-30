@@ -77,7 +77,7 @@ fn report(err: Error, format: OutputFormat) {
 /// prompts should behave exactly as if `git` were invoked directly.
 fn proxy_to_git(args: &[String]) -> ExitCode {
     match std::process::Command::new("git").args(args).status() {
-        Ok(status) => ExitCode::from(status.code().unwrap_or(1) as u8),
+        Ok(status) => ExitCode::from(u8::try_from(status.code().unwrap_or(1)).unwrap_or(1)),
         Err(err) => {
             eprintln!("stacc: failed to run git: {err}");
             ExitCode::FAILURE
@@ -155,7 +155,7 @@ mod tests {
     }
 
     fn argv(items: &[&str]) -> Vec<String> {
-        items.iter().map(|s| s.to_string()).collect()
+        items.iter().map(ToString::to_string).collect()
     }
 
     #[test]

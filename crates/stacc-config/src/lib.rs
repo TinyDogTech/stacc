@@ -58,16 +58,15 @@ pub fn read_file(path: &Path) -> Result<Overrides, ConfigError> {
 /// absent table, or invalid TOML all yield an empty map (an alias misconfig
 /// shouldn't bring down `stacc --version`).
 pub fn aliases_from_file(path: &Path) -> BTreeMap<String, String> {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return BTreeMap::new();
-    };
-
     #[derive(Default, Deserialize)]
     struct Wrap {
         #[serde(default)]
         aliases: BTreeMap<String, String>,
     }
 
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return BTreeMap::new();
+    };
     toml::from_str::<Wrap>(&text).unwrap_or_default().aliases
 }
 

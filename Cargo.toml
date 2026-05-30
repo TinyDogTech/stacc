@@ -25,3 +25,24 @@ tempfile = "3"
 toml = "0.8"
 ureq = { version = "2", features = ["json"] }
 shlex = "1"
+
+# Workspace-wide lints. Member crates opt in with `[lints] workspace = true`.
+#
+# `clippy::pedantic` is enabled as a "second opinion" on idioms — not as a
+# build break. The lints in pedantic express taste more than correctness, so
+# we expect to disagree with some; `priority = -1` lets individual lints below
+# override the group default at the standard priority of 0.
+#
+# `cargo clippy` surfaces these as warnings; we do not pass `-D warnings`
+# against pedantic because that would turn opinion into policy.
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+
+# Routinely noisy in practice for our codebase; opt out explicitly so the
+# signal-to-noise ratio of the pedantic warnings stays high.
+missing_errors_doc = "allow"        # we don't write `# Errors` sections
+missing_panics_doc = "allow"        # same, for `# Panics`
+module_name_repetitions = "allow"   # `stacc_config::Config` is fine
+must_use_candidate = "allow"        # libraries care more than CLIs
+doc_markdown = "allow"              # strict backtick rules in doc comments
+unused_self = "allow"               # `self.helper(...)` groups by type even when self is unused

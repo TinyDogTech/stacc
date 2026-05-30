@@ -31,7 +31,7 @@ impl Git {
 
     fn command_error(&self, args: &[&str], output: &Output) -> GitError {
         GitError::Command {
-            args: args.iter().map(|s| s.to_string()).collect(),
+            args: args.iter().map(ToString::to_string).collect(),
             status: output.status.code(),
             stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
         }
@@ -300,7 +300,7 @@ impl Git {
         }
         Ok(String::from_utf8_lossy(&output.stdout)
             .lines()
-            .map(|line| line.to_string())
+            .map(ToString::to_string)
             .collect())
     }
 
@@ -309,7 +309,7 @@ impl Git {
         Ok(self
             .run(&["remote"])?
             .lines()
-            .map(|line| line.to_string())
+            .map(ToString::to_string)
             .collect())
     }
 
@@ -333,7 +333,7 @@ impl Git {
         Ok(self
             .run(&["diff", "--name-only", "--diff-filter=U"])?
             .lines()
-            .map(|line| line.to_string())
+            .map(ToString::to_string)
             .collect())
     }
 
@@ -478,7 +478,7 @@ mod tests {
         let err = repo.rebase_onto(&main_tip, &base, "feature").unwrap_err();
         match err {
             RebaseError::Interrupt(RebaseInterrupt { branch }) => assert_eq!(branch, "feature"),
-            other => panic!("expected interrupt, got {other:?}"),
+            err @ RebaseError::Git(_) => panic!("expected interrupt, got {err:?}"),
         }
         assert!(repo.rebase_in_progress());
         repo.rebase_abort().unwrap();
