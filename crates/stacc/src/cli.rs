@@ -107,5 +107,8 @@ pub struct SyncArgs {
     /// Resume a sync that stopped on a conflict, after resolving it.
     #[arg(long = "continue")]
     pub continue_: bool,
+    /// Skip the upstream fetch and restack on local refs only.
+    #[arg(long)]
+    pub offline: bool,
 }
 

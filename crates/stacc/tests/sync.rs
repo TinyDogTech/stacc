@@ -78,7 +78,7 @@ fn sync_is_noop_without_prs() {
     run_git(tmp.path(), &["checkout", "-q", "-b", "feature"]);
     assert!(stacc(tmp.path(), &["track"]).status.success());
 
-    let out = stacc(tmp.path(), &["sync", "--format", "json"]);
+    let out = stacc(tmp.path(), &["sync", "--offline", "--format", "json"]);
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains(r#""merged":[]"#), "got: {s}");
@@ -93,6 +93,24 @@ fn sync_requires_init() {
     assert!(!out.status.success());
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains("not initialized"), "got: {s}");
+}
+
+#[test]
+fn sync_errors_when_remote_is_unreachable_without_offline() {
+    // The repo()'s `origin` points at a sandbox URL that 404s — without
+    // --offline, sync's fetch must surface that as a hard error (and the
+    // stderr hint tells the user to retry with --offline).
+    let tmp = repo();
+    assert!(stacc(tmp.path(), &["init"]).status.success());
+    run_git(tmp.path(), &["checkout", "-q", "-b", "feature"]);
+    assert!(stacc(tmp.path(), &["track"]).status.success());
+
+    let out = stacc(tmp.path(), &["sync", "--format", "json"]);
+    assert!(!out.status.success());
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains(r#""error":"git""#), "got: {s}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("--offline"), "stderr: {err}");
 }
 
 #[test]
@@ -144,7 +162,7 @@ fn sync_detects_merged_and_reparents_children() {
 
     let out = stacc_env(
         tmp.path(),
-        &["sync", "--format", "json"],
+        &["sync", "--offline", "--format", "json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
@@ -172,7 +190,7 @@ fn sync_restacks_onto_advanced_trunk() {
     commit_file(tmp.path(), "b.txt", "b\n", "trunk work");
     run_git(tmp.path(), &["checkout", "-q", "feature"]);
 
-    let out = stacc(tmp.path(), &["sync", "--format", "json"]);
+    let out = stacc(tmp.path(), &["sync", "--offline", "--format", "json"]);
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains(r#""restacked":["feature"]"#), "got: {s}");
@@ -214,7 +232,7 @@ fn sync_uses_fork_point_when_recorded_base_is_stale() {
     );
     store.save(&state).unwrap();
 
-    let out = stacc(tmp.path(), &["sync", "--format", "json"]);
+    let out = stacc(tmp.path(), &["sync", "--offline", "--format", "json"]);
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains(r#""restacked":["feature"]"#), "got: {s}");
@@ -238,7 +256,7 @@ fn sync_conflict_writes_context_then_continue_completes() {
     run_git(tmp.path(), &["checkout", "-q", "feature"]);
 
     // First sync: conflict -> structured error + context + continuation files.
-    let out = stacc(tmp.path(), &["sync", "--format", "json"]);
+    let out = stacc(tmp.path(), &["sync", "--offline", "--format", "json"]);
     assert!(!out.status.success());
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains(r#""error":"conflict""#), "got: {s}");

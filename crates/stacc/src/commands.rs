@@ -302,7 +302,7 @@ pub fn submit(args: &SubmitArgs, format: OutputFormat) -> Result<(), Error> {
             .name
             .clone();
 
-        git.push(&repo.remote, branch)?;
+        git.push_force_with_lease(&repo.remote, branch)?;
 
         let title = git.commit_subject(branch)?;
         // --description applies to the branch the user is actually submitting;
@@ -480,9 +480,14 @@ pub fn sync(args: &SyncArgs, format: OutputFormat) -> Result<(), Error> {
         state.branches.remove(name);
     }
 
-    // Pull the trunk from upstream (best-effort: a restack still works offline).
-    if let Err(err) = fast_forward_trunk(&git, &repo.remote, &repo.trunk) {
-        eprintln!("warning: could not update trunk from `{}`: {err}", repo.remote);
+    // Pull the trunk from upstream. Strict by default — a flaky network or a
+    // bad remote should surface immediately. `--offline` opts out and restacks
+    // on whatever refs are already local.
+    if !args.offline {
+        if let Err(err) = fast_forward_trunk(&git, &repo.remote, &repo.trunk) {
+            eprintln!("hint: pass --offline to skip the fetch and restack on local refs only");
+            return Err(err);
+        }
     }
 
     // Pull-and-restack the remaining branches bottom-up onto their bases.
