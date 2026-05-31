@@ -1,4 +1,7 @@
-# stacc — Claude instructions
+# stacc — AGENTS.md
+
+Project conventions for coding agents. Inherits global defaults from
+`~/.pi/agent/AGENTS.md` (plain `git` + `gh`).
 
 ## Explaining Rust
 
@@ -15,10 +18,14 @@ This project doubles as a way to learn Rust. When you make changes:
 
 ## Workflow
 
-- Graphite is unavailable (expired subscription) — use plain `git` + `gh`, not `gt`.
+> Use plain `git` + `gh` for all branch, push, and PR operations (matches the
+> global default; do **not** use `gt`). This repo is itself the future
+> replacement for Graphite — see `plans/stacc.md`.
+
+- Use plain `git` + `gh` (NOT `gt`).
 - One branch per Linear ticket, named `jillian/sta-<n>-<slug>` to match the
   Linear branch name so PRs auto-link to the issue.
-- Conventional-commit format for commit messages and PR titles.
+- Conventional-commit format for commit messages and PR titles (still applies).
 - Squash-merge only (the repo enforces it).
 
 ## Project
