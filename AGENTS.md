@@ -12,6 +12,14 @@ fork). Linear: team **STA** (workspace tiny-dog-tech), branches
 Full decisions in `plans/stacc.md`; deeper notes in the Claude project memory at
 `~/.claude/projects/-Users-jilliankozyra-projects-stacked-diff-tooling/memory/`.
 
+## Commands
+
+```bash
+cargo build --workspace
+cargo test --workspace
+cargo clippy --workspace --all-targets    # also the citation source for "idiomatic" claims
+```
+
 ## Explaining Rust
 
 This project doubles as a way to learn Rust. When you make changes:
