@@ -8,6 +8,12 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+thiserror = { workspace = true }
+stacc-git = { path = "../stacc-git" }
+stacc-state = { path = "../stacc-state" }
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

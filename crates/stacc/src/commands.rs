@@ -1,10 +1,11 @@
 //! Implementations of the CLI subcommands.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use serde_json::{json, Value};
 use stacc_config::{detect, read_file, resolve, Overrides};
+use stacc_core::ops;
 use stacc_git::{Git, RebaseError};
 use stacc_github::{GitHub, NewPullRequest, PrState, PullRequestUpdate};
 use stacc_state::{Base, BranchState, PullRequest, RepoConfig, State, StateStore};
@@ -283,7 +284,7 @@ pub fn submit(args: &SubmitArgs, format: OutputFormat) -> Result<(), Error> {
 
     // Walk the downstack bottom-up so each PR's base ref is already on the
     // remote when we open the PR (the lowest base is always the trunk).
-    let chain = downstack_chain(&state, &current, &repo.trunk)?;
+    let chain = ops::downstack_chain(&state, &current, &repo.trunk)?;
 
     let (owner, repo_name) = stacc_github::parse_remote(&git.remote_url(&repo.remote)?)
         .ok_or_else(|| Error::Usage(format!("remote `{}` is not a GitHub URL", repo.remote)))?;
@@ -381,38 +382,6 @@ pub fn submit(args: &SubmitArgs, format: OutputFormat) -> Result<(), Error> {
     Ok(())
 }
 
-/// Walk from `current` up the base chain to the trunk (exclusive). Returns the
-/// branches in **bottom-up** order — base before dependent — so each push/PR
-/// sees its parent already on the remote.
-fn downstack_chain(state: &State, current: &str, trunk: &str) -> Result<Vec<String>, Error> {
-    let mut chain = Vec::new();
-    let mut visited: HashSet<String> = HashSet::new();
-    let mut name = current.to_string();
-    loop {
-        if name == trunk {
-            break;
-        }
-        if !visited.insert(name.clone()) {
-            return Err(Error::Usage(format!(
-                "circular base chain reached at `{name}`"
-            )));
-        }
-        match state.branches.get(&name) {
-            Some(bs) => {
-                chain.push(name.clone());
-                name = bs.base.name.clone();
-            }
-            None => {
-                return Err(Error::Usage(format!(
-                    "branch `{name}` is not tracked; run `stacc track` first"
-                )));
-            }
-        }
-    }
-    chain.reverse();
-    Ok(chain)
-}
-
 /// Resolve a `--description` value: `@path` reads a file, anything else is literal.
 fn resolve_description(value: &str) -> Result<String, Error> {
     match value.strip_prefix('@') {
@@ -466,7 +435,7 @@ pub fn sync(args: &SyncArgs, format: OutputFormat) -> Result<(), Error> {
         if merged.contains(name) {
             continue;
         }
-        let new_base = resolve_base(&state.branches, &merged, branch.base.name.clone());
+        let new_base = ops::resolve_base(&state.branches, &merged, branch.base.name.clone());
         if new_base != branch.base.name {
             reparented.push((name.clone(), new_base));
         }
@@ -491,8 +460,8 @@ pub fn sync(args: &SyncArgs, format: OutputFormat) -> Result<(), Error> {
     }
 
     // Pull-and-restack the remaining branches bottom-up onto their bases.
-    let order = topo_order(&state.branches, &repo.trunk);
-    let restacked = restack(&git, &store, &mut state, &repo, &order)?;
+    let order = ops::topo_order(&state.branches, &repo.trunk);
+    let restacked = restack_with_recovery(&git, &store, &mut state, &repo, &order)?;
 
     store.save(&state)?;
     finish_sync(&git, &store, &repo);
@@ -533,7 +502,7 @@ fn sync_continue(
     }
 
     let rest: Vec<String> = remaining.into_iter().skip(1).collect();
-    restacked.extend(restack(git, store, state, repo, &rest)?);
+    restacked.extend(restack_with_recovery(git, store, state, repo, &rest)?);
 
     store.save(state)?;
     finish_sync(git, store, repo);
@@ -541,56 +510,27 @@ fn sync_continue(
     Ok(())
 }
 
-/// Restack `order` bottom-up. On a conflict, persist the remaining work plus a
-/// context file, then return `Error::Conflict`.
-fn restack(
+/// Run the engine's [`ops::restack`], persisting recovery artifacts on a
+/// conflict. The continuation + conflict-context files stay in the CLI crate
+/// for now (so `stacc-core` stays off `stacc-github`); U2 moves the
+/// continuation into the engine as a typed operation record.
+fn restack_with_recovery(
     git: &Git,
     store: &StateStore,
     state: &mut State,
     repo: &RepoConfig,
     order: &[String],
 ) -> Result<Vec<String>, Error> {
-    let mut restacked = Vec::new();
-    for (idx, branch) in order.iter().enumerate() {
-        let Some(base) = state.branches.get(branch).map(|b| b.base.clone()) else {
-            continue;
-        };
-        let base_tip = git.rev_parse(&base.name)?;
-        if git.is_ancestor(&base_tip, branch)? {
-            continue; // already on top of its base
+    match ops::restack(git, store, state, order) {
+        Ok(restacked) => Ok(restacked),
+        Err(ops::OpsError::Conflict { branch, remaining }) => {
+            // `ops::restack` already saved state before returning.
+            write_continuation(git, &remaining)?;
+            write_conflict_context(git, state, repo, &branch);
+            Err(Error::Conflict { branch })
         }
-        // Prefer the recorded base hash if it's still reachable from the
-        // branch; otherwise (stale, force-pushed away, or invalid) recover via
-        // `merge-base --fork-point` using the base's reflog.
-        let recorded_ok = git.is_ancestor(&base.hash, branch).unwrap_or(false);
-        let upstream = if recorded_ok {
-            base.hash.clone()
-        } else {
-            git.fork_point(&base.name, branch)?.ok_or_else(|| {
-                Error::Usage(format!(
-                    "cannot recover the fork point of `{branch}` from `{}`; rebase manually",
-                    base.name
-                ))
-            })?
-        };
-        match git.rebase_onto(&base_tip, &upstream, branch) {
-            Ok(()) => {}
-            Err(RebaseError::Interrupt(_)) => {
-                store.save(state)?;
-                write_continuation(git, &order[idx..])?;
-                write_conflict_context(git, state, repo, branch);
-                return Err(Error::Conflict {
-                    branch: branch.clone(),
-                });
-            }
-            Err(RebaseError::Git(err)) => return Err(err.into()),
-        }
-        if let Some(b) = state.branches.get_mut(branch) {
-            b.base.hash.clone_from(&base_tip);
-        }
-        restacked.push(branch.clone());
+        Err(err) => Err(err.into()),
     }
-    Ok(restacked)
 }
 
 /// Push the state ref (best-effort) and clear any conflict artifacts.
@@ -695,22 +635,6 @@ fn fetch_base_pr(git: &Git, repo: &RepoConfig, state: &State, base: &str) -> Opt
     Some(json!({ "number": pr.number, "title": pr.title, "body": pr.body }))
 }
 
-/// Follow `base` up the stack, skipping any merged branches, to the nearest
-/// surviving base (eventually the trunk).
-fn resolve_base(
-    branches: &BTreeMap<String, BranchState>,
-    merged: &BTreeSet<String>,
-    mut base: String,
-) -> String {
-    while merged.contains(&base) {
-        match branches.get(&base) {
-            Some(branch) => base = branch.base.name.clone(),
-            None => break,
-        }
-    }
-    base
-}
-
 /// Fetch the trunk from `remote` and fast-forward the local trunk to it.
 fn fast_forward_trunk(git: &Git, remote: &str, trunk: &str) -> Result<(), Error> {
     git.fetch(remote, trunk)?;
@@ -724,29 +648,6 @@ fn fast_forward_trunk(git: &Git, remote: &str, trunk: &str) -> Result<(), Error>
         )?;
     }
     Ok(())
-}
-
-/// Order the tracked branches bottom-up: a branch appears after its base.
-fn topo_order(branches: &BTreeMap<String, BranchState>, trunk: &str) -> Vec<String> {
-    let mut emitted: BTreeSet<String> = BTreeSet::new();
-    let mut order: Vec<String> = Vec::new();
-    loop {
-        let mut progressed = false;
-        for (name, branch) in branches {
-            if emitted.contains(name) {
-                continue;
-            }
-            if branch.base.name == trunk || emitted.contains(&branch.base.name) {
-                order.push(name.clone());
-                emitted.insert(name.clone());
-                progressed = true;
-            }
-        }
-        if !progressed {
-            break;
-        }
-    }
-    order
 }
 
 /// `stacc auth` — dispatch to login / logout / status.
