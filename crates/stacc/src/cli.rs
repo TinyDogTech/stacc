@@ -63,6 +63,8 @@ pub enum Command {
     Submit(SubmitArgs),
     /// Pull upstream changes, detect merges, and restack.
     Sync(SyncArgs),
+    /// Rebase tracked branches back onto their bases (current + upstack by default).
+    Restack(RestackArgs),
     /// Print the stack.
     Log,
     /// Show the current branch's position and PR status.
@@ -130,5 +132,13 @@ pub struct SyncArgs {
     /// Skip the upstream fetch and restack on local refs only.
     #[arg(long)]
     pub offline: bool,
+}
+
+/// Arguments for `stacc restack`.
+#[derive(Debug, clap::Args)]
+pub struct RestackArgs {
+    /// Restack the whole stack instead of just the current branch and its upstack.
+    #[arg(long)]
+    pub stack: bool,
 }
 

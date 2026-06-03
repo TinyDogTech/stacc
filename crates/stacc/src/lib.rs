@@ -16,7 +16,9 @@ use cli::{Cli, Command, OutputFormat};
 use error::Error;
 
 /// Names that stacc always handles itself. These always shadow any user alias.
-const BUILTINS: &[&str] = &["init", "track", "log", "status", "submit", "sync", "auth"];
+const BUILTINS: &[&str] = &[
+    "init", "track", "log", "status", "submit", "sync", "restack", "auth",
+];
 
 /// Parse the command line, dispatch, and return the process exit code.
 pub fn run() -> ExitCode {
@@ -61,6 +63,7 @@ fn dispatch(cli: &Cli) -> Result<(), Error> {
         Command::Status => commands::status(cli.global.format),
         Command::Submit(args) => commands::submit(args, cli.global.format),
         Command::Sync(args) => commands::sync(args, cli.global.format),
+        Command::Restack(args) => commands::restack(args, cli.global.format),
         Command::Auth(args) => commands::auth(args, cli.global.format),
         Command::External(_) => unreachable!("external subcommands are proxied in run"),
     }
