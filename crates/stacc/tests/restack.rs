@@ -100,6 +100,9 @@ fn restack_stack_scope_repairs_whole_stack() {
     assert!(git_ok(p, &["merge-base", "--is-ancestor", "main", "a"]));
     assert!(git_ok(p, &["merge-base", "--is-ancestor", "main", "b"]));
     assert!(git_ok(p, &["merge-base", "--is-ancestor", "a", "b"]));
+    // Idempotent: a second --stack restack is a no-op.
+    let again = stacc(p, &["restack", "--stack", "--format", "json"]);
+    assert!(String::from_utf8_lossy(&again.stdout).contains(r#""restacked":[]"#));
 }
 
 #[test]
@@ -131,8 +134,65 @@ fn restack_conflict_writes_restack_continuation() {
     let cont = std::fs::read_to_string(git_dir.join("stacc-continue.json"))
         .expect("continuation written");
     assert!(cont.contains(r#""op":"restack""#), "got: {cont}");
+    assert!(cont.contains(r#""remaining":["a"]"#), "got: {cont}");
     assert!(
         git_dir.join("stacc-conflict-context.json").exists(),
         "context missing"
     );
+}
+
+#[test]
+fn restack_default_scope_restacks_current_upstack() {
+    let tmp = drifted_stack();
+    let p = tmp.path();
+    // From `a` (drifted off main), the default scope is `a` + its upstack `b`.
+    run_git(p, &["checkout", "-q", "a"]);
+    let out = stacc(p, &["restack", "--format", "json"]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains(r#""restacked":["a","b"]"#), "got: {s}");
+    assert!(git_ok(p, &["merge-base", "--is-ancestor", "main", "a"]));
+    assert!(git_ok(p, &["merge-base", "--is-ancestor", "a", "b"]));
+}
+
+#[test]
+fn restack_pretty_output() {
+    let tmp = drifted_stack();
+    let p = tmp.path();
+    run_git(p, &["checkout", "-q", "a"]);
+    // First run restacks the upstack -> "Restacked" lines.
+    let out = stacc(p, &["restack"]);
+    assert!(out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("Restacked a"),
+        "got: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    // Second run is a no-op -> "Already up to date."
+    let out = stacc(p, &["restack"]);
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("Already up to date."),
+        "got: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
+fn restack_on_trunk_errors() {
+    let tmp = drifted_stack();
+    let p = tmp.path();
+    run_git(p, &["checkout", "-q", "main"]);
+    let out = stacc(p, &["restack", "--format", "json"]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("trunk"),
+        "got: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    // --stack still restacks from the trunk.
+    assert!(stacc(p, &["restack", "--stack"]).status.success());
 }

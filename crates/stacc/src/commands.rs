@@ -486,10 +486,24 @@ pub fn restack(args: &RestackArgs, format: OutputFormat) -> Result<(), Error> {
         .clone()
         .ok_or_else(|| Error::Usage("stacc is not initialized; run `stacc init` first".into()))?;
 
+    // Refuse to start on top of an interrupted operation: a fresh restack would
+    // clobber its continuation and rebase into a tree that is already mid-rebase.
+    if git.rebase_in_progress() {
+        return Err(Error::Usage(
+            "a rebase is already in progress; resolve it and run `stacc sync --continue`, or `git rebase --abort`".into(),
+        ));
+    }
+
     let order = if args.stack {
         ops::topo_order(&state.branches, &repo.trunk)
     } else {
         let current = git.current_branch()?;
+        if current == repo.trunk {
+            return Err(Error::Usage(format!(
+                "on the trunk branch `{}`; check out a stack branch, or pass --stack to restack everything",
+                repo.trunk
+            )));
+        }
         ops::upstack_order(&state.branches, &current)
     };
 
@@ -498,6 +512,9 @@ pub fn restack(args: &RestackArgs, format: OutputFormat) -> Result<(), Error> {
     })?;
 
     store.save(&state)?;
+    // A clean restack leaves no recovery artifacts behind (a prior aborted run
+    // may have). Local-only: unlike `sync`, we do not push the state ref.
+    clear_conflict_artifacts(&git);
 
     match format {
         OutputFormat::Json => println!("{}", json!({ "restacked": restacked })),
