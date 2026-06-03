@@ -2141,6 +2141,7 @@ dependencies = [
  "serde_json",
  "shlex",
  "stacc-config",
+ "stacc-core",
  "stacc-git",
  "stacc-github",
  "stacc-state",
@@ -2162,6 +2163,12 @@ dependencies = [
 [[package]]
 name = "stacc-core"
 version = "0.0.0"
+dependencies = [
+ "stacc-git",
+ "stacc-state",
+ "tempfile",
+ "thiserror 2.0.18",
+]
 
 [[package]]
 name = "stacc-git"
