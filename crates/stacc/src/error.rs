@@ -52,6 +52,14 @@ impl From<stacc_core::ops::OpsError> for Error {
     }
 }
 
+// Continuation read/write failures surface as usage errors, reusing
+// RecoveryError's own `Display`.
+impl From<stacc_core::recovery::RecoveryError> for Error {
+    fn from(err: stacc_core::recovery::RecoveryError) -> Self {
+        Error::Usage(err.to_string())
+    }
+}
+
 impl Error {
     /// The machine-readable JSON form, used by `--format json`.
     pub fn as_json(&self) -> Value {

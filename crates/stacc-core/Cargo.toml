@@ -9,6 +9,8 @@ authors.workspace = true
 
 [dependencies]
 thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 stacc-git = { path = "../stacc-git" }
 stacc-state = { path = "../stacc-state" }
 

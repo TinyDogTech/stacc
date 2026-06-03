@@ -5,7 +5,7 @@ use std::path::Path;
 
 use serde_json::{json, Value};
 use stacc_config::{detect, read_file, resolve, Overrides};
-use stacc_core::ops;
+use stacc_core::{ops, recovery};
 use stacc_git::{Git, RebaseError};
 use stacc_github::{GitHub, NewPullRequest, PrState, PullRequestUpdate};
 use stacc_state::{Base, BranchState, PullRequest, RepoConfig, State, StateStore};
@@ -461,7 +461,9 @@ pub fn sync(args: &SyncArgs, format: OutputFormat) -> Result<(), Error> {
 
     // Pull-and-restack the remaining branches bottom-up onto their bases.
     let order = ops::topo_order(&state.branches, &repo.trunk);
-    let restacked = restack_with_recovery(&git, &store, &mut state, &repo, &order)?;
+    let restacked = restack_with_recovery(&git, &store, &mut state, &repo, &order, |remaining| {
+        recovery::Operation::Sync { remaining }
+    })?;
 
     store.save(&state)?;
     finish_sync(&git, &store, &repo);
@@ -477,7 +479,9 @@ fn sync_continue(
     repo: &RepoConfig,
     format: OutputFormat,
 ) -> Result<(), Error> {
-    let remaining = read_continuation(git)?;
+    let remaining: Vec<String> = recovery::read_continuation(&git.git_dir()?)?
+        .remaining()
+        .to_vec();
 
     match git.rebase_continue() {
         Ok(()) => {}
@@ -502,7 +506,9 @@ fn sync_continue(
     }
 
     let rest: Vec<String> = remaining.into_iter().skip(1).collect();
-    restacked.extend(restack_with_recovery(git, store, state, repo, &rest)?);
+    restacked.extend(restack_with_recovery(git, store, state, repo, &rest, |remaining| {
+        recovery::Operation::Sync { remaining }
+    })?);
 
     store.save(state)?;
     finish_sync(git, store, repo);
@@ -511,21 +517,23 @@ fn sync_continue(
 }
 
 /// Run the engine's [`ops::restack`], persisting recovery artifacts on a
-/// conflict. The continuation + conflict-context files stay in the CLI crate
-/// for now (so `stacc-core` stays off `stacc-github`); U2 moves the
-/// continuation into the engine as a typed operation record.
+/// conflict: the typed [`recovery::Operation`] continuation (built by `make_op`
+/// from the unfinished queue) plus the GitHub-enriched conflict-context file.
+/// The context writer stays in the CLI crate so `stacc-core` stays off
+/// `stacc-github`.
 fn restack_with_recovery(
     git: &Git,
     store: &StateStore,
     state: &mut State,
     repo: &RepoConfig,
     order: &[String],
+    make_op: impl Fn(Vec<String>) -> recovery::Operation,
 ) -> Result<Vec<String>, Error> {
     match ops::restack(git, store, state, order) {
         Ok(restacked) => Ok(restacked),
         Err(ops::OpsError::Conflict { branch, remaining }) => {
             // `ops::restack` already saved state before returning.
-            write_continuation(git, &remaining)?;
+            recovery::write_continuation(&git.git_dir()?, &make_op(remaining))?;
             write_conflict_context(git, state, repo, &branch);
             Err(Error::Conflict { branch })
         }
@@ -581,24 +589,9 @@ fn report_sync(
     }
 }
 
-/// Record the branches still to restack so `sync --continue` can resume.
-fn write_continuation(git: &Git, remaining: &[String]) -> Result<(), Error> {
-    let path = git.git_dir()?.join("stacc-continue.json");
-    let json = serde_json::to_string(remaining).unwrap_or_default();
-    std::fs::write(&path, json)
-        .map_err(|e| Error::Usage(format!("failed to write continuation: {e}")))
-}
-
-fn read_continuation(git: &Git) -> Result<Vec<String>, Error> {
-    let path = git.git_dir()?.join("stacc-continue.json");
-    let text = std::fs::read_to_string(&path)
-        .map_err(|_| Error::Usage("no sync in progress to continue".into()))?;
-    serde_json::from_str(&text).map_err(|e| Error::Usage(format!("corrupt continuation: {e}")))
-}
-
 fn clear_conflict_artifacts(git: &Git) {
     if let Ok(dir) = git.git_dir() {
-        let _ = std::fs::remove_file(dir.join("stacc-continue.json"));
+        recovery::clear_continuation(&dir);
         let _ = std::fs::remove_file(dir.join("stacc-conflict-context.json"));
     }
 }

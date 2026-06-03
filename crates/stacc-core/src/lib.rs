@@ -5,3 +5,4 @@
 //! See `plans/algorithms.md` (Squash-merge detection, Restack, Conflict resume).
 
 pub mod ops;
+pub mod recovery;
