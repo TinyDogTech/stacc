@@ -25,24 +25,20 @@ pub enum OpsError {
     #[error(transparent)]
     State(#[from] StateError),
 
-    /// A rebase stopped on a conflict. `remaining` is the unfinished queue,
-    /// `branch` first, so the caller can resume from exactly here.
+    /// A rebase stopped on a conflict; `remaining` is the unfinished queue with
+    /// the conflicting `branch` first, so the caller can resume from here.
     #[error("rebase conflict on `{branch}`")]
     Conflict {
         branch: String,
         remaining: Vec<String>,
     },
 
-    /// The recorded base hash was unusable and `git merge-base --fork-point`
-    /// could not recover where the branch diverged.
     #[error("cannot recover the fork point of `{branch}` from `{base}`; rebase manually")]
     ForkPointLost { branch: String, base: String },
 
-    /// A branch reached while walking a base chain is not tracked.
     #[error("branch `{0}` is not tracked; run `stacc track` first")]
     Untracked(String),
 
-    /// A base chain looped back on itself.
     #[error("circular base chain reached at `{0}`")]
     Cycle(String),
 }
@@ -79,7 +75,7 @@ pub fn upstack_order(branches: &BTreeMap<String, BranchState>, current: &str) ->
     while idx < order.len() {
         let node = order[idx].clone();
         for (name, branch) in branches {
-            if branch.base.name == node && !order.iter().any(|n| n == name) {
+            if branch.base.name == node && !order.contains(name) {
                 order.push(name.clone());
             }
         }
@@ -130,11 +126,11 @@ pub fn resolve_base(
     base
 }
 
-/// Restack `order` bottom-up, rebasing each branch onto its base's current tip.
-/// Updates each branch's recorded base hash in `state` as it goes. On a rebase
-/// conflict it saves `state` and returns [`OpsError::Conflict`] with the
-/// unfinished queue, leaving the working tree mid-rebase for the caller to
-/// persist recovery context and resume later.
+/// Restack `order` bottom-up, rebasing each branch onto its base's current tip
+/// and updating its recorded base hash in `state`. On a conflict it saves
+/// `state` and returns [`OpsError::Conflict`] with the unfinished queue, leaving
+/// the rebase in progress. The caller MUST persist a continuation (or abort the
+/// rebase) before returning to the user — see `restack_with_recovery`.
 pub fn restack(
     git: &Git,
     store: &StateStore,
@@ -402,6 +398,67 @@ mod tests {
             other => panic!("expected conflict, got {other:?}"),
         }
         assert!(git.rebase_in_progress());
+        // The conflict path saved state so `sync --continue` can resume.
+        assert_eq!(store.load().unwrap().branches.len(), 2);
         git.rebase_abort().unwrap();
+    }
+
+    #[test]
+    fn restack_errors_when_fork_point_unrecoverable() {
+        let (tmp, git) = init_repo();
+        let path = tmp.path();
+        // `a` is an orphan with no shared history with main, so
+        // `merge-base --fork-point main a` cannot recover a divergence point.
+        run_git(path, &["checkout", "-q", "--orphan", "a"]);
+        write_commit(path, "a.txt", "a\n", "orphan a");
+        run_git(path, &["checkout", "-q", "main"]);
+        write_commit(path, "m.txt", "m\n", "main moves");
+
+        let mut branches = BTreeMap::new();
+        branches.insert(
+            "a".to_string(),
+            BranchState {
+                base: Base {
+                    name: "main".into(),
+                    hash: "1".repeat(40),
+                },
+                pr: None,
+            },
+        );
+        let mut state = State {
+            repo: None,
+            branches,
+        };
+        let store = StateStore::new(git.clone());
+
+        let err = restack(&git, &store, &mut state, &["a".into()]).unwrap_err();
+        assert!(matches!(err, OpsError::ForkPointLost { ref branch, .. } if branch == "a"));
+    }
+
+    #[test]
+    fn topo_order_drops_orphans_unreachable_from_trunk() {
+        // `orphan`'s base is neither trunk nor a tracked branch.
+        let branches = branch_state(&[("a", "main"), ("orphan", "ghost")]);
+        assert_eq!(topo_order(&branches, "main"), vec!["a"]);
+    }
+
+    #[test]
+    fn upstack_order_handles_branched_upstack() {
+        // a -> main, b -> a, c -> a (two children of `a`).
+        let branches = branch_state(&[("b", "a"), ("c", "a"), ("a", "main")]);
+        let order = upstack_order(&branches, "a");
+        assert_eq!(order[0], "a");
+        assert_eq!(order.len(), 3);
+        assert!(order.contains(&"b".to_string()) && order.contains(&"c".to_string()));
+    }
+
+    #[test]
+    fn resolve_base_skips_consecutive_merged() {
+        // a -> main, b -> a, c -> b; a and b both merged -> resolve to main.
+        let branches = branch_state(&[("c", "b"), ("b", "a"), ("a", "main")]);
+        let mut merged = BTreeSet::new();
+        merged.insert("a".to_string());
+        merged.insert("b".to_string());
+        assert_eq!(resolve_base(&branches, &merged, "b".into()), "main");
     }
 }

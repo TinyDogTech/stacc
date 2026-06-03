@@ -32,26 +32,22 @@ pub enum Error {
 }
 
 // The operations engine has its own error type so `stacc-core` stays off the
-// CLI crate; map it onto the user-facing `Error`. `Conflict` carries a
-// `remaining` queue the engine doesn't surface here — the caller that persists
-// recovery artifacts handles that variant directly and only falls back to this
-// mapping for the non-conflict cases.
+// CLI crate; map it onto the user-facing `Error`. `Conflict` is never mapped
+// here — `restack_with_recovery` intercepts it to write the recovery artifacts,
+// so reaching that arm means a caller wrongly `?`-propagated the engine; we fail
+// loud rather than silently drop the resume queue.
 impl From<stacc_core::ops::OpsError> for Error {
     fn from(err: stacc_core::ops::OpsError) -> Self {
         use stacc_core::ops::OpsError;
         match err {
             OpsError::Git(e) => Error::Git(e),
             OpsError::State(e) => Error::State(e),
-            OpsError::Conflict { branch, .. } => Error::Conflict { branch },
-            OpsError::ForkPointLost { branch, base } => Error::Usage(format!(
-                "cannot recover the fork point of `{branch}` from `{base}`; rebase manually"
-            )),
-            OpsError::Untracked(name) => {
-                Error::Usage(format!("branch `{name}` is not tracked; run `stacc track` first"))
+            OpsError::Conflict { .. } => {
+                unreachable!("OpsError::Conflict must be handled by restack_with_recovery")
             }
-            OpsError::Cycle(name) => {
-                Error::Usage(format!("circular base chain reached at `{name}`"))
-            }
+            // ForkPointLost / Untracked / Cycle reuse OpsError's own `Display`
+            // so the user-facing message has a single source of truth.
+            other => Error::Usage(other.to_string()),
         }
     }
 }
