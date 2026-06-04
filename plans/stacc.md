@@ -11,17 +11,17 @@ current tools accommodate them well.
 
 ## Name
 
-**`stacc`** — a deliberate misspelling of "stack" in the internet-slang tradition. Clean
+**`stacc`**, a deliberate misspelling of "stack" in the internet-slang tradition. Clean
 namespace: not in Homebrew, not on crates.io, not on npm (only a trivial LIFO stack package
 that won't conflict). Binary command: `stacc`.
 
 Rejected names and why:
-- `stax` — taken on crates.io as a Rust stacked PR tool in the same domain
-- `flume` — Apache Flume (Homebrew), well-known Rust channel crate (111M+ downloads)
-- `braid` — git vendor branch tool in Homebrew
-- `stak` — Scheme interpreter on crates.io
-- `loom` — well-known video recording brand (Atlassian)
-- `st` — statistics CLI in Homebrew, conflicts with schemathesis
+- `stax`, taken on crates.io as a Rust stacked PR tool in the same domain
+- `flume`, Apache Flume (Homebrew), well-known Rust channel crate (111M+ downloads)
+- `braid`, git vendor branch tool in Homebrew
+- `stak`, Scheme interpreter on crates.io
+- `loom`, well-known video recording brand (Atlassian)
+- `st`, statistics CLI in Homebrew, conflicts with schemathesis
 
 ## Design decisions
 
@@ -41,21 +41,20 @@ Branches are named and managed by the tool; the stack structure is tracked in st
 
 ### State storage
 
-Hidden git ref: `refs/stacc/` — stores JSON trees as commits (same pattern as git-spice's
+Hidden git ref: `refs/stacc/`, stores JSON trees as commits (same pattern as git-spice's
 `refs/spice/`). State travels with the repo via push/pull. No files in the working tree.
 No external server required.
 
 ### Forge support
 
-**v1: GitHub only.** Auth via PAT or OAuth device flow (like `gh auth login`). No GitHub App —
-all code runs locally. GitHub API calls for: creating/updating PRs, fetching upstream PR
+**v1: GitHub only.** Auth via PAT or OAuth device flow (like `gh auth login`). No GitHub App,all code runs locally. GitHub API calls for: creating/updating PRs, fetching upstream PR
 context during conflict resolution, detecting squash-merges.
 
 ### Agent-first design
 
 The core design constraint: every operation must work without a human in the loop.
 
-- Non-interactive by default — fail with a structured error rather than open a prompt
+- Non-interactive by default, fail with a structured error rather than open a prompt
 - `--format json` on all commands for machine-readable output
 - `--description <file-or-string>` on submit so agents can pass PR descriptions
 - Conflict context: on rebase conflict, fetch the upstream PR (title, body, relevant diff)
@@ -100,11 +99,11 @@ stacc/
 
 ## Key hard problems (reference implementations in git-spice)
 
-1. **Squash-merge detection** — after sync, query GitHub API to detect if any stack branches
+1. **Squash-merge detection**, after sync, query GitHub API to detect if any stack branches
    were squash-merged; compare squashed commit to original to avoid phantom rebase conflicts.
-2. **Rebase-after-merge** — when upstream branches merge, automatically rebase dependents
+2. **Rebase-after-merge**, when upstream branches merge, automatically rebase dependents
    onto the new trunk.
-3. **Conflict context fetching** — on rebase conflict, identify the upstream commit/PR that
+3. **Conflict context fetching**, on rebase conflict, identify the upstream commit/PR that
    caused it, fetch its PR body and relevant diff hunks from GitHub API.
 
 See [`algorithms.md`](./algorithms.md) for the concrete spec of all three (squash-merge
@@ -113,7 +112,7 @@ and the stacc-specific deltas. Reference implementations in Go live in `../../gi
 
 ## Later (v2+)
 
-- MCP server (`stacc mcp serve`) — exposes tools for agent-in-loop conflict resolution
-- Parallel agent / worktree support — locking on state ref for concurrent writes
+- MCP server (`stacc mcp serve`), exposes tools for agent-in-loop conflict resolution
+- Parallel agent / worktree support, locking on state ref for concurrent writes
 - Additional forges (GitLab, Bitbucket)
 - AGENTS.md / CLAUDE.md shipped with the tool for repo-level agent guidance

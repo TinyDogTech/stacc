@@ -97,7 +97,7 @@ fn sync_requires_init() {
 
 #[test]
 fn sync_errors_when_remote_is_unreachable_without_offline() {
-    // The repo()'s `origin` points at a sandbox URL that 404s — without
+    // The repo()'s `origin` points at a sandbox URL that 404s, without
     // --offline, sync's fetch must surface that as a hard error (and the
     // stderr hint tells the user to retry with --offline).
     let tmp = repo();
@@ -214,7 +214,7 @@ fn sync_uses_fork_point_when_recorded_base_is_stale() {
     commit_file(tmp.path(), "m.txt", "main\n", "trunk commit");
     run_git(tmp.path(), &["checkout", "-q", "feature"]);
 
-    // Poison the recorded base hash with the zero-OID — not a valid commit at
+    // Poison the recorded base hash with the zero-OID, not a valid commit at
     // all. Without fork-point recovery the rebase would bail with `fatal:
     // invalid upstream 0000…`; with it, sync should use the base's reflog to
     // find the real divergence point and complete.

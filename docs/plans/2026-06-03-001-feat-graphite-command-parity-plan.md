@@ -42,7 +42,7 @@ TTY-only convenience layer for humans.
 Three shapes drive the design: where the shared engine lives and who depends on
 it, the unified conflict-recovery lifecycle, and the merge flow.
 
-**Crate layering — commands depend on one engine.** Today orchestration lives in
+**Crate layering, commands depend on one engine.** Today orchestration lives in
 the CLI crate. After U1/U2 the engine lives in `stacc-core` and every
 conflict-or-graph-touching command consumes it.
 
@@ -273,7 +273,7 @@ workflow. Library-layer logic carries the tests (inline `#[cfg(test)]` modules
 with tempfile git repos and httpmock, matching the existing crate convention);
 CLI command functions stay thin orchestration.
 
-### Phase A — Foundation
+### Phase A, Foundation
 
 ### U1. Lift the stack-operations engine into `stacc-core`
 
@@ -288,8 +288,7 @@ CLI command functions stay thin orchestration.
 - **Approach:** Relocate `restack`, `topo_order`, `downstack_chain`,
   `resolve_base`, and the recorded-base-vs-fork-point logic into `ops.rs` as
   functions taking `&Git`, `&StateStore`, `&mut State`. Add a small new
-  `upstack_order(current)` helper (current branch + its upstack, bottom-up) —
-  `topo_order` orders the *whole* stack and is the wrong scope for `modify`/`move`,
+  `upstack_order(current)` helper (current branch + its upstack, bottom-up),  `topo_order` orders the *whole* stack and is the wrong scope for `modify`/`move`,
   so this lands in U1 to unblock U7 in Phase B. Conflict-context and continuation
   move in U2. Preserve current behavior **including known quirks** (the ancestor
   short-circuit that skips a branch already atop its base; the fork-point
@@ -299,7 +298,7 @@ CLI command functions stay thin orchestration.
   until U2 swaps in the typed `Operation`. Preserve the `Error::Conflict { branch }`
   exit contract.
 - **Execution note:** Add characterization tests for the engine against tempfile
-  repos before/while moving it — there is no command-level coverage today. Pin
+  repos before/while moving it, there is no command-level coverage today. Pin
   current behavior (quirks included); do not "fix" the ancestor short-circuit here.
 - **Patterns to follow:** existing `restack`/`topo_order`/`downstack_chain` in
   `crates/stacc/src/commands.rs`; tempfile test setup in
@@ -316,7 +315,7 @@ CLI command functions stay thin orchestration.
   - `upstack_order(current)` returns current + its upstack bottom-up, excluding
     the downstack and unrelated sibling stacks.
   - Conflict path still writes the existing `.git/stacc-continue.json` branch-list
-    format (shim) — characterization assertion that U1 changed nothing here.
+    format (shim), characterization assertion that U1 changed nothing here.
 - **Verification:** `cargo test --workspace` green; `submit`/`sync` behavior
   unchanged; engine functions live in `stacc-core` and the CLI crate depends on
   it.
@@ -354,7 +353,7 @@ CLI command functions stay thin orchestration.
 - **Verification:** `cargo test --workspace` green; `sync` conflict→continue
   still works end-to-end via the new substrate.
 
-### Phase B — Core edit loop + recovery
+### Phase B, Core edit loop + recovery
 
 ### U3. Branch-lifecycle git helpers
 
@@ -368,7 +367,7 @@ CLI command functions stay thin orchestration.
   (`git branch -m`), `commit(message)` (`git commit -m`),
   `commit_amend(message: Option<&str>)` (`git commit --amend [-m | --no-edit]`),
   and `has_staged_changes()` (`git diff --cached --quiet`, exit-code mapped like
-  `is_ancestor`). Reuse the existing `command`/`run` helpers — they already set
+  `is_ancestor`). Reuse the existing `command`/`run` helpers, they already set
   `GIT_EDITOR=true` / `GIT_TERMINAL_PROMPT=0`.
 - **Patterns to follow:** exit-code mapping in `is_ancestor`/`fork_point`;
   command construction in `crates/stacc-git/src/lib.rs`.
@@ -416,8 +415,8 @@ CLI command functions stay thin orchestration.
 - **Approach:** `continue` reads the `Operation` (U2), finishes the in-progress
   rebase (`rebase_continue`), records the resumed branch's base hash, then drains
   the remaining queue through the engine. `abort` runs `rebase_abort`, then
-  restores the operation's rollback anchor when present — resetting a `Modify`
-  branch to its pre-amend tip / a `Move` branch to its pre-re-parent base — and
+  restores the operation's rollback anchor when present, resetting a `Modify`
+  branch to its pre-amend tip / a `Move` branch to its pre-re-parent base, and
   clears artifacts, so pre-operation state is truly restored (a bare
   `rebase --abort` would leave the amend / re-parent in place). Route
   `sync --continue` to the shared `continue` path. Generalize the
@@ -447,7 +446,7 @@ CLI command functions stay thin orchestration.
 - **Files:** `crates/stacc/src/cli.rs` (add `Create` + `CreateArgs`),
   `crates/stacc/src/commands.rs`, `crates/stacc/src/lib.rs`.
 - **Approach:** Require an initialized repo; take a branch name. Base = the current
-  branch (which is trunk when starting the first branch of a stack — the normal
+  branch (which is trunk when starting the first branch of a stack, the normal
   path, allowed). The only refusal is a detached HEAD (no current branch name to
   record as base). Create+switch the branch, commit staged changes if
   `has_staged_changes()` (else leave an empty branch), record `BranchState` with
@@ -474,7 +473,7 @@ CLI command functions stay thin orchestration.
 - **Approach:** Default amends the branch's tip commit (`commit_amend(None)`);
   `--commit [-m]` appends a new commit. Refuse on trunk. Refuse to amend when the
   branch has no commit of its own above its base (`rev_parse(branch) == base_tip`)
-  — amending there would rewrite the parent's commit; point the user at `--commit`.
+ , amending there would rewrite the parent's commit; point the user at `--commit`.
   Record the pre-amend tip as the rollback anchor, then restack the branch's
   upstack via the engine's `upstack_order` (U1); on conflict write an
   `Operation::Modify` continuation carrying that anchor (U2).
@@ -493,7 +492,7 @@ CLI command functions stay thin orchestration.
 - **Verification:** `cargo test --workspace` green; amend + auto-restack leaves
   every upstack branch a descendant of its base.
 
-### Phase C — Navigation + display
+### Phase C, Navigation + display
 
 ### U8. Stack-navigation helpers + `up`/`down`/`top`/`bottom`
 
@@ -575,7 +574,7 @@ CLI command functions stay thin orchestration.
 - **Verification:** `cargo test --workspace` green; `stacc log` renders the graph;
   `stacc log --format json` unchanged.
 
-### Phase D — Manipulation + lifecycle
+### Phase D, Manipulation + lifecycle
 
 ### U11. `stacc move`
 
@@ -618,7 +617,7 @@ CLI command functions stay thin orchestration.
   surface the closing PR in JSON, drop its recorded PR number so the next `submit`
   recreates it, and warn. Externally-renamed branches are detected only as far as
   is reliable: a state key with no matching local branch is flagged as orphaned
-  (in `log`/`status` and by `rename`) for the user to re-`track` — stacc does not
+  (in `log`/`status` and by `rename`) for the user to re-`track`, stacc does not
   guess the new name (no reflog access today; a `git` reflog helper is a deferred
   follow-up). On a protected-branch / permission failure from the API, fall back to
   local + state rename and warn.
@@ -711,7 +710,7 @@ CLI command functions stay thin orchestration.
   the URL (open in a browser on a TTY); JSON emits `{number, url}`; structured
   error when no PR is recorded. Built-in aliases: a private `const &[(&str, &str)]`
   in `crates/stacc/src/lib.rs` (`co`→`checkout`, `u`→`up`, `d`→`down`, etc.) seeded
-  into the alias table at lowest precedence so user/repo config overrides — no
+  into the alias table at lowest precedence so user/repo config overrides, no
   `stacc-config` change. Built-ins are aliases (not in `BUILTINS`) so they expand
   to real commands.
 - **Patterns to follow:** `status`'s PR lookup in `crates/stacc/src/commands.rs`;
@@ -744,9 +743,9 @@ CLI command functions stay thin orchestration.
 
 ### Deferred to Follow-Up Work
 
-- CI (STA-18) — this batch lands without CI; rely on local `cargo test
+- CI (STA-18), this batch lands without CI; rely on local `cargo test
   --workspace` + `cargo clippy --workspace --all-targets`.
-- OAuth `DEFAULT_OAUTH_CLIENT_ID` registration (STA-17 follow-up) — unrelated to
+- OAuth `DEFAULT_OAUTH_CLIENT_ID` registration (STA-17 follow-up), unrelated to
   this batch.
 - Moving the continuation record from `.git/` into the state ref (would be needed
   for parallel-agent support; out of scope here).
@@ -815,6 +814,5 @@ CLI command functions stay thin orchestration.
 - CLI dispatch + alias expansion: `crates/stacc/src/lib.rs` (`BUILTINS`,
   `expand_aliases`, `proxy_to_git`).
 - GitHub branch-rename behavior (verified): renaming retargets the **base** of
-  open PRs and redirects URLs, but **closes** any PR whose **head** is renamed —
-  `https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-branches-in-your-repository/renaming-a-branch`.
+  open PRs and redirects URLs, but **closes** any PR whose **head** is renamed,  `https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-branches-in-your-repository/renaming-a-branch`.
 - GitHub branch-rename REST endpoint: `https://docs.github.com/en/rest/branches/branches`.

@@ -1,6 +1,6 @@
 //! The stack-operations engine: ordering the tracked branches and restacking
-//! them onto their bases. These functions are forge-agnostic — they speak only
-//! `git` and the state ref — so `submit`, `sync`, and `restack` (and later
+//! them onto their bases. These functions are forge-agnostic, they speak only
+//! `git` and the state ref, so `submit`, `sync`, and `restack` (and later
 //! `modify`/`move`/`merge`) all share one implementation.
 //!
 //! Conflict *recovery* (the `.git/stacc-continue.json` continuation and the
@@ -66,7 +66,7 @@ pub fn topo_order(branches: &BTreeMap<String, BranchState>, trunk: &str) -> Vec<
     order
 }
 
-/// The current branch plus its upstack (transitive children), bottom-up — a
+/// The current branch plus its upstack (transitive children), bottom-up, a
 /// base always precedes its dependents. Unlike [`topo_order`], this is scoped
 /// to one branch's subtree, which is what `modify`/`move` need.
 pub fn upstack_order(branches: &BTreeMap<String, BranchState>, current: &str) -> Vec<String> {
@@ -85,7 +85,7 @@ pub fn upstack_order(branches: &BTreeMap<String, BranchState>, current: &str) ->
 }
 
 /// Walk from `current` up the base chain to the trunk (exclusive). Returns the
-/// branches in **bottom-up** order — base before dependent — so each push/PR
+/// branches in **bottom-up** order, base before dependent, so each push/PR
 /// sees its parent already on the remote.
 pub fn downstack_chain(state: &State, current: &str, trunk: &str) -> Result<Vec<String>, OpsError> {
     let mut chain = Vec::new();
@@ -130,7 +130,7 @@ pub fn resolve_base(
 /// and updating its recorded base hash in `state`. On a conflict it saves
 /// `state` and returns [`OpsError::Conflict`] with the unfinished queue, leaving
 /// the rebase in progress. The caller MUST persist a continuation (or abort the
-/// rebase) before returning to the user — see `restack_with_recovery`.
+/// rebase) before returning to the user, see `restack_with_recovery`.
 pub fn restack(
     git: &Git,
     store: &StateStore,

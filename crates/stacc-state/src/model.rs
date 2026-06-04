@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Repository-level configuration — stored at the `repo` key.
+/// Repository-level configuration, stored at the `repo` key.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepoConfig {
     pub trunk: String,
@@ -24,7 +24,7 @@ pub struct PullRequest {
     pub url: Option<String>,
 }
 
-/// State for one tracked branch — stored at `branches/<name>`.
+/// State for one tracked branch, stored at `branches/<name>`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BranchState {
     pub base: Base,

@@ -153,7 +153,7 @@ impl Git {
     }
 
     /// Push `refspec` to `remote` with `--force-with-lease`. Refuses to clobber
-    /// a ref whose remote tip moved out from under us — the safe-by-default
+    /// a ref whose remote tip moved out from under us, the safe-by-default
     /// force push for re-submitting a rebased branch.
     pub fn push_force_with_lease(&self, remote: &str, refspec: &str) -> Result<(), GitError> {
         self.run(&["push", "--force-with-lease", remote, refspec])
@@ -248,7 +248,7 @@ impl Git {
     }
 
     /// Point `name` at `new`. When `old` is given, the move only succeeds if
-    /// the ref currently equals it — a compare-and-swap.
+    /// the ref currently equals it, a compare-and-swap.
     pub fn update_ref(&self, name: &str, new: &str, old: Option<&str>) -> Result<(), GitError> {
         let mut args = vec!["update-ref", name, new];
         if let Some(old) = old {
@@ -287,7 +287,7 @@ impl Git {
         }
     }
 
-    /// List the leaf blob paths under `<rev>:<path>`, recursively — so a nested
+    /// List the leaf blob paths under `<rev>:<path>`, recursively, so a nested
     /// entry comes back as its full path (e.g. `jillian/foo`), not just `jillian`.
     pub fn list_tree(&self, rev: &str, path: &str) -> Result<Vec<String>, GitError> {
         let spec = format!("{rev}:{path}");

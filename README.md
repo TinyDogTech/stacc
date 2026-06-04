@@ -12,7 +12,7 @@ every command is non-interactive by default and can emit machine-readable JSON.
 
 | Crate | Responsibility |
 | --- | --- |
-| `stacc` | Binary entry point — CLI parsing and command dispatch |
+| `stacc` | Binary entry point, CLI parsing and command dispatch |
 | `stacc-core` | Stack operations: submit, sync, restack |
 | `stacc-git` | Typed wrappers over the `git` CLI |
 | `stacc-github` | GitHub API client and auth |
@@ -55,7 +55,7 @@ stacc auth status
 stacc auth logout
 ```
 
-The OAuth scope GitHub grants here is `repo` — the narrowest scope GitHub
+The OAuth scope GitHub grants here is `repo`, the narrowest scope GitHub
 OAuth Apps can request that still allows PR read/write. If you want tighter
 permissions, use a fine-grained PAT (option B).
 
@@ -80,7 +80,7 @@ against, with the following permissions:
 That's strictly less power than what `stacc auth login` requests. Fine-grained
 PATs also force expiration (max 1 year), which we consider a feature.
 
-Classic PATs work too — set `repo` scope — but they grant write access to
+Classic PATs work too, set `repo` scope, but they grant write access to
 every repo your account can reach, so we don't recommend them.
 
 ### Status

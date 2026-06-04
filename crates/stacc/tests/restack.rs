@@ -71,7 +71,7 @@ fn restack_default_scope_leaves_downstack_untouched() {
     let tmp = drifted_stack();
     let p = tmp.path();
     // From `b`, the default scope is `b` + its upstack (empty). `a` is downstack
-    // and drifted, but out of scope — nothing is restacked.
+    // and drifted, but out of scope, nothing is restacked.
     run_git(p, &["checkout", "-q", "b"]);
     let out = stacc(p, &["restack", "--format", "json"]);
     assert!(
