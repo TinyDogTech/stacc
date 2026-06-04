@@ -48,6 +48,44 @@ impl Operation {
             | Operation::Move { remaining, .. } => remaining,
         }
     }
+
+    /// The same operation with a new remaining queue, preserving the variant and
+    /// any rollback anchor. Used when a resume hits a fresh conflict, so the
+    /// rewritten continuation keeps its original identity instead of collapsing
+    /// to `Sync`.
+    #[must_use]
+    pub fn with_remaining(&self, remaining: Vec<String>) -> Operation {
+        match self {
+            Operation::Sync { .. } => Operation::Sync { remaining },
+            Operation::Restack { .. } => Operation::Restack { remaining },
+            Operation::Modify { pre_amend, .. } => Operation::Modify {
+                remaining,
+                pre_amend: pre_amend.clone(),
+            },
+            Operation::Move { pre_base, .. } => Operation::Move {
+                remaining,
+                pre_base: pre_base.clone(),
+            },
+        }
+    }
+
+    /// Whether finishing this operation should push the state ref. Only `sync`
+    /// reconciles with the remote; `restack`/`modify`/`move` are purely local.
+    pub fn pushes_state(&self) -> bool {
+        matches!(self, Operation::Sync { .. })
+    }
+
+    /// The wire tag identifying the operation (matches the serde `op` value):
+    /// `sync`, `restack`, `modify`, or `move`. Surfaced in command output so an
+    /// agent knows which operation a `continue` resumed.
+    pub fn tag(&self) -> &'static str {
+        match self {
+            Operation::Sync { .. } => "sync",
+            Operation::Restack { .. } => "restack",
+            Operation::Modify { .. } => "modify",
+            Operation::Move { .. } => "move",
+        }
+    }
 }
 
 /// Failures reading or writing the continuation record.
@@ -155,6 +193,76 @@ mod tests {
         assert_eq!(all[1].remaining(), ["a"]); // Restack
         assert_eq!(all[2].remaining(), ["b", "c"]); // Modify
         assert_eq!(all[3].remaining(), ["b"]); // Move
+    }
+
+    #[test]
+    fn with_remaining_preserves_variant_and_anchor() {
+        let r = vec!["b".to_string(), "c".to_string()];
+        assert_eq!(
+            Operation::Sync {
+                remaining: vec!["a".into()],
+            }
+            .with_remaining(r.clone()),
+            Operation::Sync {
+                remaining: r.clone(),
+            }
+        );
+        assert_eq!(
+            Operation::Restack {
+                remaining: vec!["a".into()],
+            }
+            .with_remaining(r.clone()),
+            Operation::Restack {
+                remaining: r.clone(),
+            }
+        );
+        assert_eq!(
+            Operation::Modify {
+                remaining: vec!["a".into()],
+                pre_amend: "h".into(),
+            }
+            .with_remaining(r.clone()),
+            Operation::Modify {
+                remaining: r.clone(),
+                pre_amend: "h".into(),
+            }
+        );
+        assert_eq!(
+            Operation::Move {
+                remaining: vec!["a".into()],
+                pre_base: "p".into(),
+            }
+            .with_remaining(r.clone()),
+            Operation::Move {
+                remaining: r,
+                pre_base: "p".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn only_sync_pushes_state() {
+        assert!(Operation::Sync { remaining: vec![] }.pushes_state());
+        assert!(!Operation::Restack { remaining: vec![] }.pushes_state());
+        assert!(!Operation::Modify {
+            remaining: vec![],
+            pre_amend: "h".into(),
+        }
+        .pushes_state());
+        assert!(!Operation::Move {
+            remaining: vec![],
+            pre_base: "p".into(),
+        }
+        .pushes_state());
+    }
+
+    #[test]
+    fn tag_matches_each_variant() {
+        let all = ops();
+        assert_eq!(all[0].tag(), "sync");
+        assert_eq!(all[1].tag(), "restack");
+        assert_eq!(all[2].tag(), "modify");
+        assert_eq!(all[3].tag(), "move");
     }
 
     #[test]
