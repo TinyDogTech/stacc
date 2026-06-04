@@ -65,6 +65,10 @@ pub enum Command {
     Sync(SyncArgs),
     /// Rebase tracked branches back onto their bases (current + upstack by default).
     Restack(RestackArgs),
+    /// Resume the operation interrupted by a conflict, after resolving it.
+    Continue,
+    /// Abort the operation interrupted by a conflict and restore the prior state.
+    Abort,
     /// Print the stack.
     Log,
     /// Show the current branch's position and PR status.

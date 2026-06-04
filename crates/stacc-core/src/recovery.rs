@@ -48,6 +48,32 @@ impl Operation {
             | Operation::Move { remaining, .. } => remaining,
         }
     }
+
+    /// The same operation with a new remaining queue, preserving the variant and
+    /// any rollback anchor. Used when a resume hits a fresh conflict, so the
+    /// rewritten continuation keeps its original identity instead of collapsing
+    /// to `Sync`.
+    #[must_use]
+    pub fn with_remaining(&self, remaining: Vec<String>) -> Operation {
+        match self {
+            Operation::Sync { .. } => Operation::Sync { remaining },
+            Operation::Restack { .. } => Operation::Restack { remaining },
+            Operation::Modify { pre_amend, .. } => Operation::Modify {
+                remaining,
+                pre_amend: pre_amend.clone(),
+            },
+            Operation::Move { pre_base, .. } => Operation::Move {
+                remaining,
+                pre_base: pre_base.clone(),
+            },
+        }
+    }
+
+    /// Whether finishing this operation should push the state ref. Only `sync`
+    /// reconciles with the remote; `restack`/`modify`/`move` are purely local.
+    pub fn pushes_state(&self) -> bool {
+        matches!(self, Operation::Sync { .. })
+    }
 }
 
 /// Failures reading or writing the continuation record.
@@ -155,6 +181,33 @@ mod tests {
         assert_eq!(all[1].remaining(), ["a"]); // Restack
         assert_eq!(all[2].remaining(), ["b", "c"]); // Modify
         assert_eq!(all[3].remaining(), ["b"]); // Move
+    }
+
+    #[test]
+    fn with_remaining_preserves_variant_and_anchor() {
+        let modified = Operation::Modify {
+            remaining: vec!["a".into()],
+            pre_amend: "h".into(),
+        }
+        .with_remaining(vec!["b".into(), "c".into()]);
+        assert_eq!(
+            modified,
+            Operation::Modify {
+                remaining: vec!["b".into(), "c".into()],
+                pre_amend: "h".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn only_sync_pushes_state() {
+        assert!(Operation::Sync { remaining: vec![] }.pushes_state());
+        assert!(!Operation::Restack { remaining: vec![] }.pushes_state());
+        assert!(!Operation::Modify {
+            remaining: vec![],
+            pre_amend: "h".into(),
+        }
+        .pushes_state());
     }
 
     #[test]

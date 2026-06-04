@@ -22,7 +22,7 @@ pub enum Error {
     #[error(transparent)]
     Github(#[from] stacc_github::GitHubError),
 
-    #[error("rebase conflict on `{branch}`; resolve it, then re-run `stacc sync`")]
+    #[error("rebase conflict on `{branch}`; resolve it, then run `stacc continue` (or `stacc abort` to undo)")]
     #[diagnostic(code(stacc::conflict))]
     Conflict { branch: String },
 
@@ -68,7 +68,12 @@ impl Error {
             Error::State(err) => json!({ "error": "state", "message": err.to_string() }),
             Error::Git(err) => json!({ "error": "git", "message": err.to_string() }),
             Error::Github(err) => json!({ "error": "github", "message": err.to_string() }),
-            Error::Conflict { branch } => json!({ "error": "conflict", "branch": branch }),
+            Error::Conflict { branch } => json!({
+                "error": "conflict",
+                "branch": branch,
+                "continue": "stacc continue",
+                "abort": "stacc abort",
+            }),
             Error::Usage(msg) => json!({ "error": "usage", "message": msg }),
         }
     }

@@ -408,7 +408,7 @@ pub fn sync(args: &SyncArgs, format: OutputFormat) -> Result<(), Error> {
         .ok_or_else(|| Error::Usage("stacc is not initialized; run `stacc init` first".into()))?;
 
     if args.continue_ {
-        return sync_continue(&git, &store, &mut state, &repo, format);
+        return continue_op(&git, &store, &mut state, &repo, format);
     }
 
     // Branches that have a recorded PR.
@@ -490,7 +490,7 @@ pub fn restack(args: &RestackArgs, format: OutputFormat) -> Result<(), Error> {
     // clobber its continuation and rebase into a tree that is already mid-rebase.
     if git.rebase_in_progress() {
         return Err(Error::Usage(
-            "a rebase is already in progress; resolve it and run `stacc sync --continue`, or `git rebase --abort`".into(),
+            "a rebase is already in progress; run `stacc continue` to resume it or `stacc abort` to undo".into(),
         ));
     }
 
@@ -516,44 +516,79 @@ pub fn restack(args: &RestackArgs, format: OutputFormat) -> Result<(), Error> {
     // may have). Local-only: unlike `sync`, we do not push the state ref.
     clear_conflict_artifacts(&git);
 
+    report_restacked(format, &restacked);
+    Ok(())
+}
+
+/// `stacc continue`: resume the operation interrupted by a conflict.
+pub fn continue_cmd(format: OutputFormat) -> Result<(), Error> {
+    let git = Git::open(".");
+    let store = StateStore::new(git.clone());
+    let mut state = store.load()?;
+    let repo = state
+        .repo
+        .clone()
+        .ok_or_else(|| Error::Usage("stacc is not initialized; run `stacc init` first".into()))?;
+    continue_op(&git, &store, &mut state, &repo, format)
+}
+
+/// `stacc abort`: abort the operation interrupted by a conflict, undoing the
+/// in-progress rebase and clearing recovery artifacts so the working tree
+/// returns to before the operation. Escapes even a corrupt continuation.
+pub fn abort_cmd(format: OutputFormat) -> Result<(), Error> {
+    let git = Git::open(".");
+    let git_dir = git.git_dir()?;
+    // A continuation record is present unless the read says NotInProgress; a
+    // Corrupt/Read error still means a file is there, just unreadable.
+    let has_continuation = !matches!(
+        recovery::read_continuation(&git_dir),
+        Err(recovery::RecoveryError::NotInProgress)
+    );
+    let in_progress = git.rebase_in_progress();
+    if !in_progress && !has_continuation {
+        return Err(Error::Usage(
+            "nothing to abort; no operation in progress".into(),
+        ));
+    }
+    if in_progress {
+        git.rebase_abort()?;
+    }
+    // NOTE: restoring a `modify`/`move` rollback anchor (pre_amend/pre_base)
+    // lands with those commands (U7/U11); for sync/restack the rebase abort
+    // already restores the pre-operation tree.
+    clear_conflict_artifacts(&git);
     match format {
-        OutputFormat::Json => println!("{}", json!({ "restacked": restacked })),
-        OutputFormat::Pretty => {
-            if restacked.is_empty() {
-                println!("Already up to date.");
-            } else {
-                for name in &restacked {
-                    println!("Restacked {name}");
-                }
-            }
-        }
+        OutputFormat::Json => println!("{}", json!({ "aborted": true })),
+        OutputFormat::Pretty => println!("Aborted."),
     }
     Ok(())
 }
 
-/// Finish the in-progress rebase, then replay the remaining branches.
-fn sync_continue(
+/// Resume the operation recorded in the continuation: finish the conflicting
+/// rebase, then drain the remaining queue. The recorded [`recovery::Operation`]
+/// drives the output shape and whether the state ref is pushed, so this resumes
+/// whatever was in flight (sync, restack, ...) regardless of how it was invoked.
+fn continue_op(
     git: &Git,
     store: &StateStore,
     state: &mut State,
     repo: &RepoConfig,
     format: OutputFormat,
 ) -> Result<(), Error> {
-    let remaining: Vec<String> = recovery::read_continuation(&git.git_dir()?)?
-        .remaining()
-        .to_vec();
+    let op = recovery::read_continuation(&git.git_dir()?)?;
+    let remaining = op.remaining().to_vec();
 
     match git.rebase_continue() {
         Ok(()) => {}
         Err(RebaseError::Interrupt(_)) => {
-            // Still conflicting on the same branch; the context file stands.
+            // Still conflicting on the same branch; the artifacts stand.
             let branch = remaining.first().cloned().unwrap_or_default();
             return Err(Error::Conflict { branch });
         }
         Err(RebaseError::Git(err)) => return Err(err.into()),
     }
 
-    // The first entry's rebase just completed: record its new base hash.
+    // The conflicting branch's rebase just completed: record its new base hash.
     let mut restacked: Vec<String> = Vec::new();
     if let Some(first) = remaining.first() {
         if let Some(base_name) = state.branches.get(first).map(|b| b.base.name.clone()) {
@@ -566,13 +601,23 @@ fn sync_continue(
     }
 
     let rest: Vec<String> = remaining.into_iter().skip(1).collect();
-    restacked.extend(restack_with_recovery(git, store, state, repo, &rest, |remaining| {
-        recovery::Operation::Sync { remaining }
+    restacked.extend(restack_with_recovery(git, store, state, repo, &rest, |r| {
+        op.with_remaining(r)
     })?);
 
     store.save(state)?;
-    finish_sync(git, store, repo);
-    report_sync(format, &BTreeSet::new(), &[], &restacked);
+    clear_conflict_artifacts(git);
+    if op.pushes_state() {
+        if let Err(err) = store.push(&repo.remote) {
+            eprintln!("warning: could not push state to `{}`: {err}", repo.remote);
+        }
+    }
+
+    if matches!(op, recovery::Operation::Sync { .. }) {
+        report_sync(format, &BTreeSet::new(), &[], &restacked);
+    } else {
+        report_restacked(format, &restacked);
+    }
     Ok(())
 }
 
@@ -607,6 +652,23 @@ fn finish_sync(git: &Git, store: &StateStore, repo: &RepoConfig) {
         eprintln!("warning: could not push state to `{}`: {err}", repo.remote);
     }
     clear_conflict_artifacts(git);
+}
+
+/// Output for a restack-shaped result (`restack`, or a resumed restack/modify/
+/// move continuation): the branches that were rebased.
+fn report_restacked(format: OutputFormat, restacked: &[String]) {
+    match format {
+        OutputFormat::Json => println!("{}", json!({ "restacked": restacked })),
+        OutputFormat::Pretty => {
+            if restacked.is_empty() {
+                println!("Already up to date.");
+            } else {
+                for name in restacked {
+                    println!("Restacked {name}");
+                }
+            }
+        }
+    }
 }
 
 fn report_sync(
