@@ -147,6 +147,31 @@ impl Git {
         }
     }
 
+    /// Create `branch` off the current HEAD and switch to it (`git checkout -b`).
+    pub fn checkout_new_branch(&self, branch: &str) -> Result<(), GitError> {
+        self.run(&["checkout", "-b", branch]).map(|_| ())
+    }
+
+    /// Commit the staged changes with `message` (`git commit -m`).
+    pub fn commit(&self, message: &str) -> Result<(), GitError> {
+        self.run(&["commit", "-m", message]).map(|_| ())
+    }
+
+    /// Whether the index has staged changes. `git diff --cached --quiet` exits 0
+    /// when the index is clean and 1 when something is staged.
+    pub fn has_staged_changes(&self) -> Result<bool, GitError> {
+        let args = ["diff", "--cached", "--quiet"];
+        let output = self
+            .command(&args)
+            .output()
+            .map_err(|source| GitError::Spawn { source })?;
+        match output.status.code() {
+            Some(0) => Ok(false),
+            Some(1) => Ok(true),
+            _ => Err(self.command_error(&args, &output)),
+        }
+    }
+
     /// Push `refspec` to `remote`.
     pub fn push(&self, remote: &str, refspec: &str) -> Result<(), GitError> {
         self.run(&["push", remote, refspec]).map(|_| ())
@@ -455,6 +480,24 @@ mod tests {
         let (_tmp, repo) = init_repo();
         let err = repo.rev_parse("no-such-ref").unwrap_err();
         assert!(matches!(err, GitError::Command { .. }));
+    }
+
+    #[test]
+    fn checkout_new_branch_creates_and_switches() {
+        let (_tmp, repo) = init_repo();
+        repo.checkout_new_branch("feature").unwrap();
+        assert_eq!(repo.current_branch().unwrap(), "feature");
+    }
+
+    #[test]
+    fn commit_and_has_staged_changes_track_the_index() {
+        let (tmp, repo) = init_repo();
+        assert!(!repo.has_staged_changes().unwrap());
+        std::fs::write(tmp.path().join("f.txt"), "hi\n").unwrap();
+        run_git(tmp.path(), &["add", "f.txt"]);
+        assert!(repo.has_staged_changes().unwrap());
+        repo.commit("add f").unwrap();
+        assert!(!repo.has_staged_changes().unwrap());
     }
 
     #[test]

@@ -59,6 +59,8 @@ pub enum Command {
     Init(InitArgs),
     /// Track the current branch as part of a stack.
     Track(TrackArgs),
+    /// Create a new branch stacked on the current one and track it.
+    Create(CreateArgs),
     /// Push branches and create or update PRs.
     Submit(SubmitArgs),
     /// Pull upstream changes, detect merges, and restack.
@@ -116,6 +118,16 @@ pub struct TrackArgs {
     /// Branch this one is stacked on (defaults to the trunk).
     #[arg(long)]
     pub base: Option<String>,
+}
+
+/// Arguments for `stacc create`.
+#[derive(Debug, clap::Args)]
+pub struct CreateArgs {
+    /// Name of the new branch.
+    pub name: String,
+    /// Commit message for staged changes (defaults to the branch name).
+    #[arg(long, short)]
+    pub message: Option<String>,
 }
 
 /// Arguments for `stacc submit`.

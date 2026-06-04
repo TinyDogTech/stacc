@@ -11,7 +11,8 @@ use stacc_github::{GitHub, NewPullRequest, PrState, PullRequestUpdate};
 use stacc_state::{Base, BranchState, PullRequest, RepoConfig, State, StateStore};
 
 use crate::cli::{
-    AuthAction, AuthArgs, InitArgs, OutputFormat, RestackArgs, SubmitArgs, SyncArgs, TrackArgs,
+    AuthAction, AuthArgs, CreateArgs, InitArgs, OutputFormat, RestackArgs, SubmitArgs, SyncArgs,
+    TrackArgs,
 };
 use crate::error::Error;
 
@@ -102,6 +103,70 @@ pub fn track(args: &TrackArgs, format: OutputFormat) -> Result<(), Error> {
             json!({ "status": "tracked", "branch": branch, "base": base })
         ),
         OutputFormat::Pretty => println!("Tracking {branch} (base: {base})"),
+    }
+    Ok(())
+}
+
+/// `stacc create`: create a new branch stacked on the current one, commit any
+/// staged changes, and track it. The base is the current branch (the trunk when
+/// starting a stack). Refuses only on a detached HEAD.
+pub fn create(args: &CreateArgs, format: OutputFormat) -> Result<(), Error> {
+    let git = Git::open(".");
+    let store = StateStore::new(git.clone());
+    let mut state = store.load()?;
+    if state.repo.is_none() {
+        return Err(Error::Usage(
+            "stacc is not initialized; run `stacc init` first".into(),
+        ));
+    }
+
+    let base = git.current_branch().map_err(|_| {
+        Error::Usage(
+            "cannot create a branch from a detached HEAD; check out a branch first".into(),
+        )
+    })?;
+    let base_hash = git.rev_parse(&base)?;
+
+    git.checkout_new_branch(&args.name)?;
+
+    let committed = if git.has_staged_changes()? {
+        let message = args.message.clone().unwrap_or_else(|| args.name.clone());
+        git.commit(&message)?;
+        true
+    } else {
+        false
+    };
+
+    state.branches.insert(
+        args.name.clone(),
+        BranchState {
+            base: Base {
+                name: base.clone(),
+                hash: base_hash,
+            },
+            pr: None,
+        },
+    );
+    store.save(&state)?;
+
+    match format {
+        OutputFormat::Json => println!(
+            "{}",
+            json!({
+                "status": "created",
+                "branch": args.name,
+                "base": base,
+                "committed": committed,
+            })
+        ),
+        OutputFormat::Pretty => {
+            let suffix = if committed {
+                " (committed staged changes)"
+            } else {
+                ""
+            };
+            println!("Created {} (base: {base}){suffix}", args.name);
+        }
     }
     Ok(())
 }
