@@ -174,7 +174,7 @@ fn submit_requires_tracked_branch() {
     assert!(stacc(tmp.path(), &["init"]).status.success());
     run_git(tmp.path(), &["checkout", "-q", "-b", "feature"]);
 
-    // Not tracked, no GitHub env needed — it should fail before any network.
+    // Not tracked, no GitHub env needed, it should fail before any network.
     let out = stacc(tmp.path(), &["submit", "--format", "json"]);
     assert!(!out.status.success());
     let s = String::from_utf8_lossy(&out.stdout);
@@ -207,7 +207,7 @@ fn submit_walks_the_downstack() {
     assert!(stacc(tmp.path(), &["track", "--base", "feature-1"]).status.success());
 
     let server = MockServer::start();
-    // feature-1's PR — base must be the trunk.
+    // feature-1's PR, base must be the trunk.
     let mock_f1 = server.mock(|when, then| {
         when.method(httpmock::Method::POST)
             .path("/repos/TinyDogTech/stacc/pulls")
@@ -215,7 +215,7 @@ fn submit_walks_the_downstack() {
             .body_contains(r#""base":"main""#);
         then.status(201).json_body(pr_body(11));
     });
-    // feature-2's PR — base must be its parent, not the trunk.
+    // feature-2's PR, base must be its parent, not the trunk.
     let mock_f2 = server.mock(|when, then| {
         when.method(httpmock::Method::POST)
             .path("/repos/TinyDogTech/stacc/pulls")
@@ -257,7 +257,7 @@ fn submit_walks_the_downstack() {
 fn submit_re_pushes_a_rebased_branch_via_lease() {
     // Plain push would refuse a non-fast-forward after a rebase. The lease
     // push accepts it because the local remote-tracking ref still matches the
-    // remote's tip — we're the ones who put it there.
+    // remote's tip, we're the ones who put it there.
     let (tmp, _bare) = setup();
     assert!(stacc(tmp.path(), &["init"]).status.success());
     run_git(tmp.path(), &["checkout", "-q", "-b", "feature"]);
@@ -276,7 +276,7 @@ fn submit_re_pushes_a_rebased_branch_via_lease() {
         then.status(200).json_body(pr_body(31));
     });
 
-    // First submit — creates the PR and lands `feature` on the bare remote.
+    // First submit, creates the PR and lands `feature` on the bare remote.
     let out = stacc_env(
         tmp.path(),
         &["submit", "--format", "json"],
@@ -284,14 +284,14 @@ fn submit_re_pushes_a_rebased_branch_via_lease() {
     );
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
 
-    // Amend the commit — rewrites history, so a plain push would now be
+    // Amend the commit, rewrites history, so a plain push would now be
     // rejected as non-fast-forward.
     run_git(
         tmp.path(),
         &["commit", "-q", "--allow-empty", "--amend", "-m", "Add feature, revised"],
     );
 
-    // Re-submit — lease push lets the rewritten ref overwrite the old tip.
+    // Re-submit, lease push lets the rewritten ref overwrite the old tip.
     let out = stacc_env(
         tmp.path(),
         &["submit", "--format", "json"],
@@ -316,7 +316,7 @@ fn submit_description_applies_only_to_current_branch() {
     assert!(stacc(tmp.path(), &["track", "--base", "feature-1"]).status.success());
 
     let server = MockServer::start();
-    // feature-1 (ancestor) — body must stay empty. The matcher requires the
+    // feature-1 (ancestor), body must stay empty. The matcher requires the
     // literal JSON fragment `"body":""`, so if --description ever leaked to
     // feature-1 the matcher would miss, the POST would 404, and submit would
     // fail. That's the negative assertion.
@@ -327,7 +327,7 @@ fn submit_description_applies_only_to_current_branch() {
             .body_contains(r#""body":"""#);
         then.status(201).json_body(pr_body(21));
     });
-    // feature-2 (the current branch) — body MUST carry the description.
+    // feature-2 (the current branch), body MUST carry the description.
     let mock_f2 = server.mock(|when, then| {
         when.method(httpmock::Method::POST)
             .path("/repos/TinyDogTech/stacc/pulls")

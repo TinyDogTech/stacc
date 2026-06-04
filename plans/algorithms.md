@@ -1,4 +1,4 @@
-# stacc — core algorithms
+# stacc, core algorithms
 
 Created: 2026-05-20
 Status: draft
@@ -6,14 +6,14 @@ Authors: Jillian
 
 # Objective
 
-Pin down the three hard algorithms behind `stacc sync` — squash-merge detection, restack, and conflict resume — before we scaffold the Rust workspace. Each is modeled on git-spice's Go implementation, with the stacc-specific deltas called out. File:line citations point at `../../git-spice/` so we can read the reference while implementing.
+Pin down the three hard algorithms behind `stacc sync`, squash-merge detection, restack, and conflict resume, before we scaffold the Rust workspace. Each is modeled on git-spice's Go implementation, with the stacc-specific deltas called out. File:line citations point at `../../git-spice/` so we can read the reference while implementing.
 
 # Background
 
 The plan (`stacc.md`) names three hard problems and says "reference implementations in git-spice." We read the git-spice source to turn that into a concrete spec. Two findings changed our assumptions:
 
 - **Squash-merge detection is API-based, not diff-based.** We had assumed we'd compare a branch's patch-id or diff against trunk to spot a squash. git-spice doesn't. It asks the forge whether the PR is merged. That is simpler and more reliable, and it works for us because v1 is GitHub-only.
-- **Conflict-context fetching has no reference.** git-spice's three "hard problems" are really detection, restack, and resume. It does nothing to explain *why* a conflict happened — it just tells a human to fix it. The context file in our plan is genuinely new surface; we cannot copy it.
+- **Conflict-context fetching has no reference.** git-spice's three "hard problems" are really detection, restack, and resume. It does nothing to explain *why* a conflict happened, it just tells a human to fix it. The context file in our plan is genuinely new surface; we cannot copy it.
 
 The coupling matters: one `stacc sync` detects squash-merges, restacks dependents, and on conflict emits machine-readable context and exits resumably. The three sections below are one pipeline, not three features.
 
@@ -35,12 +35,12 @@ State lives in one git ref (`refs/stacc/`), mirroring git-spice's `refs/spice/da
 
 git-spice has two paths (`../../git-spice/internal/handler/sync/handler.go`):
 
-- **Forge API path** (`findForgeFinishedBranches`, lines 400–743). Bulk-query PR state via GitHub GraphQL (`ChangesStates`). GitHub returns only `Open` / `Closed` / `Merged` with no merge-method field — squash, rebase, and normal merges all report `Merged`. Detection is just `state == Merged`. For PRs git-spice didn't submit itself, it matches by branch name and compares the PR's `HeadHash` to the local branch HEAD.
-- **Local fallback** (`findLocalMergedBranches`, lines 374–398). `git merge-base --is-ancestor <branch> <trunk>`. The code comment admits this only catches normal merges and fast-forwards — squash and rebase merges "will need to be handled manually by the user."
+- **Forge API path** (`findForgeFinishedBranches`, lines 400–743). Bulk-query PR state via GitHub GraphQL (`ChangesStates`). GitHub returns only `Open` / `Closed` / `Merged` with no merge-method field, squash, rebase, and normal merges all report `Merged`. Detection is just `state == Merged`. For PRs git-spice didn't submit itself, it matches by branch name and compares the PR's `HeadHash` to the local branch HEAD.
+- **Local fallback** (`findLocalMergedBranches`, lines 374–398). `git merge-base --is-ancestor <branch> <trunk>`. The code comment admits this only catches normal merges and fast-forwards, squash and rebase merges "will need to be handled manually by the user."
 
 After detection, git-spice does the bookkeeping: it propagates a `MergedDownstack` record up to the merged branch's children (so they remember what merged below them), deletes the branch, then re-parents children onto trunk in the next restack pass.
 
-**stacc delta:** v1 is GitHub-only, so we use the API path exclusively. Query PR state, treat `Merged` as done. No patch-id heuristics. We keep the `MergedDownstack` bookkeeping — children need to know their grandparent's PR merged so we can rebase them onto trunk and so conflict context can still resolve a merged base to its PR.
+**stacc delta:** v1 is GitHub-only, so we use the API path exclusively. Query PR state, treat `Merged` as done. No patch-id heuristics. We keep the `MergedDownstack` bookkeeping, children need to know their grandparent's PR merged so we can rebase them onto trunk and so conflict context can still resolve a merged base to its PR.
 
 ## Restack
 
@@ -78,7 +78,7 @@ Writes use plumbing: `hash-object` → `update-tree` → `commit-tree` → `upda
 git-spice does not checkpoint a loop position. On conflict (`../../git-spice/internal/spice/rebase.go:92-163`) it:
 
 1. Detects the interrupted rebase by reading `.git/rebase-merge/head-name`, wraps it as a `RebaseInterruptError`.
-2. Appends a continuation to the state ref — `{command: ["upstack","restack"], branch: "X"}`, the command to re-run, not a position.
+2. Appends a continuation to the state ref, `{command: ["upstack","restack"], branch: "X"}`, the command to re-run, not a position.
 3. Prints "resolve and run `gs rebase continue`" and exits.
 
 On `rebase continue`: finish the git rebase, drain the continuation queue, re-run each command. Because each restack command is idempotent, re-running the whole operation skips the already-done branches and resumes at the conflict. If it conflicts again, the remainder is re-appended. `rebase abort` drains the queue and runs `git rebase --abort`.
@@ -98,11 +98,11 @@ The agent reads the context, resolves the conflict, and runs `stacc sync --conti
 # Caveats
 
 - **GitHub-only, v1.** The local `--is-ancestor` fallback is out of scope; without the API we cannot detect squash-merges, and we are not shipping a degraded path. A non-GitHub remote is a hard error in v1.
-- **Conflict context is best-effort.** If the API call fails or the base tip maps to no known PR, we still write the file with whatever we have and exit — we never block the resume on a failed fetch.
+- **Conflict context is best-effort.** If the API call fails or the base tip maps to no known PR, we still write the file with whatever we have and exit, we never block the resume on a failed fetch.
 - **Single writer in v1.** The CAS retry loop exists, but real parallel-agent locking on the state ref is v2 (`stacc.md` "Later").
 - Citations point at git-spice as read on 2026-05-20; line numbers drift as that repo updates.
 
 # Sources
 
-- `../../git-spice/` — Go reference implementation. Key files cited inline.
-- `stacc.md` — master plan.
+- `../../git-spice/`, Go reference implementation. Key files cited inline.
+- `stacc.md`, master plan.

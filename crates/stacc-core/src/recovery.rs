@@ -39,7 +39,7 @@ pub enum Operation {
 }
 
 impl Operation {
-    /// The branches still to restack — the conflicting branch first.
+    /// The branches still to restack, the conflicting branch first.
     pub fn remaining(&self) -> &[String] {
         match self {
             Operation::Sync { remaining }

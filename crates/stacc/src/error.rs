@@ -33,7 +33,7 @@ pub enum Error {
 
 // The operations engine has its own error type so `stacc-core` stays off the
 // CLI crate; map it onto the user-facing `Error`. `Conflict` is never mapped
-// here — `restack_with_recovery` intercepts it to write the recovery artifacts,
+// here, `restack_with_recovery` intercepts it to write the recovery artifacts,
 // so reaching that arm means a caller wrongly `?`-propagated the engine; we fail
 // loud rather than silently drop the resume queue.
 impl From<stacc_core::ops::OpsError> for Error {

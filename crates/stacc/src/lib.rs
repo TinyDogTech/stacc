@@ -1,4 +1,4 @@
-//! stacc — a stacked-diff CLI for AI coding agents.
+//! stacc, a stacked-diff CLI for AI coding agents.
 //!
 //! The CLI logic lives in this library so the `stacc` and `st` binaries can
 //! both be thin wrappers around [`run`].
@@ -121,7 +121,7 @@ fn expand_aliases(
             return Ok(args);
         }
         let cmd = args[1].clone();
-        // Built-ins win — never expanded.
+        // Built-ins win, never expanded.
         if BUILTINS.contains(&cmd.as_str()) {
             return Ok(args);
         }

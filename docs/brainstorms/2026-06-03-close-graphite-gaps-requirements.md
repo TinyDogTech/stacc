@@ -27,7 +27,7 @@ one-step way to start a stacked branch, no way to amend-and-restack, no
 standalone restack (the engine exists but is reachable only through the heavier
 `sync`), no navigation, no rename that keeps the stack intact, and no way to
 merge from the CLI. The restack logic, conflict-context capture, and
-fork-point recovery already exist inside `sync` — the gap is exposure and
+fork-point recovery already exist inside `sync`, the gap is exposure and
 ergonomics, not a missing core.
 
 Two audiences feel the gap differently. An agent falls back to raw `git` plus
@@ -73,13 +73,13 @@ graph). This batch closes both at once.
 
 ## Actors
 
-- A1. **Coding agent** — the primary driver. Runs commands with `--format json`
+- A1. **Coding agent**, the primary driver. Runs commands with `--format json`
   and `--no-interactive`; reads structured output and conflict-context files to
   recover without a human.
-- A2. **Human operator** — works at a terminal; benefits from interactive
+- A2. **Human operator**, works at a terminal; benefits from interactive
   pickers and the visual stack graph, but can drop to explicit flags at any
   time.
-- A3. **GitHub** — the forge. Hosts PRs, reports mergeability (approval +
+- A3. **GitHub**, the forge. Hosts PRs, reports mergeability (approval +
   required checks), and performs squash merges.
 
 ## Requirements

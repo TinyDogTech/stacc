@@ -1,4 +1,4 @@
-# Workspace root. This manifest has no [package] of its own — it only groups
+# Workspace root. This manifest has no [package] of its own, it only groups
 # the member crates under crates/ so they build, test, and share dependency
 # versions together. This is called a "virtual workspace".
 [workspace]
@@ -32,7 +32,7 @@ keyring = { version = "3", features = ["apple-native", "windows-native", "sync-s
 
 # Workspace-wide lints. Member crates opt in with `[lints] workspace = true`.
 #
-# `clippy::pedantic` is enabled as a "second opinion" on idioms — not as a
+# `clippy::pedantic` is enabled as a "second opinion" on idioms, not as a
 # build break. The lints in pedantic express taste more than correctness, so
 # we expect to disagree with some; `priority = -1` lets individual lints below
 # override the group default at the standard priority of 0.

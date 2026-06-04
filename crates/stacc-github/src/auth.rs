@@ -20,7 +20,7 @@ const DEFAULT_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
 /// override at run time via `STACC_OAUTH_CLIENT_ID`.
 const DEFAULT_OAUTH_CLIENT_ID: &str = "stacc-oauth-client-id-placeholder";
 
-/// OAuth App scopes work coarsely — `repo` is the narrowest scope that grants
+/// OAuth App scopes work coarsely, `repo` is the narrowest scope that grants
 /// PR read/write. Users who want least privilege should mint a fine-grained
 /// PAT (Pull requests: read+write, Contents: read) and export `GITHUB_TOKEN`.
 const OAUTH_SCOPE: &str = "repo";
@@ -29,7 +29,7 @@ const OAUTH_SCOPE: &str = "repo";
 const KEYRING_SERVICE: &str = "stacc";
 const KEYRING_USER: &str = "github.com";
 
-/// Response from `POST /login/device/code` — the user code is what the user
+/// Response from `POST /login/device/code`, the user code is what the user
 /// types into GitHub, the device code is what we poll with.
 #[derive(Debug, Clone, Deserialize)]
 pub struct DeviceCode {
@@ -86,7 +86,7 @@ impl DeviceFlow {
 
     /// Step 2: poll `POST /login/oauth/access_token` until the user authorizes
     /// (success), denies, or the code expires. `sleep` is injected so tests can
-    /// stub it out — production passes `std::thread::sleep`.
+    /// stub it out, production passes `std::thread::sleep`.
     pub fn poll_token(
         &self,
         code: &DeviceCode,
@@ -153,7 +153,7 @@ fn advance_poll(
     match resp {
         TokenResponse::Success { access_token } => Ok(Some(access_token)),
         // The pending-state signals all come back 200 OK with an `error`
-        // field — the IETF device-flow spec, not REST-style failures.
+        // field, the IETF device-flow spec, not REST-style failures.
         TokenResponse::Error { error } => match error.as_str() {
             "authorization_pending" => Ok(None),
             "slow_down" => {
@@ -186,7 +186,7 @@ pub fn load_token() -> Option<String> {
     entry.get_password().ok()
 }
 
-/// Clear the stored token. A missing entry is *not* an error — logout is
+/// Clear the stored token. A missing entry is *not* an error, logout is
 /// idempotent.
 pub fn clear_token() -> Result<(), GitHubError> {
     let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER)

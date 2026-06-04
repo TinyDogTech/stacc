@@ -15,7 +15,7 @@ use crate::cli::{
 };
 use crate::error::Error;
 
-/// `stacc init` — detect trunk/remote, then record them in the state ref.
+/// `stacc init`: detect trunk/remote, then record them in the state ref.
 pub fn init(args: &InitArgs, format: OutputFormat) -> Result<(), Error> {
     let git = Git::open(".");
     let store = StateStore::new(git.clone());
@@ -61,7 +61,7 @@ fn report(format: OutputFormat, status: &str, repo: &RepoConfig) {
     }
 }
 
-/// `stacc track` — record the current branch and its base in the state ref.
+/// `stacc track`: record the current branch and its base in the state ref.
 pub fn track(args: &TrackArgs, format: OutputFormat) -> Result<(), Error> {
     let git = Git::open(".");
     let store = StateStore::new(git.clone());
@@ -106,7 +106,7 @@ pub fn track(args: &TrackArgs, format: OutputFormat) -> Result<(), Error> {
     Ok(())
 }
 
-/// `stacc log` — render the tracked stack from the state ref.
+/// `stacc log`: render the tracked stack from the state ref.
 pub fn log(format: OutputFormat) -> Result<(), Error> {
     let git = Git::open(".");
     let store = StateStore::new(git);
@@ -185,7 +185,7 @@ fn stack_json(
         .collect()
 }
 
-/// `stacc status` — the current branch's position in the stack and its PR state.
+/// `stacc status`: the current branch's position in the stack and its PR state.
 pub fn status(format: OutputFormat) -> Result<(), Error> {
     let git = Git::open(".");
     let store = StateStore::new(git.clone());
@@ -268,7 +268,7 @@ fn pr_state_str(state: PrState) -> &'static str {
     }
 }
 
-/// `stacc submit` — push the current branch and its ancestors up to the trunk,
+/// `stacc submit`: push the current branch and its ancestors up to the trunk,
 /// creating or updating each branch's PR with its parent as the base.
 pub fn submit(args: &SubmitArgs, format: OutputFormat) -> Result<(), Error> {
     let git = Git::open(".");
@@ -393,7 +393,7 @@ fn resolve_description(value: &str) -> Result<String, Error> {
     }
 }
 
-/// `stacc sync` — reconcile merged PRs and restack the stack.
+/// `stacc sync`: reconcile merged PRs and restack the stack.
 ///
 /// Detects branches whose PR has merged (re-parenting their children and
 /// dropping them), pulls the trunk from upstream, then restacks the remaining
@@ -451,7 +451,7 @@ pub fn sync(args: &SyncArgs, format: OutputFormat) -> Result<(), Error> {
         state.branches.remove(name);
     }
 
-    // Pull the trunk from upstream. Strict by default — a flaky network or a
+    // Pull the trunk from upstream. Strict by default, a flaky network or a
     // bad remote should surface immediately. `--offline` opts out and restacks
     // on whatever refs are already local.
     if !args.offline {
@@ -473,7 +473,7 @@ pub fn sync(args: &SyncArgs, format: OutputFormat) -> Result<(), Error> {
     Ok(())
 }
 
-/// `stacc restack` — rebase tracked branches back onto their bases, repairing a
+/// `stacc restack`: rebase tracked branches back onto their bases, repairing a
 /// drifted stack. Defaults to the current branch and its upstack; `--stack`
 /// restacks the whole stack. Unlike `sync`, this is purely local: no fetch, no
 /// merge detection.
@@ -680,7 +680,7 @@ fn write_conflict_context(git: &Git, state: &State, repo: &RepoConfig, branch: &
 }
 
 /// The base branch's PR (number/title/body), if it has one. `None` on any
-/// failure — the context is best-effort.
+/// failure, the context is best-effort.
 fn fetch_base_pr(git: &Git, repo: &RepoConfig, state: &State, base: &str) -> Option<Value> {
     let number = state.branches.get(base)?.pr.as_ref()?.number;
     let (owner, name) = stacc_github::parse_remote(&git.remote_url(&repo.remote).ok()?)?;
@@ -703,7 +703,7 @@ fn fast_forward_trunk(git: &Git, remote: &str, trunk: &str) -> Result<(), Error>
     Ok(())
 }
 
-/// `stacc auth` — dispatch to login / logout / status.
+/// `stacc auth`: dispatch to login / logout / status.
 pub fn auth(args: &AuthArgs, format: OutputFormat) -> Result<(), Error> {
     match args.action {
         AuthAction::Login => auth_login(format),
@@ -716,7 +716,7 @@ fn auth_login(format: OutputFormat) -> Result<(), Error> {
     let flow = stacc_github::DeviceFlow::default();
     let code = flow.request_code()?;
 
-    // Surface the user code before polling starts — the user has to type this
+    // Surface the user code before polling starts, the user has to type this
     // into GitHub for the poll to ever succeed.
     match format {
         OutputFormat::Pretty => {

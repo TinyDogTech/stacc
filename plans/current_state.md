@@ -1,4 +1,4 @@
-# Stacc — current state
+# Stacc, current state
 
 Created: 2026-05-30
 Status: pre-alpha
@@ -44,29 +44,29 @@ Design intent and core algorithms live in
 
 # **Shipped**
 
-## MVP — end-to-end stacked workflow against GitHub
+## MVP, end-to-end stacked workflow against GitHub
 
 | Ticket | Summary |
 | --- | --- |
 | STA-1 | Scaffold cargo workspace + 6 crates |
-| STA-2 | CLI shell — arg parsing, global flags, miette errors |
-| STA-3 | `stacc-git` — git command wrapper |
-| STA-4 | `stacc-state` — `refs/stacc/` JSON-tree storage + CAS |
-| STA-5 | `stacc-github` — API client (PAT auth) |
-| STA-6 | `stacc-config` — config + trunk/remote autodetect |
+| STA-2 | CLI shell, arg parsing, global flags, miette errors |
+| STA-3 | `stacc-git`, git command wrapper |
+| STA-4 | `stacc-state`, `refs/stacc/` JSON-tree storage + CAS |
+| STA-5 | `stacc-github`, API client (PAT auth) |
+| STA-6 | `stacc-config`, config + trunk/remote autodetect |
 | STA-7 | `stacc init` |
 | STA-8 | `stacc track` |
 | STA-9 | `stacc log` |
 | STA-10 | `stacc status` |
 | STA-11 | `stacc submit` (with `--description`) |
-| STA-12 | `stacc sync` — squash-merge detect + restack |
+| STA-12 | `stacc sync`, squash-merge detect + restack |
 | STA-13 | `stacc sync --continue` + conflict-context file |
 
-## v1.1 — safety, ergonomics, and a real auth story
+## v1.1, safety, ergonomics, and a real auth story
 
 | Ticket | Summary |
 | --- | --- |
-| STA-14 | Stack-wide submit — walks the downstack bottom-up |
+| STA-14 | Stack-wide submit, walks the downstack bottom-up |
 | STA-15 | Fork-point recovery when a recorded base hash goes stale |
 | STA-16 | Strict fetch + `--force-with-lease` push (with `--offline` opt-out) |
 | STA-17 | OAuth device flow + OS-keychain token storage |
@@ -83,7 +83,7 @@ Nothing in flight. v1.1 is feature-complete.
 
 ## Deferred
 
-* **STA-18 — CI: build, clippy, and test on PRs.** Held back to avoid
+* **STA-18, CI: build, clippy, and test on PRs.** Held back to avoid
   GitHub Actions billing while the v1.1 backlog was open. With v1.1
   shipped, this is the obvious next pick.
 
@@ -108,7 +108,7 @@ auth login` against real GitHub does not.
   the orchestration; moving it into `stacc-core` is the original
   intent and would let future entry points (a daemon, an MCP server)
   reuse the logic without depending on the CLI crate.
-* **Richer `stacc log` / `stacc status`** — show ancestors' PR state,
+* **Richer `stacc log` / `stacc status`**, show ancestors' PR state,
   not just the recorded number.
 
 # **Caveats**
@@ -124,4 +124,4 @@ auth login` against real GitHub does not.
   Linux with Secret Service over dbus all work; headless Linux without
   a session keyring will fall back to env-var auth only.
 * **`refs/stacc/` is not a public format.** Treat it like git's own
-  refs — read through stacc, not through ad-hoc tooling.
+  refs, read through stacc, not through ad-hoc tooling.
