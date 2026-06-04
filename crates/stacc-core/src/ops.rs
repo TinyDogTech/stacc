@@ -3,10 +3,11 @@
 //! `git` and the state ref, so `submit`, `sync`, and `restack` (and later
 //! `modify`/`move`/`merge`) all share one implementation.
 //!
-//! Conflict *recovery* (the `.git/stacc-continue.json` continuation and the
-//! GitHub-enriched conflict-context file) deliberately lives in the CLI crate:
-//! `restack` reports a conflict structurally (the branch plus the unfinished
-//! queue) and the caller persists it. That keeps `stacc-core` off `stacc-github`.
+//! Conflict *recovery* is split: the [`crate::recovery`] module owns the typed
+//! continuation record and its I/O, while the GitHub-enriched conflict-*context*
+//! file is written by the CLI. `restack` here reports a conflict structurally
+//! (the branch plus the unfinished queue); the caller persists the continuation
+//! and the context. That keeps `stacc-core` off `stacc-github`.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
