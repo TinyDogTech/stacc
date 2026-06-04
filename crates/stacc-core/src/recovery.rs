@@ -98,9 +98,21 @@ pub fn read_continuation(git_dir: &Path) -> Result<Operation, RecoveryError> {
     serde_json::from_str(&text).map_err(RecoveryError::Corrupt)
 }
 
-/// Remove the continuation record. Best-effort: a missing file is not an error.
+/// Remove the continuation record and any leftover write temps. Best-effort: a
+/// missing file is not an error. The temp sweep reclaims `.{file}.{pid}.tmp`
+/// siblings orphaned by a crash between the temp write and the rename.
 pub fn clear_continuation(git_dir: &Path) {
     let _ = std::fs::remove_file(git_dir.join(CONTINUE_FILE));
+    let tmp_prefix = format!(".{CONTINUE_FILE}.");
+    if let Ok(entries) = std::fs::read_dir(git_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with(&tmp_prefix) && name.ends_with(".tmp") {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -236,5 +248,25 @@ mod tests {
             read_continuation(dir.path()),
             Err(RecoveryError::Read(_))
         ));
+    }
+
+    #[test]
+    fn corrupt_message_names_the_escape_hatch() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join(CONTINUE_FILE), "{not json").unwrap();
+        let msg = read_continuation(dir.path()).unwrap_err().to_string();
+        assert!(msg.contains("git rebase --abort"), "hint missing: {msg}");
+    }
+
+    #[test]
+    fn clear_sweeps_orphaned_temp_files() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join(".stacc-continue.json.99999.tmp"), "x").unwrap();
+        clear_continuation(dir.path());
+        let stray = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|e| e.file_name().to_string_lossy().ends_with(".tmp"));
+        assert!(!stray, "orphaned temp not swept");
     }
 }
