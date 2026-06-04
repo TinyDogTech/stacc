@@ -10,7 +10,9 @@ use stacc_git::{Git, RebaseError};
 use stacc_github::{GitHub, NewPullRequest, PrState, PullRequestUpdate};
 use stacc_state::{Base, BranchState, PullRequest, RepoConfig, State, StateStore};
 
-use crate::cli::{AuthAction, AuthArgs, InitArgs, OutputFormat, SubmitArgs, SyncArgs, TrackArgs};
+use crate::cli::{
+    AuthAction, AuthArgs, InitArgs, OutputFormat, RestackArgs, SubmitArgs, SyncArgs, TrackArgs,
+};
 use crate::error::Error;
 
 /// `stacc init` — detect trunk/remote, then record them in the state ref.
@@ -468,6 +470,64 @@ pub fn sync(args: &SyncArgs, format: OutputFormat) -> Result<(), Error> {
     store.save(&state)?;
     finish_sync(&git, &store, &repo);
     report_sync(format, &merged, &reparented, &restacked);
+    Ok(())
+}
+
+/// `stacc restack` — rebase tracked branches back onto their bases, repairing a
+/// drifted stack. Defaults to the current branch and its upstack; `--stack`
+/// restacks the whole stack. Unlike `sync`, this is purely local: no fetch, no
+/// merge detection.
+pub fn restack(args: &RestackArgs, format: OutputFormat) -> Result<(), Error> {
+    let git = Git::open(".");
+    let store = StateStore::new(git.clone());
+    let mut state = store.load()?;
+    let repo = state
+        .repo
+        .clone()
+        .ok_or_else(|| Error::Usage("stacc is not initialized; run `stacc init` first".into()))?;
+
+    // Refuse to start on top of an interrupted operation: a fresh restack would
+    // clobber its continuation and rebase into a tree that is already mid-rebase.
+    if git.rebase_in_progress() {
+        return Err(Error::Usage(
+            "a rebase is already in progress; resolve it and run `stacc sync --continue`, or `git rebase --abort`".into(),
+        ));
+    }
+
+    let order = if args.stack {
+        ops::topo_order(&state.branches, &repo.trunk)
+    } else {
+        let current = git.current_branch()?;
+        if current == repo.trunk {
+            return Err(Error::Usage(format!(
+                "on the trunk branch `{}`; check out a stack branch, or pass --stack to restack everything",
+                repo.trunk
+            )));
+        }
+        ops::upstack_order(&state.branches, &current)
+    };
+
+    let restacked = restack_with_recovery(&git, &store, &mut state, &repo, &order, |remaining| {
+        recovery::Operation::Restack { remaining }
+    })?;
+
+    store.save(&state)?;
+    // A clean restack leaves no recovery artifacts behind (a prior aborted run
+    // may have). Local-only: unlike `sync`, we do not push the state ref.
+    clear_conflict_artifacts(&git);
+
+    match format {
+        OutputFormat::Json => println!("{}", json!({ "restacked": restacked })),
+        OutputFormat::Pretty => {
+            if restacked.is_empty() {
+                println!("Already up to date.");
+            } else {
+                for name in &restacked {
+                    println!("Restacked {name}");
+                }
+            }
+        }
+    }
     Ok(())
 }
 
