@@ -469,7 +469,7 @@ pub fn sync(args: &SyncArgs, format: OutputFormat) -> Result<(), Error> {
 
     store.save(&state)?;
     finish_sync(&git, &store, &repo);
-    report_sync(format, &merged, &reparented, &restacked);
+    report_sync(format, "sync", &merged, &reparented, &restacked);
     Ok(())
 }
 
@@ -516,7 +516,7 @@ pub fn restack(args: &RestackArgs, format: OutputFormat) -> Result<(), Error> {
     // may have). Local-only: unlike `sync`, we do not push the state ref.
     clear_conflict_artifacts(&git);
 
-    report_restacked(format, &restacked);
+    report_restacked(format, "restack", &restacked);
     Ok(())
 }
 
@@ -546,17 +546,31 @@ pub fn abort_cmd(format: OutputFormat) -> Result<(), Error> {
     );
     let in_progress = git.rebase_in_progress();
     if !in_progress && !has_continuation {
-        return Err(Error::Usage(
+        return Err(Error::NotInProgress(
             "nothing to abort; no operation in progress".into(),
         ));
     }
-    if in_progress {
-        git.rebase_abort()?;
+    // Only abort a rebase stacc owns. With no continuation, an in-progress
+    // rebase belongs to the user (a hand-run `git rebase`); leave it alone.
+    if in_progress && !has_continuation {
+        return Err(Error::Usage(
+            "a non-stacc rebase is in progress; run `git rebase --abort` to undo it".into(),
+        ));
     }
-    // NOTE: restoring a `modify`/`move` rollback anchor (pre_amend/pre_base)
-    // lands with those commands (U7/U11); for sync/restack the rebase abort
-    // already restores the pre-operation tree.
+    // Abort the rebase, then ALWAYS clear artifacts so a failed `rebase --abort`
+    // can't strand the recovery record. (Restoring a modify/move rollback anchor
+    // lands with those commands in U7/U11; aborting the rebase restores the tree
+    // for sync/restack, though branches already restacked before the conflict
+    // stay restacked.)
+    let abort_err = if in_progress {
+        git.rebase_abort().err()
+    } else {
+        None
+    };
     clear_conflict_artifacts(&git);
+    if let Some(err) = abort_err {
+        return Err(err.into());
+    }
     match format {
         OutputFormat::Json => println!("{}", json!({ "aborted": true })),
         OutputFormat::Pretty => println!("Aborted."),
@@ -575,7 +589,25 @@ fn continue_op(
     repo: &RepoConfig,
     format: OutputFormat,
 ) -> Result<(), Error> {
-    let op = recovery::read_continuation(&git.git_dir()?)?;
+    let op = match recovery::read_continuation(&git.git_dir()?) {
+        Ok(op) => op,
+        // A rebase with no stacc record is the user's own; point them at it.
+        Err(recovery::RecoveryError::NotInProgress) if git.rebase_in_progress() => {
+            return Err(Error::Usage(
+                "a rebase is in progress but stacc has no record of it; run `stacc abort` to clear it".into(),
+            ));
+        }
+        Err(err) => return Err(err.into()),
+    };
+    // A recorded operation always coexists with an in-progress rebase. If the
+    // rebase is gone, the record is stale (resolved or aborted out of band):
+    // clear it rather than handing `git rebase --continue` a raw error.
+    if !git.rebase_in_progress() {
+        clear_conflict_artifacts(git);
+        return Err(Error::Usage(
+            "no rebase in progress; cleared a stale stacc continuation".into(),
+        ));
+    }
     let remaining = op.remaining().to_vec();
 
     match git.rebase_continue() {
@@ -614,9 +646,9 @@ fn continue_op(
     }
 
     if matches!(op, recovery::Operation::Sync { .. }) {
-        report_sync(format, &BTreeSet::new(), &[], &restacked);
+        report_sync(format, op.tag(), &BTreeSet::new(), &[], &restacked);
     } else {
-        report_restacked(format, &restacked);
+        report_restacked(format, op.tag(), &restacked);
     }
     Ok(())
 }
@@ -655,10 +687,10 @@ fn finish_sync(git: &Git, store: &StateStore, repo: &RepoConfig) {
 }
 
 /// Output for a restack-shaped result (`restack`, or a resumed restack/modify/
-/// move continuation): the branches that were rebased.
-fn report_restacked(format: OutputFormat, restacked: &[String]) {
+/// move continuation): the operation tag and the branches that were rebased.
+fn report_restacked(format: OutputFormat, op: &str, restacked: &[String]) {
     match format {
-        OutputFormat::Json => println!("{}", json!({ "restacked": restacked })),
+        OutputFormat::Json => println!("{}", json!({ "op": op, "restacked": restacked })),
         OutputFormat::Pretty => {
             if restacked.is_empty() {
                 println!("Already up to date.");
@@ -673,6 +705,7 @@ fn report_restacked(format: OutputFormat, restacked: &[String]) {
 
 fn report_sync(
     format: OutputFormat,
+    op: &str,
     merged: &BTreeSet<String>,
     reparented: &[(String, String)],
     restacked: &[String],
@@ -687,6 +720,7 @@ fn report_sync(
             println!(
                 "{}",
                 json!({
+                    "op": op,
                     "merged": merged_list,
                     "reparented": reparented_list,
                     "restacked": restacked,

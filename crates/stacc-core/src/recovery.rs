@@ -74,6 +74,18 @@ impl Operation {
     pub fn pushes_state(&self) -> bool {
         matches!(self, Operation::Sync { .. })
     }
+
+    /// The wire tag identifying the operation (matches the serde `op` value):
+    /// `sync`, `restack`, `modify`, or `move`. Surfaced in command output so an
+    /// agent knows which operation a `continue` resumed.
+    pub fn tag(&self) -> &'static str {
+        match self {
+            Operation::Sync { .. } => "sync",
+            Operation::Restack { .. } => "restack",
+            Operation::Modify { .. } => "modify",
+            Operation::Move { .. } => "move",
+        }
+    }
 }
 
 /// Failures reading or writing the continuation record.
@@ -185,16 +197,45 @@ mod tests {
 
     #[test]
     fn with_remaining_preserves_variant_and_anchor() {
-        let modified = Operation::Modify {
-            remaining: vec!["a".into()],
-            pre_amend: "h".into(),
-        }
-        .with_remaining(vec!["b".into(), "c".into()]);
+        let r = vec!["b".to_string(), "c".to_string()];
         assert_eq!(
-            modified,
+            Operation::Sync {
+                remaining: vec!["a".into()],
+            }
+            .with_remaining(r.clone()),
+            Operation::Sync {
+                remaining: r.clone(),
+            }
+        );
+        assert_eq!(
+            Operation::Restack {
+                remaining: vec!["a".into()],
+            }
+            .with_remaining(r.clone()),
+            Operation::Restack {
+                remaining: r.clone(),
+            }
+        );
+        assert_eq!(
             Operation::Modify {
-                remaining: vec!["b".into(), "c".into()],
+                remaining: vec!["a".into()],
                 pre_amend: "h".into(),
+            }
+            .with_remaining(r.clone()),
+            Operation::Modify {
+                remaining: r.clone(),
+                pre_amend: "h".into(),
+            }
+        );
+        assert_eq!(
+            Operation::Move {
+                remaining: vec!["a".into()],
+                pre_base: "p".into(),
+            }
+            .with_remaining(r.clone()),
+            Operation::Move {
+                remaining: r,
+                pre_base: "p".into(),
             }
         );
     }
@@ -208,6 +249,20 @@ mod tests {
             pre_amend: "h".into(),
         }
         .pushes_state());
+        assert!(!Operation::Move {
+            remaining: vec![],
+            pre_base: "p".into(),
+        }
+        .pushes_state());
+    }
+
+    #[test]
+    fn tag_matches_each_variant() {
+        let all = ops();
+        assert_eq!(all[0].tag(), "sync");
+        assert_eq!(all[1].tag(), "restack");
+        assert_eq!(all[2].tag(), "modify");
+        assert_eq!(all[3].tag(), "move");
     }
 
     #[test]

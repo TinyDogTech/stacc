@@ -29,6 +29,12 @@ pub enum Error {
     #[error("{0}")]
     #[diagnostic(code(stacc::usage))]
     Usage(String),
+
+    /// Nothing to continue or abort. Distinct from `Usage` so an agent polling
+    /// `continue`/`abort` can recognize the no-op condition by code.
+    #[error("{0}")]
+    #[diagnostic(code(stacc::not_in_progress))]
+    NotInProgress(String),
 }
 
 // The operations engine has its own error type so `stacc-core` stays off the
@@ -56,7 +62,13 @@ impl From<stacc_core::ops::OpsError> for Error {
 // RecoveryError's own `Display`.
 impl From<stacc_core::recovery::RecoveryError> for Error {
     fn from(err: stacc_core::recovery::RecoveryError) -> Self {
-        Error::Usage(err.to_string())
+        use stacc_core::recovery::RecoveryError;
+        match err {
+            RecoveryError::NotInProgress => {
+                Error::NotInProgress("no operation in progress to continue".into())
+            }
+            other => Error::Usage(other.to_string()),
+        }
     }
 }
 
@@ -75,6 +87,7 @@ impl Error {
                 "abort": "stacc abort",
             }),
             Error::Usage(msg) => json!({ "error": "usage", "message": msg }),
+            Error::NotInProgress(msg) => json!({ "error": "not_in_progress", "message": msg }),
         }
     }
 }

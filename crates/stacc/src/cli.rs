@@ -67,7 +67,7 @@ pub enum Command {
     Restack(RestackArgs),
     /// Resume the operation interrupted by a conflict, after resolving it.
     Continue,
-    /// Abort the operation interrupted by a conflict and restore the prior state.
+    /// Abort the operation interrupted by a conflict, undoing the in-progress rebase.
     Abort,
     /// Print the stack.
     Log,
