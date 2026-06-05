@@ -61,6 +61,8 @@ pub enum Command {
     Track(TrackArgs),
     /// Create a new branch stacked on the current one and track it.
     Create(CreateArgs),
+    /// Fold staged changes into the current branch, then restack its upstack.
+    Modify(ModifyArgs),
     /// Push branches and create or update PRs.
     Submit(SubmitArgs),
     /// Pull upstream changes, detect merges, and restack.
@@ -126,6 +128,18 @@ pub struct CreateArgs {
     /// Name of the new branch.
     pub name: String,
     /// Commit message for staged changes (defaults to the branch name).
+    #[arg(long, short)]
+    pub message: Option<String>,
+}
+
+/// Arguments for `stacc modify`.
+#[derive(Debug, clap::Args)]
+pub struct ModifyArgs {
+    /// Append a new commit instead of amending the branch's tip.
+    #[arg(long)]
+    pub commit: bool,
+    /// Commit message: the new commit's subject with `--commit`, or the reworded
+    /// subject when amending.
     #[arg(long, short)]
     pub message: Option<String>,
 }

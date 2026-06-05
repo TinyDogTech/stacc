@@ -147,6 +147,11 @@ impl Git {
         }
     }
 
+    /// Switch to an existing `branch` (`git checkout`).
+    pub fn checkout(&self, branch: &str) -> Result<(), GitError> {
+        self.run(&["checkout", branch]).map(|_| ())
+    }
+
     /// Create `branch` off the current HEAD and switch to it (`git checkout -b`).
     pub fn checkout_new_branch(&self, branch: &str) -> Result<(), GitError> {
         self.run(&["checkout", "-b", branch]).map(|_| ())
@@ -155,6 +160,26 @@ impl Git {
     /// Commit the staged changes with `message` (`git commit -m`).
     pub fn commit(&self, message: &str) -> Result<(), GitError> {
         self.run(&["commit", "-m", message]).map(|_| ())
+    }
+
+    /// Amend the current branch's tip, folding in staged changes. `message`
+    /// replaces the subject; `None` keeps it (`git commit --amend --no-edit`).
+    pub fn commit_amend(&self, message: Option<&str>) -> Result<(), GitError> {
+        let mut args = vec!["commit", "--amend"];
+        match message {
+            Some(msg) => {
+                args.push("-m");
+                args.push(msg);
+            }
+            None => args.push("--no-edit"),
+        }
+        self.run(&args).map(|_| ())
+    }
+
+    /// Move `branch` to point at `target` (`git branch -f`). git refuses to move
+    /// the currently checked-out branch this way, which is the intended guard.
+    pub fn force_branch(&self, branch: &str, target: &str) -> Result<(), GitError> {
+        self.run(&["branch", "-f", branch, target]).map(|_| ())
     }
 
     /// Whether the index has staged changes. `git diff --cached --quiet` exits 0
@@ -490,6 +515,16 @@ mod tests {
     }
 
     #[test]
+    fn checkout_switches_between_branches() {
+        let (tmp, repo) = init_repo();
+        run_git(tmp.path(), &["branch", "side"]);
+        repo.checkout("side").unwrap();
+        assert_eq!(repo.current_branch().unwrap(), "side");
+        repo.checkout("main").unwrap();
+        assert_eq!(repo.current_branch().unwrap(), "main");
+    }
+
+    #[test]
     fn commit_and_has_staged_changes_track_the_index() {
         let (tmp, repo) = init_repo();
         assert!(!repo.has_staged_changes().unwrap());
@@ -498,6 +533,33 @@ mod tests {
         assert!(repo.has_staged_changes().unwrap());
         repo.commit("add f").unwrap();
         assert!(!repo.has_staged_changes().unwrap());
+    }
+
+    #[test]
+    fn commit_amend_replaces_the_tip_without_adding_a_parent() {
+        let (tmp, repo) = init_repo();
+        write_commit(tmp.path(), "f.txt", "a\n", "original");
+        let before = repo.rev_parse("HEAD").unwrap();
+        let parent = repo.rev_parse("HEAD~1").unwrap();
+        std::fs::write(tmp.path().join("f.txt"), "b\n").unwrap();
+        run_git(tmp.path(), &["add", "f.txt"]);
+        repo.commit_amend(Some("reworded")).unwrap();
+        let after = repo.rev_parse("HEAD").unwrap();
+        assert_ne!(before, after);
+        // Amend, not append: the parent is unchanged.
+        assert_eq!(repo.rev_parse("HEAD~1").unwrap(), parent);
+    }
+
+    #[test]
+    fn force_branch_moves_a_ref() {
+        let (tmp, repo) = init_repo();
+        let first = repo.rev_parse("HEAD").unwrap();
+        run_git(tmp.path(), &["branch", "side"]);
+        run_git(tmp.path(), &["commit", "-q", "--allow-empty", "-m", "second"]);
+        let second = repo.rev_parse("HEAD").unwrap();
+        assert_eq!(repo.rev_parse("side").unwrap(), first);
+        repo.force_branch("side", &second).unwrap();
+        assert_eq!(repo.rev_parse("side").unwrap(), second);
     }
 
     #[test]
