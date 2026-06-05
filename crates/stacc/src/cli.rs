@@ -81,6 +81,8 @@ pub enum Command {
     Top,
     /// Jump to the bottom of the current stack (the trunk's child).
     Bottom,
+    /// Switch to a branch (pick interactively when run bare on a terminal).
+    Checkout(CheckoutArgs),
     /// Print the stack.
     Log,
     /// Show the current branch's position and PR status.
@@ -158,6 +160,13 @@ pub struct StepsArgs {
     /// Number of levels to move (default 1).
     #[arg(default_value_t = 1)]
     pub steps: usize,
+}
+
+/// Arguments for `stacc checkout`.
+#[derive(Debug, clap::Args)]
+pub struct CheckoutArgs {
+    /// Branch to switch to. Omit on a terminal to pick interactively.
+    pub branch: Option<String>,
 }
 
 /// Arguments for `stacc submit`.
