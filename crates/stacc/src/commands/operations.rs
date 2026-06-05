@@ -1,4 +1,4 @@
-//! Stack operations: sync, restack, modify, and the conflict-recovery
+//! Stack operations: sync, restack, modify, move, and the conflict-recovery
 //! (continue/abort) lifecycle they share.
 
 use std::collections::BTreeSet;
@@ -9,7 +9,7 @@ use stacc_git::{Git, RebaseError};
 use stacc_github::{GitHub, PrState};
 use stacc_state::{RepoConfig, State, StateStore};
 
-use crate::cli::{ModifyArgs, OutputFormat, RestackArgs, SyncArgs};
+use crate::cli::{ModifyArgs, MoveArgs, OutputFormat, RestackArgs, SyncArgs};
 use crate::error::Error;
 
 /// `stacc modify`: fold staged changes into the current branch (amend its tip by
@@ -126,6 +126,122 @@ pub fn modify(args: &ModifyArgs, format: OutputFormat) -> Result<(), Error> {
         }
     }
     Ok(())
+}
+
+/// `stacc move`: re-parent the current branch (and its upstack) onto `--onto`.
+/// Rejects a move onto the branch's own upstack (a cycle). On conflict records
+/// an `Operation::Move` whose `pre_base` lets `abort` roll the recorded base
+/// back. Local-only: no push.
+pub fn move_cmd(args: &MoveArgs, format: OutputFormat) -> Result<(), Error> {
+    let git = Git::open(".");
+    let store = StateStore::new(git.clone());
+    let mut state = store.load()?;
+    let repo = state
+        .repo
+        .clone()
+        .ok_or_else(|| Error::Usage("stacc is not initialized; run `stacc init` first".into()))?;
+
+    if git.rebase_in_progress() {
+        return Err(Error::Usage(
+            "a rebase is already in progress; run `stacc continue` to resume it or `stacc abort` to undo".into(),
+        ));
+    }
+
+    let branch = git
+        .current_branch()
+        .map_err(|_| Error::Usage("cannot move a detached HEAD; check out a branch first".into()))?;
+    if branch == repo.trunk {
+        return Err(Error::Usage(format!(
+            "cannot move the trunk branch `{}`",
+            repo.trunk
+        )));
+    }
+    let pre_base = state
+        .branches
+        .get(&branch)
+        .map(|b| b.base.name.clone())
+        .ok_or_else(|| {
+            Error::Usage(format!(
+                "branch `{branch}` is not tracked; run `stacc track` first"
+            ))
+        })?;
+
+    let onto = &args.onto;
+    // The new base must be the trunk or another tracked branch.
+    if onto != &repo.trunk && !state.branches.contains_key(onto) {
+        return Err(Error::Usage(format!(
+            "`{onto}` is not the trunk or a tracked branch; cannot move onto it"
+        )));
+    }
+    if onto == &pre_base {
+        return Err(Error::Usage(format!(
+            "`{branch}` is already based on `{onto}`"
+        )));
+    }
+    // Moving onto the branch itself or anything in its own upstack is a cycle.
+    let subtree = ops::upstack_order(&state.branches, &branch);
+    if subtree.iter().any(|b| b == onto) {
+        return Err(Error::Usage(format!(
+            "cannot move `{branch}` onto `{onto}`: that is the branch itself or part of its upstack (a cycle)"
+        )));
+    }
+    // If the branch already descends `onto`, a move would only flatten the
+    // intermediate branches out, a different operation, and `restack` would skip
+    // the branch as already-based and silently no-op, leaving state claiming a
+    // new base the history never adopted. Reject it. `rev_parse` also confirms
+    // `onto` exists in git, not just in recorded state.
+    let onto_tip = git.rev_parse(onto)?;
+    if git.is_ancestor(&onto_tip, &branch)? {
+        return Err(Error::Usage(format!(
+            "`{branch}` already descends `{onto}`; move re-parents onto a different lineage, it does not flatten the stack"
+        )));
+    }
+
+    // Re-point the recorded base name. Keep base.hash: it marks where the
+    // branch's own commits start, which restack replays onto the new base's tip.
+    if let Some(b) = state.branches.get_mut(&branch) {
+        b.base.name.clone_from(onto);
+    }
+
+    let restacked =
+        restack_with_recovery(&git, &store, &mut state, &repo, &subtree, |remaining| {
+            recovery::Operation::Move {
+                branch: branch.clone(),
+                remaining,
+                pre_base: pre_base.clone(),
+            }
+        })?;
+
+    store.save(&state).map_err(|e| {
+        Error::Usage(format!(
+            "move succeeded but could not save state: {e}; run `stacc restack` to re-sync"
+        ))
+    })?;
+    clear_conflict_artifacts(&git);
+    // Best-effort: the move is already saved, so a failure to switch back to the
+    // moved branch must not report the whole move as failed.
+    if let Err(err) = git.checkout(&branch) {
+        eprintln!("warning: could not switch back to `{branch}`: {err}");
+    }
+
+    let tip = git.rev_parse(&branch)?;
+    report_move(format, &branch, onto, &tip, &restacked);
+    Ok(())
+}
+
+fn report_move(format: OutputFormat, branch: &str, base: &str, sha: &str, restacked: &[String]) {
+    match format {
+        OutputFormat::Json => println!(
+            "{}",
+            json!({ "op": "move", "branch": branch, "base": base, "sha": sha, "restacked": restacked })
+        ),
+        OutputFormat::Pretty => {
+            println!("Moved {branch} onto {base}");
+            for name in restacked {
+                println!("Restacked {name}");
+            }
+        }
+    }
 }
 
 /// `stacc sync`: reconcile merged PRs and restack the stack.
@@ -323,6 +439,42 @@ pub fn abort_cmd(format: OutputFormat) -> Result<(), Error> {
                 );
             }
         }
+        // Undo a move by rolling the moved branch's recorded base back to
+        // `pre_base`, but ONLY when no upstack child has restacked onto the new
+        // base yet (the conflict landed on the moved branch itself). Otherwise
+        // the children already re-rooted, so keep the move and tell the user.
+        if let Ok(recovery::Operation::Move {
+            branch,
+            remaining,
+            pre_base,
+        }) = &cont
+        {
+            let store = StateStore::new(git.clone());
+            match store.load() {
+                Ok(mut state) => {
+                    let subtree = ops::upstack_order(&state.branches, branch).len();
+                    if remaining.len() == subtree {
+                        if let Some(b) = state.branches.get_mut(branch) {
+                            b.base.name.clone_from(pre_base);
+                        }
+                        if let Err(err) = store.save(&state) {
+                            eprintln!(
+                                "warning: could not restore `{branch}`'s base to `{pre_base}`: {err}; run `stacc move --onto {pre_base}` to roll it back"
+                            );
+                        }
+                    } else {
+                        eprintln!(
+                            "warning: `{branch}` stays moved; upstack branches were already restacked onto the new base. Run `stacc restack` to finish, or `stacc move --onto {pre_base}` to move it back."
+                        );
+                    }
+                }
+                Err(err) => {
+                    eprintln!(
+                        "warning: could not load state to restore `{branch}`'s base: {err}; run `stacc move --onto {pre_base}` to roll it back"
+                    );
+                }
+            }
+        }
     }
     clear_conflict_artifacts(&git);
     if let Some(err) = abort_err {
@@ -436,6 +588,19 @@ fn continue_op(
             println!(
                 "{}",
                 json!({ "op": "modify", "branch": branch, "sha": tip, "restacked": restacked })
+            );
+        }
+        // A resumed move reports the same {op,branch,base,restacked} shape as the
+        // direct command (pretty uses the shared restacked output).
+        recovery::Operation::Move { branch, .. } if matches!(format, OutputFormat::Json) => {
+            let base = state
+                .branches
+                .get(branch)
+                .map_or("", |b| b.base.name.as_str());
+            let sha = git.rev_parse(branch).unwrap_or_default();
+            println!(
+                "{}",
+                json!({ "op": "move", "branch": branch, "base": base, "sha": sha, "restacked": restacked })
             );
         }
         _ => report_restacked(format, op.tag(), &restacked),

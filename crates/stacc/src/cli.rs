@@ -69,6 +69,8 @@ pub enum Command {
     Sync(SyncArgs),
     /// Rebase tracked branches back onto their bases (current + upstack by default).
     Restack(RestackArgs),
+    /// Re-parent the current branch (and its upstack) onto a new base.
+    Move(MoveArgs),
     /// Resume the operation interrupted by a conflict, after resolving it.
     Continue,
     /// Abort the operation interrupted by a conflict, undoing the in-progress rebase.
@@ -203,5 +205,13 @@ pub struct RestackArgs {
     /// Restack the whole stack instead of just the current branch and its upstack.
     #[arg(long)]
     pub stack: bool,
+}
+
+/// Arguments for `stacc move`.
+#[derive(Debug, clap::Args)]
+pub struct MoveArgs {
+    /// Branch (or the trunk) to re-parent the current branch onto.
+    #[arg(long)]
+    pub onto: String,
 }
 
