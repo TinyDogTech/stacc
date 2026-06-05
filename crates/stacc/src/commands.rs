@@ -11,8 +11,8 @@ use stacc_github::{GitHub, NewPullRequest, PrState, PullRequestUpdate};
 use stacc_state::{Base, BranchState, PullRequest, RepoConfig, State, StateStore};
 
 use crate::cli::{
-    AuthAction, AuthArgs, CreateArgs, InitArgs, OutputFormat, RestackArgs, SubmitArgs, SyncArgs,
-    TrackArgs,
+    AuthAction, AuthArgs, CreateArgs, InitArgs, ModifyArgs, OutputFormat, RestackArgs, SubmitArgs,
+    SyncArgs, TrackArgs,
 };
 use crate::error::Error;
 
@@ -188,6 +188,106 @@ pub fn create(args: &CreateArgs, format: OutputFormat) -> Result<(), Error> {
                 ""
             };
             println!("Created {} (base: {base}){suffix}", args.name);
+        }
+    }
+    Ok(())
+}
+
+/// `stacc modify`: fold staged changes into the current branch (amend its tip by
+/// default, append with `--commit`), then restack its upstack onto the new tip.
+/// On conflict, records an `Operation::Modify` whose `pre_amend` anchor lets
+/// `abort` undo the amend. Local-only: no push.
+pub fn modify(args: &ModifyArgs, format: OutputFormat) -> Result<(), Error> {
+    let git = Git::open(".");
+    let store = StateStore::new(git.clone());
+    let mut state = store.load()?;
+    let repo = state
+        .repo
+        .clone()
+        .ok_or_else(|| Error::Usage("stacc is not initialized; run `stacc init` first".into()))?;
+
+    if git.rebase_in_progress() {
+        return Err(Error::Usage(
+            "a rebase is already in progress; run `stacc continue` to resume it or `stacc abort` to undo".into(),
+        ));
+    }
+
+    let branch = git.current_branch().map_err(|_| {
+        Error::Usage("cannot modify a detached HEAD; check out a branch first".into())
+    })?;
+    if branch == repo.trunk {
+        return Err(Error::Usage(format!(
+            "cannot modify the trunk branch `{}`",
+            repo.trunk
+        )));
+    }
+    let base_name = state
+        .branches
+        .get(&branch)
+        .map(|b| b.base.name.clone())
+        .ok_or_else(|| {
+            Error::Usage(format!(
+                "branch `{branch}` is not tracked; run `stacc track` first"
+            ))
+        })?;
+
+    let pre_amend = git.rev_parse("HEAD")?;
+
+    if args.commit {
+        if !git.has_staged_changes()? {
+            return Err(Error::Usage(
+                "nothing staged to commit; stage changes, or drop --commit to amend".into(),
+            ));
+        }
+        let message = args.message.clone().unwrap_or_else(|| branch.clone());
+        git.commit(&message)?;
+    } else {
+        // Amending a branch with no commit of its own would rewrite the base's
+        // commit; require an explicit --commit there instead.
+        if pre_amend == git.rev_parse(&base_name)? {
+            return Err(Error::Usage(format!(
+                "`{branch}` has no commit of its own above `{base_name}`; use --commit to add one"
+            )));
+        }
+        git.commit_amend(args.message.as_deref())?;
+    }
+
+    // Restack the upstack onto the amended tip. The engine checks out each child
+    // it rebases, so restore the user to the modified branch afterward.
+    let order = ops::upstack_order(&state.branches, &branch);
+    let restacked = restack_with_recovery(&git, &store, &mut state, &repo, &order, |remaining| {
+        recovery::Operation::Modify {
+            branch: branch.clone(),
+            remaining,
+            pre_amend: pre_amend.clone(),
+        }
+    })?;
+
+    store.save(&state)?;
+    clear_conflict_artifacts(&git);
+    git.checkout(&branch)?;
+
+    let tip = git.rev_parse(&branch)?;
+    match format {
+        OutputFormat::Json => println!(
+            "{}",
+            json!({
+                "op": "modify",
+                "branch": branch,
+                "amended": !args.commit,
+                "sha": tip,
+                "restacked": restacked,
+            })
+        ),
+        OutputFormat::Pretty => {
+            if args.commit {
+                println!("Committed to {branch}");
+            } else {
+                println!("Amended {branch}");
+            }
+            for name in &restacked {
+                println!("Restacked {name}");
+            }
         }
     }
     Ok(())
@@ -625,12 +725,10 @@ pub fn continue_cmd(format: OutputFormat) -> Result<(), Error> {
 pub fn abort_cmd(format: OutputFormat) -> Result<(), Error> {
     let git = Git::open(".");
     let git_dir = git.git_dir()?;
-    // A continuation record is present unless the read says NotInProgress; a
-    // Corrupt/Read error still means a file is there, just unreadable.
-    let has_continuation = !matches!(
-        recovery::read_continuation(&git_dir),
-        Err(recovery::RecoveryError::NotInProgress)
-    );
+    // Read the record once: present unless NotInProgress (a Corrupt/Read error
+    // still means a file is there, just unreadable).
+    let cont = recovery::read_continuation(&git_dir);
+    let has_continuation = !matches!(&cont, Err(recovery::RecoveryError::NotInProgress));
     let in_progress = git.rebase_in_progress();
     if !in_progress && !has_continuation {
         return Err(Error::NotInProgress(
@@ -645,15 +743,22 @@ pub fn abort_cmd(format: OutputFormat) -> Result<(), Error> {
         ));
     }
     // Abort the rebase, then ALWAYS clear artifacts so a failed `rebase --abort`
-    // can't strand the recovery record. (Restoring a modify/move rollback anchor
-    // lands with those commands in U7/U11; aborting the rebase restores the tree
-    // for sync/restack, though branches already restacked before the conflict
-    // stay restacked.)
+    // can't strand the recovery record.
     let abort_err = if in_progress {
         git.rebase_abort().err()
     } else {
         None
     };
+    // Undo a modify's amend by resetting its branch to the pre-amend tip. The
+    // conflicting child's rebase is already undone above; children that restacked
+    // before a later conflict are left as-is (the same caveat as a multi-branch
+    // restack abort).
+    if let Ok(recovery::Operation::Modify {
+        branch, pre_amend, ..
+    }) = &cont
+    {
+        let _ = git.force_branch(branch, pre_amend);
+    }
     clear_conflict_artifacts(&git);
     if let Some(err) = abort_err {
         return Err(err.into());

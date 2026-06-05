@@ -24,9 +24,11 @@ pub enum Operation {
     Sync { remaining: Vec<String> },
     /// A standalone `restack`.
     Restack { remaining: Vec<String> },
-    /// `modify`: amended the current branch's tip; `pre_amend` is the tip before
-    /// the amend, restored on abort.
+    /// `modify`: amended `branch`'s tip; `pre_amend` is its tip before the amend,
+    /// which `abort` resets it back to. `remaining` is the upstack still to
+    /// restack onto the amended tip.
     Modify {
+        branch: String,
         remaining: Vec<String>,
         pre_amend: String,
     },
@@ -58,7 +60,10 @@ impl Operation {
         match self {
             Operation::Sync { .. } => Operation::Sync { remaining },
             Operation::Restack { .. } => Operation::Restack { remaining },
-            Operation::Modify { pre_amend, .. } => Operation::Modify {
+            Operation::Modify {
+                branch, pre_amend, ..
+            } => Operation::Modify {
+                branch: branch.clone(),
                 remaining,
                 pre_amend: pre_amend.clone(),
             },
@@ -167,6 +172,7 @@ mod tests {
                 remaining: vec!["a".into()],
             },
             Operation::Modify {
+                branch: "x".into(),
                 remaining: vec!["b".into(), "c".into()],
                 pre_amend: "deadbeef".into(),
             },
@@ -218,11 +224,13 @@ mod tests {
         );
         assert_eq!(
             Operation::Modify {
+                branch: "x".into(),
                 remaining: vec!["a".into()],
                 pre_amend: "h".into(),
             }
             .with_remaining(r.clone()),
             Operation::Modify {
+                branch: "x".into(),
                 remaining: r.clone(),
                 pre_amend: "h".into(),
             }
@@ -245,6 +253,7 @@ mod tests {
         assert!(Operation::Sync { remaining: vec![] }.pushes_state());
         assert!(!Operation::Restack { remaining: vec![] }.pushes_state());
         assert!(!Operation::Modify {
+            branch: "x".into(),
             remaining: vec![],
             pre_amend: "h".into(),
         }
