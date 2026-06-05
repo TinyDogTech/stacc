@@ -260,3 +260,29 @@ fn abort_clears_a_stale_continuation_without_a_rebase() {
     assert!(String::from_utf8_lossy(&out.stdout).contains(r#""aborted":true"#));
     assert!(!p.join(".git/stacc-continue.json").exists());
 }
+
+#[test]
+fn conflict_with_an_unwritable_continuation_aborts_to_a_clean_tree() {
+    let tmp = repo();
+    let p = tmp.path();
+    assert!(stacc(p, &["init"]).status.success());
+    run_git(p, &["checkout", "-q", "-b", "a"]);
+    write_commit(p, "shared.txt", "a-version\n", "a edits shared");
+    assert!(stacc(p, &["track"]).status.success());
+    run_git(p, &["checkout", "-q", "main"]);
+    write_commit(p, "shared.txt", "main-version\n", "main edits shared");
+    run_git(p, &["checkout", "-q", "a"]);
+    // Block the continuation write: its rename target is now a directory.
+    std::fs::create_dir(p.join(".git/stacc-continue.json")).expect("mkdir");
+
+    // JSON keeps the error on one line (pretty/miette wraps it).
+    let out = stacc(p, &["restack", "--stack", "--format", "json"]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("rebase aborted to a clean tree"),
+        "stdout: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    // The rebase was undone rather than left stranded with no resume marker.
+    assert!(!rebase_in_progress(p), "rebase left in progress");
+}

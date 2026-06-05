@@ -426,9 +426,24 @@ fn restack_with_recovery(
     match ops::restack(git, store, state, order) {
         Ok(restacked) => Ok(restacked),
         Err(ops::OpsError::Conflict { branch, remaining }) => {
-            // `ops::restack` already saved state before returning.
-            recovery::write_continuation(&git.git_dir()?, &make_op(remaining))?;
+            // `ops::restack` already saved state before returning. Write the
+            // agent-readable context first (best-effort), then the resume
+            // marker; if the marker write fails we would strand the user
+            // mid-rebase with no `stacc continue`, so abort back to a clean tree.
             write_conflict_context(git, state, repo, &branch);
+            let dir = git.git_dir()?;
+            if let Err(err) = recovery::write_continuation(&dir, &make_op(remaining)) {
+                let aborted = git.rebase_abort();
+                clear_conflict_artifacts(git);
+                return Err(Error::Usage(match aborted {
+                    Ok(()) => format!(
+                        "conflict on `{branch}`, but the recovery state could not be saved ({err}); rebase aborted to a clean tree"
+                    ),
+                    Err(abort_err) => format!(
+                        "conflict on `{branch}`, but the recovery state could not be saved ({err}) and the rebase abort also failed ({abort_err}); run `git rebase --abort` manually"
+                    ),
+                }));
+            }
             Err(Error::Conflict { branch })
         }
         Err(err) => Err(err.into()),
