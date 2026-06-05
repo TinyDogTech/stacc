@@ -367,6 +367,27 @@ fn continue_op(
     }
     let remaining = op.remaining().to_vec();
 
+    // The continuation stores only branch names; confirm the rebase git is
+    // actually mid-replay is the one we recorded, so a stale record or an
+    // out-of-band rebase can't make us advance the wrong branch's base hash.
+    if let Some(expected) = remaining.first() {
+        match git.rebase_head_branch() {
+            Some(head) if &head == expected => {}
+            Some(head) => {
+                return Err(Error::Usage(format!(
+                    "the in-progress rebase is on `{head}`, not the recorded `{expected}`; resolve it with `git rebase --continue`/`--abort` first"
+                )));
+            }
+            // stacc only ever runs merge-style rebases (head-name present), so an
+            // unreadable head means this rebase is not ours: refuse to advance.
+            None => {
+                return Err(Error::Usage(format!(
+                    "a rebase is in progress but stacc cannot confirm it is the recorded `{expected}`; run `git rebase --abort` if it is not stacc's"
+                )));
+            }
+        }
+    }
+
     match git.rebase_continue() {
         Ok(()) => {}
         Err(RebaseError::Interrupt(_)) => {

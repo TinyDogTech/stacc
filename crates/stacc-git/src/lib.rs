@@ -220,7 +220,9 @@ impl Git {
         Ok(self.dir.join(dir))
     }
 
-    fn rebase_head_branch(&self) -> Option<String> {
+    /// The branch the in-progress merge-style rebase is replaying (from
+    /// `rebase-merge/head-name`), or `None` if there is none or it can't be read.
+    pub fn rebase_head_branch(&self) -> Option<String> {
         let head_name = self.git_dir().ok()?.join("rebase-merge").join("head-name");
         let contents = std::fs::read_to_string(head_name).ok()?;
         let name = contents.trim();

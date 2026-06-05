@@ -286,3 +286,61 @@ fn conflict_with_an_unwritable_continuation_aborts_to_a_clean_tree() {
     // The rebase was undone rather than left stranded with no resume marker.
     assert!(!rebase_in_progress(p), "rebase left in progress");
 }
+
+#[test]
+fn continue_refuses_when_the_rebase_head_does_not_match() {
+    // A real conflict writes a continuation recording branch `a`.
+    let tmp = conflicted_restack();
+    let p = tmp.path();
+    // Abort a's rebase by hand but leave the (now stale) continuation file.
+    run_git(p, &["rebase", "--abort"]);
+    assert!(p.join(".git/stacc-continue.json").exists());
+
+    // Start an unrelated rebase that conflicts on a different branch, `c`.
+    run_git(p, &["checkout", "-q", "main"]);
+    run_git(p, &["checkout", "-q", "-b", "c"]);
+    write_commit(p, "shared.txt", "c-version\n", "c edits shared");
+    let _ = Command::new("git")
+        .arg("-C")
+        .arg(p)
+        .args(["rebase", "a"])
+        .env("GIT_EDITOR", "true")
+        .status();
+    assert!(rebase_in_progress(p), "expected a rebase on c");
+
+    // continue sees the continuation (records `a`) but git is rebasing `c`.
+    let out = stacc(p, &["continue", "--format", "json"]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("not the recorded `a`"),
+        "got: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
+fn continue_refuses_an_unverifiable_apply_style_rebase() {
+    let tmp = conflicted_restack();
+    let p = tmp.path();
+    run_git(p, &["rebase", "--abort"]); // leave the stale continuation
+    run_git(p, &["checkout", "-q", "main"]);
+    run_git(p, &["checkout", "-q", "-b", "c"]);
+    write_commit(p, "shared.txt", "c-version\n", "c edits shared");
+    // The --apply backend uses rebase-apply/ (no head-name), so stacc cannot
+    // confirm whose rebase it is.
+    let _ = Command::new("git")
+        .arg("-C")
+        .arg(p)
+        .args(["rebase", "--apply", "a"])
+        .env("GIT_EDITOR", "true")
+        .status();
+    assert!(rebase_in_progress(p), "expected an apply-style rebase");
+
+    let out = stacc(p, &["continue", "--format", "json"]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("cannot confirm"),
+        "got: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
