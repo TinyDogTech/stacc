@@ -82,12 +82,16 @@ fn pr_body(number: u64) -> serde_json::Value {
 fn rename_moves_the_state_key_and_repoints_children() {
     let (tmp, _bare) = setup();
     let p = tmp.path();
-    // main -> a -> b
+    // main -> a, with two children b and c both stacked on a.
     run_git(p, &["checkout", "-q", "-b", "a"]);
     run_git(p, &["commit", "-q", "--allow-empty", "-m", "a1"]);
     assert!(stacc(p, &["track"]).status.success());
     run_git(p, &["checkout", "-q", "-b", "b"]);
     run_git(p, &["commit", "-q", "--allow-empty", "-m", "b1"]);
+    assert!(stacc(p, &["track", "--base", "a"]).status.success());
+    run_git(p, &["checkout", "-q", "a"]);
+    run_git(p, &["checkout", "-q", "-b", "c"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "c1"]);
     assert!(stacc(p, &["track", "--base", "a"]).status.success());
     run_git(p, &["checkout", "-q", "a"]);
 
@@ -106,8 +110,16 @@ fn rename_moves_the_state_key_and_repoints_children() {
     assert_eq!(current_branch(p), "x");
     let log = String::from_utf8_lossy(&stacc(p, &["log", "--format", "json"]).stdout).into_owned();
     assert!(log.contains(r#""name":"x""#), "got: {log}");
-    assert!(log.contains(r#""base":"x""#), "b not re-pointed: {log}");
     assert!(!log.contains(r#""name":"a""#), "a still present: {log}");
+    // Both children re-parented onto x (recorded base.name updated).
+    assert!(
+        git_out(p, &["show", "refs/stacc/data:branches/b"]).contains(r#""name": "x""#),
+        "b not re-pointed"
+    );
+    assert!(
+        git_out(p, &["show", "refs/stacc/data:branches/c"]).contains(r#""name": "x""#),
+        "c not re-pointed"
+    );
 }
 
 #[test]
@@ -198,7 +210,8 @@ fn rename_with_force_drops_the_pr_and_renames_the_remote() {
     // The remote branch-rename API is called with the new name.
     let rename_mock = server.mock(|when, then| {
         when.method(httpmock::Method::POST)
-            .path("/repos/TinyDogTech/stacc/branches/a/rename");
+            .path("/repos/TinyDogTech/stacc/branches/a/rename")
+            .json_body(serde_json::json!({ "new_name": "x" }));
         then.status(201).json_body(serde_json::json!({ "name": "x" }));
     });
 
@@ -214,8 +227,100 @@ fn rename_with_force_drops_the_pr_and_renames_the_remote() {
     assert!(s.contains(r#""number":7"#), "closing PR not surfaced: {s}");
     rename_mock.assert();
 
-    // x is tracked with no recorded PR (the field is omitted when None), so the
-    // next submit recreates it.
+    // HEAD followed to x, and x is tracked with no recorded PR (the field is
+    // omitted when None), so the next submit recreates it.
+    assert_eq!(current_branch(p), "x");
     let show = git_out(p, &["show", "refs/stacc/data:branches/x"]);
     assert!(!show.contains(r#""pr""#), "pr not dropped: {show}");
+}
+
+#[test]
+fn rename_keeps_the_pr_when_the_remote_rename_fails() {
+    let (tmp, _bare) = setup();
+    let p = tmp.path();
+    run_git(p, &["checkout", "-q", "-b", "a"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "a1"]);
+    assert!(stacc(p, &["track"]).status.success());
+
+    let server = MockServer::start();
+    let _pulls = server.mock(|when, then| {
+        when.method(httpmock::Method::POST)
+            .path("/repos/TinyDogTech/stacc/pulls");
+        then.status(201).json_body(pr_body(7));
+    });
+    let base = server.base_url();
+    let env = [("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", base.as_str())];
+    assert!(stacc_env(p, &["submit", "--format", "json"], &env).status.success());
+
+    // The remote rename fails (500): the local rename still persists, the PR is
+    // KEPT (not dropped), and the user is warned.
+    let _rename = server.mock(|when, then| {
+        when.method(httpmock::Method::POST)
+            .path("/repos/TinyDogTech/stacc/branches/a/rename");
+        then.status(500);
+    });
+    let out = stacc_env(p, &["rename", "x", "--force", "--format", "json"], &env);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains(r#""remote_renamed":false"#), "got: {s}");
+    assert!(s.contains(r#""closed_pr":null"#), "got: {s}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("remote branch rename failed"),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // The PR record survives so a later submit reconciles it instead of orphaning.
+    assert!(
+        git_out(p, &["show", "refs/stacc/data:branches/x"]).contains(r#""number": 7"#),
+        "pr should be kept on remote failure"
+    );
+}
+
+#[test]
+fn rename_to_the_trunk_name_errors() {
+    let (tmp, _bare) = setup();
+    let p = tmp.path();
+    run_git(p, &["checkout", "-q", "-b", "a"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "a1"]);
+    assert!(stacc(p, &["track"]).status.success());
+    let out = stacc(p, &["rename", "main", "--format", "json"]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("is the trunk branch name"),
+        "got: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
+fn rename_a_detached_head_errors() {
+    let (tmp, _bare) = setup();
+    let p = tmp.path();
+    run_git(p, &["checkout", "-q", "--detach"]);
+    let out = stacc(p, &["rename", "x", "--format", "json"]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("detached"),
+        "got: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
+fn rename_an_untracked_branch_errors() {
+    let (tmp, _bare) = setup();
+    let p = tmp.path();
+    run_git(p, &["checkout", "-q", "-b", "loose"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "x1"]);
+    let out = stacc(p, &["rename", "x", "--format", "json"]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("not tracked"),
+        "got: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
 }

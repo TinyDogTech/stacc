@@ -572,6 +572,9 @@ pub fn rename(args: &RenameArgs, format: OutputFormat) -> Result<(), Error> {
     if to == &repo.trunk {
         return Err(Error::Usage(format!("`{to}` is the trunk branch name")));
     }
+    if to.starts_with('-') {
+        return Err(Error::Usage(format!("`{to}` is not a valid branch name")));
+    }
     if !state.branches.contains_key(&from) {
         return Err(Error::Usage(format!(
             "branch `{from}` is not tracked; run `stacc track` first"
@@ -588,7 +591,7 @@ pub fn rename(args: &RenameArgs, format: OutputFormat) -> Result<(), Error> {
     let own_pr = state.branches.get(&from).and_then(|b| b.pr.clone());
     if let Some(pr) = &own_pr {
         if !args.force {
-            let url = pr.url.clone().unwrap_or_default();
+            let url = pr.url.as_deref().unwrap_or_default();
             return Err(Error::Usage(format!(
                 "renaming `{from}` will close its open PR #{} ({url}); pass --force to rename and recreate it on the next `submit`",
                 pr.number
@@ -596,46 +599,53 @@ pub fn rename(args: &RenameArgs, format: OutputFormat) -> Result<(), Error> {
         }
     }
 
-    // Local rename first: move the ref (HEAD follows), then the state key and
-    // every child's recorded base.
+    // Local rename: move the ref (HEAD follows), the state key, and every
+    // child's recorded base. Persist this BEFORE the remote call so a remote
+    // failure leaves a consistent (renamed, PR-still-recorded) state to
+    // re-`submit` from rather than a half-applied one.
     git.rename_branch(&from, to)?;
-    let mut moved = state
+    let moved = state
         .branches
         .remove(&from)
         .expect("from was just checked as tracked");
-    // With --force the remote rename closes the PR, so drop the record; the next
-    // `submit` recreates it.
-    let pr_closed = if own_pr.is_some() {
-        moved.pr = None;
-        own_pr.clone()
-    } else {
-        None
-    };
     state.branches.insert(to.clone(), moved);
     for branch in state.branches.values_mut() {
         if branch.base.name == from {
             branch.base.name.clone_from(to);
         }
     }
+    store.save(&state).map_err(|e| {
+        Error::Usage(format!(
+            "renamed `{from}` locally but could not save state: {e}; run `stacc track` on `{to}` to recover"
+        ))
+    })?;
 
     // Remote rename only when the branch was on the remote (it had a PR). The
-    // API retargets child base-PRs and closes this branch's own PR. A protected
-    // branch or permission failure falls back to the local + state rename.
+    // API retargets child base-PRs but closes this branch's own PR, so on
+    // success drop the record (the next `submit` recreates it) and save again;
+    // on failure KEEP the record so the next `submit` reconciles the still-open
+    // PR instead of orphaning it.
     let mut remote_renamed = false;
+    let mut pr_closed = None;
     if own_pr.is_some() {
         match rename_remote_branch(&git, &repo, &from, to) {
-            Ok(()) => remote_renamed = true,
+            Ok(()) => {
+                remote_renamed = true;
+                pr_closed.clone_from(&own_pr);
+                if let Some(branch) = state.branches.get_mut(to) {
+                    branch.pr = None;
+                }
+                if let Err(err) = store.save(&state) {
+                    eprintln!(
+                        "warning: renamed `{to}` on the remote and closed its PR, but could not drop the local PR record ({err}); run `stacc submit` to reconcile"
+                    );
+                }
+            }
             Err(err) => eprintln!(
-                "warning: renamed locally, but the remote branch rename failed ({err}); rename it on the remote by hand or re-`submit`"
+                "warning: renamed locally, but the remote branch rename failed ({err}); the open PR is unchanged, rename it on the remote by hand or re-`submit`"
             ),
         }
     }
-
-    store.save(&state).map_err(|e| {
-        Error::Usage(format!(
-            "renamed `{from}` but could not save state: {e}; run `stacc track` to recover"
-        ))
-    })?;
 
     report_rename(format, &from, to, pr_closed.as_ref(), remote_renamed);
     Ok(())
@@ -663,6 +673,7 @@ fn report_rename(
                 "{}",
                 json!({
                     "op": "rename",
+                    "branch": to,
                     "from": from,
                     "to": to,
                     "remote_renamed": remote_renamed,
