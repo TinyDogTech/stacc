@@ -109,6 +109,10 @@ fn modify_amends_and_restacks_the_upstack() {
     assert_ne!(git_out(p, &["rev-parse", "a"]), a_before);
     assert_ne!(git_out(p, &["rev-parse", "b"]), b_before);
     assert_eq!(current_branch(p), "a");
+    assert!(
+        s.contains(&format!(r#""sha":"{}""#, git_out(p, &["rev-parse", "a"]))),
+        "got: {s}"
+    );
     assert!(git_ok(p, &["merge-base", "--is-ancestor", "a", "b"]));
 }
 
@@ -210,4 +214,86 @@ fn abort_of_a_conflicted_modify_restores_the_amend() {
     assert_eq!(git_out(p, &["rev-parse", "a"]), a_before, "a not restored");
     assert_eq!(git_out(p, &["rev-parse", "b"]), b_before, "b not restored");
     assert!(!p.join(".git/stacc-continue.json").exists());
+}
+
+/// `main -> a (shared) -> b (b.txt) -> c (shared)`. Amending `a`'s shared file
+/// lets `b` restack clean but makes `c` conflict: a later-child conflict.
+fn stack_with_multichild_conflict() -> TempDir {
+    let tmp = init_repo();
+    let p = tmp.path();
+    std::fs::write(p.join("shared.txt"), "a-orig\n").expect("write");
+    run_git(p, &["add", "shared.txt"]);
+    assert!(stacc(p, &["create", "a", "-m", "a1"]).status.success());
+    std::fs::write(p.join("b.txt"), "b\n").expect("write");
+    run_git(p, &["add", "b.txt"]);
+    assert!(stacc(p, &["create", "b", "-m", "b1"]).status.success());
+    std::fs::write(p.join("shared.txt"), "c-version\n").expect("write");
+    run_git(p, &["add", "shared.txt"]);
+    assert!(stacc(p, &["create", "c", "-m", "c1"]).status.success());
+    run_git(p, &["checkout", "-q", "a"]);
+    tmp
+}
+
+#[test]
+fn abort_keeps_the_amend_when_a_child_already_restacked() {
+    let tmp = stack_with_multichild_conflict();
+    let p = tmp.path();
+    let a_before = git_out(p, &["rev-parse", "a"]);
+    std::fs::write(p.join("shared.txt"), "a-modified\n").expect("write");
+    run_git(p, &["add", "shared.txt"]);
+    // b restacks clean, c conflicts.
+    assert!(
+        !stacc(p, &["modify"]).status.success(),
+        "expected a conflict on c"
+    );
+    let a_amended = git_out(p, &["rev-parse", "a"]);
+    assert_ne!(a_amended, a_before);
+    assert!(git_ok(p, &["merge-base", "--is-ancestor", "a", "b"]));
+
+    let out = stacc(p, &["abort", "--format", "json"]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // a stays amended (resetting it would orphan the already-restacked b), and b
+    // still descends a: consistent, no orphan.
+    assert_eq!(
+        git_out(p, &["rev-parse", "a"]),
+        a_amended,
+        "a should stay amended"
+    );
+    assert!(
+        git_ok(p, &["merge-base", "--is-ancestor", "a", "b"]),
+        "b orphaned"
+    );
+    assert!(!p.join(".git/stacc-continue.json").exists());
+}
+
+#[test]
+fn modify_on_untracked_branch_errors() {
+    let tmp = init_repo();
+    let p = tmp.path();
+    run_git(p, &["checkout", "-q", "-b", "loose"]);
+    let out = stacc(p, &["modify", "--format", "json"]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("not tracked"),
+        "got: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
+fn modify_amend_with_nothing_staged_errors() {
+    let tmp = stack_main_a_b();
+    let p = tmp.path();
+    // On `a` (which has its own commit), nothing staged and no -m: pure no-op.
+    let out = stacc(p, &["modify", "--format", "json"]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("nothing staged"),
+        "got: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
 }

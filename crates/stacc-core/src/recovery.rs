@@ -25,8 +25,8 @@ pub enum Operation {
     /// A standalone `restack`.
     Restack { remaining: Vec<String> },
     /// `modify`: amended `branch`'s tip; `pre_amend` is its tip before the amend,
-    /// which `abort` resets it back to. `remaining` is the upstack still to
-    /// restack onto the amended tip.
+    /// which `abort` restores when it can do so without orphaning children that
+    /// already restacked. `remaining` is the upstack still to restack.
     Modify {
         branch: String,
         remaining: Vec<String>,

@@ -249,6 +249,14 @@ pub fn modify(args: &ModifyArgs, format: OutputFormat) -> Result<(), Error> {
                 "`{branch}` has no commit of its own above `{base_name}`; use --commit to add one"
             )));
         }
+        // A bare amend with nothing staged and no reword only churns the commit
+        // timestamp, forcing a needless upstack restack; refuse it.
+        if !git.has_staged_changes()? && args.message.is_none() {
+            return Err(Error::Usage(
+                "nothing staged to amend; stage changes, pass -m to reword, or --commit to append"
+                    .into(),
+            ));
+        }
         git.commit_amend(args.message.as_deref())?;
     }
 
@@ -263,9 +271,17 @@ pub fn modify(args: &ModifyArgs, format: OutputFormat) -> Result<(), Error> {
         }
     })?;
 
-    store.save(&state)?;
+    store.save(&state).map_err(|e| {
+        Error::Usage(format!(
+            "amend and restack succeeded but could not save state: {e}; run `stacc restack` to re-sync"
+        ))
+    })?;
     clear_conflict_artifacts(&git);
-    git.checkout(&branch)?;
+    // Best-effort: the work is already done and saved, so a failure to switch
+    // back to the modified branch must not report the whole modify as failed.
+    if let Err(err) = git.checkout(&branch) {
+        eprintln!("warning: could not switch back to `{branch}`: {err}");
+    }
 
     let tip = git.rev_parse(&branch)?;
     match format {
@@ -749,15 +765,32 @@ pub fn abort_cmd(format: OutputFormat) -> Result<(), Error> {
     } else {
         None
     };
-    // Undo a modify's amend by resetting its branch to the pre-amend tip. The
-    // conflicting child's rebase is already undone above; children that restacked
-    // before a later conflict are left as-is (the same caveat as a multi-branch
-    // restack abort).
-    if let Ok(recovery::Operation::Modify {
-        branch, pre_amend, ..
-    }) = &cont
-    {
-        let _ = git.force_branch(branch, pre_amend);
+    // Undo a modify's amend by resetting its branch to the pre-amend tip, but
+    // ONLY when no upstack child has restacked onto the amended tip yet (the
+    // conflict landed on the first child, so `remaining` still covers the whole
+    // upstack). Resetting after a later-child conflict would orphan the children
+    // already rebased onto the amended tip, so there we keep the amend and tell
+    // the user. Skip entirely if the rebase abort itself failed.
+    if abort_err.is_none() {
+        if let Ok(recovery::Operation::Modify {
+            branch,
+            remaining,
+            pre_amend,
+        }) = &cont
+        {
+            let child_count = StateStore::new(git.clone()).load().map_or(0, |s| {
+                ops::upstack_order(&s.branches, branch).len().saturating_sub(1)
+            });
+            if child_count > 0 && remaining.len() == child_count {
+                if let Err(err) = git.force_branch(branch, pre_amend) {
+                    eprintln!("warning: could not restore `{branch}` to its pre-amend tip: {err}");
+                }
+            } else {
+                eprintln!(
+                    "warning: `{branch}` stays amended; upstack branches were already restacked onto it. Run `stacc restack` to finish, or reset `{branch}` to {pre_amend} to undo the amend."
+                );
+            }
+        }
     }
     clear_conflict_artifacts(&git);
     if let Some(err) = abort_err {
