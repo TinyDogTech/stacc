@@ -76,3 +76,86 @@ fn log_requires_init() {
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains("not initialized"), "got: {s}");
 }
+
+#[test]
+fn log_marks_current_branch_and_needs_restack() {
+    let tmp = repo();
+    let p = tmp.path();
+    assert!(stacc(p, &["init"]).status.success());
+    run_git(p, &["checkout", "-q", "-b", "a"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "a1"]);
+    assert!(stacc(p, &["track"]).status.success());
+
+    // On `a`, up to date: `a` is marked current and shows no restack marker.
+    let s = String::from_utf8_lossy(&stacc(p, &["log"]).stdout).into_owned();
+    assert!(s.contains("* a"), "current branch not marked: {s}");
+    assert!(!s.contains("needs restack"), "unexpected restack marker: {s}");
+
+    // Advance main so `a` drifts off its base.
+    run_git(p, &["checkout", "-q", "main"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "main moves"]);
+    let s = String::from_utf8_lossy(&stacc(p, &["log"]).stdout).into_owned();
+    assert!(s.contains("* main"), "current trunk not marked: {s}");
+    assert!(
+        s.contains("o a") && s.contains("needs restack"),
+        "expected restack marker on a: {s}"
+    );
+}
+
+#[test]
+fn log_short_emits_one_line_per_branch() {
+    let tmp = repo();
+    let p = tmp.path();
+    assert!(stacc(p, &["init"]).status.success());
+    run_git(p, &["checkout", "-q", "-b", "a"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "a1"]);
+    assert!(stacc(p, &["track"]).status.success());
+    run_git(p, &["checkout", "-q", "-b", "b"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "b1"]);
+    assert!(stacc(p, &["track", "--base", "a"]).status.success());
+
+    let s = String::from_utf8_lossy(&stacc(p, &["log", "--short"]).stdout).into_owned();
+    let lines: Vec<&str> = s.lines().collect();
+    assert_eq!(lines.len(), 2, "one line per branch expected: {s}"); // a, b (no trunk header)
+    assert!(s.contains("o a") && s.contains("* b"), "got: {s}");
+    assert!(!s.contains("main"), "trunk should not appear in --short: {s}");
+    assert!(!s.contains("needs restack"), "clean stack should have no marker: {s}");
+}
+
+#[test]
+fn log_renders_a_forked_stack() {
+    let tmp = repo();
+    let p = tmp.path();
+    assert!(stacc(p, &["init"]).status.success());
+    // main -> a and main -> b: two children of the trunk.
+    run_git(p, &["checkout", "-q", "-b", "a"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "a1"]);
+    assert!(stacc(p, &["track"]).status.success());
+    run_git(p, &["checkout", "-q", "main"]);
+    run_git(p, &["checkout", "-q", "-b", "b"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "b1"]);
+    assert!(stacc(p, &["track"]).status.success());
+
+    let s = String::from_utf8_lossy(&stacc(p, &["log"]).stdout).into_owned();
+    // Both children render at depth 1 (a two-space indent); b is current.
+    assert!(s.contains("  o a"), "got: {s}");
+    assert!(s.contains("  * b"), "got: {s}");
+}
+
+#[test]
+fn log_json_is_not_changed_by_drift() {
+    // R15: the JSON contract must never gain pretty-only fields like needs-restack.
+    let tmp = repo();
+    let p = tmp.path();
+    assert!(stacc(p, &["init"]).status.success());
+    run_git(p, &["checkout", "-q", "-b", "a"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "a1"]);
+    assert!(stacc(p, &["track"]).status.success());
+    run_git(p, &["checkout", "-q", "main"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "main moves"]); // a drifts
+
+    let s = String::from_utf8_lossy(&stacc(p, &["log", "--format", "json"]).stdout).into_owned();
+    assert!(s.contains(r#""name":"a""#), "got: {s}");
+    assert!(!s.contains("restack"), "JSON leaked a pretty marker: {s}");
+    assert!(!s.contains("needs"), "JSON leaked a pretty marker: {s}");
+}

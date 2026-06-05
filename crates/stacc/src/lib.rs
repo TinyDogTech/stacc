@@ -63,7 +63,7 @@ fn dispatch(cli: &Cli) -> Result<(), Error> {
         Command::Track(args) => commands::track(args, cli.global.format),
         Command::Create(args) => commands::create(args, cli.global.format),
         Command::Modify(args) => commands::modify(args, cli.global.format),
-        Command::Log => commands::log(cli.global.format),
+        Command::Log(args) => commands::log(args, cli.global.format),
         Command::Status => commands::status(cli.global.format),
         Command::Submit(args) => commands::submit(args, cli.global.format),
         Command::Sync(args) => commands::sync(args, cli.global.format),

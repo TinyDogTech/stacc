@@ -84,7 +84,7 @@ pub enum Command {
     /// Switch to a branch (pick interactively when run bare on a terminal).
     Checkout(CheckoutArgs),
     /// Print the stack.
-    Log,
+    Log(LogArgs),
     /// Show the current branch's position and PR status.
     Status,
     /// Manage the GitHub access token.
@@ -160,6 +160,14 @@ pub struct StepsArgs {
     /// Number of levels to move (default 1).
     #[arg(default_value_t = 1)]
     pub steps: usize,
+}
+
+/// Arguments for `stacc log`.
+#[derive(Debug, clap::Args)]
+pub struct LogArgs {
+    /// One compact line per branch instead of the indented graph.
+    #[arg(long)]
+    pub short: bool,
 }
 
 /// Arguments for `stacc checkout`.

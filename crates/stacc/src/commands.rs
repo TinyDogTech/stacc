@@ -10,7 +10,7 @@ use stacc_git::Git;
 use stacc_github::{GitHub, NewPullRequest, PrState, PullRequestUpdate};
 use stacc_state::{Base, BranchState, PullRequest, RepoConfig, StateStore};
 
-use crate::cli::{CreateArgs, InitArgs, OutputFormat, SubmitArgs, TrackArgs};
+use crate::cli::{CreateArgs, InitArgs, LogArgs, OutputFormat, SubmitArgs, TrackArgs};
 use crate::error::Error;
 
 mod auth;
@@ -199,9 +199,9 @@ pub fn create(args: &CreateArgs, format: OutputFormat) -> Result<(), Error> {
 }
 
 /// `stacc log`: render the tracked stack from the state ref.
-pub fn log(format: OutputFormat) -> Result<(), Error> {
+pub fn log(args: &LogArgs, format: OutputFormat) -> Result<(), Error> {
     let git = Git::open(".");
-    let store = StateStore::new(git);
+    let store = StateStore::new(git.clone());
     let state = store.load()?;
 
     let trunk = match &state.repo {
@@ -223,37 +223,79 @@ pub fn log(format: OutputFormat) -> Result<(), Error> {
     }
 
     match format {
+        // JSON is a stable machine contract: do not change its shape here.
         OutputFormat::Json => {
             let stack = stack_json(&trunk, &children, &state.branches);
             println!("{}", json!({ "trunk": trunk, "stack": stack }));
         }
         OutputFormat::Pretty => {
-            println!("{trunk}");
-            print_stack(&trunk, &children, &state.branches, 1);
+            let current = git.current_branch().unwrap_or_default();
+            if args.short {
+                for name in ops::topo_order(&state.branches, &trunk) {
+                    let base = state
+                        .branches
+                        .get(&name)
+                        .map_or(trunk.as_str(), |b| b.base.name.as_str());
+                    let glyph = if name == current { "*" } else { "o" };
+                    println!("{glyph} {}", branch_line(&git, &name, base, &state.branches));
+                }
+            } else {
+                let trunk_glyph = if current == trunk { "* " } else { "" };
+                println!("{trunk_glyph}{trunk}");
+                print_graph(&git, &trunk, &children, &state.branches, &current, 1);
+            }
         }
     }
     Ok(())
 }
 
-fn print_stack(
+fn print_graph(
+    git: &Git,
     node: &str,
     children: &BTreeMap<&str, Vec<&str>>,
     branches: &BTreeMap<String, BranchState>,
+    current: &str,
     depth: usize,
 ) {
+    // Each branch is keyed under its single recorded base, so the
+    // trunk-reachable graph is a tree and this recursion always terminates.
     let Some(kids) = children.get(node) else {
         return;
     };
     for &kid in kids {
         let indent = "  ".repeat(depth);
-        let pr = branches
-            .get(kid)
-            .and_then(|b| b.pr.as_ref())
-            .map(|pr| format!(" (#{})", pr.number))
-            .unwrap_or_default();
-        println!("{indent}{kid}{pr}");
-        print_stack(kid, children, branches, depth + 1);
+        let glyph = if kid == current { "*" } else { "o" };
+        println!("{indent}{glyph} {}", branch_line(git, kid, node, branches));
+        print_graph(git, kid, children, branches, current, depth + 1);
     }
+}
+
+/// One branch's label: its name, recorded PR number, and a needs-restack marker.
+fn branch_line(
+    git: &Git,
+    name: &str,
+    base: &str,
+    branches: &BTreeMap<String, BranchState>,
+) -> String {
+    let pr = branches
+        .get(name)
+        .and_then(|b| b.pr.as_ref())
+        .map(|p| format!(" (#{})", p.number))
+        .unwrap_or_default();
+    let restack = if needs_restack(git, name, base) {
+        "  (needs restack)"
+    } else {
+        ""
+    };
+    format!("{name}{pr}{restack}")
+}
+
+/// Whether `branch` has drifted off `base` (its base tip is no longer an
+/// ancestor). `is_ancestor` resolves `base` to its tip itself, so this is one
+/// git call per branch; any lookup failure reads as up-to-date so `log` never
+/// raises a false alarm on a transient error.
+fn needs_restack(git: &Git, branch: &str, base: &str) -> bool {
+    !git.is_ancestor(base, branch).unwrap_or(true)
 }
 
 fn stack_json(
