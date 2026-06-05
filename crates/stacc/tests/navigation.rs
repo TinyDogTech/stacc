@@ -143,8 +143,35 @@ fn top_at_a_fork_errors_with_choices() {
     let p = tmp.path();
     let out = stacc(p, &["top", "--format", "json"]);
     assert!(!out.status.success());
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains(r#""error":"ambiguous""#), "got: {s}");
+    assert!(s.contains(r#""b""#) && s.contains(r#""c""#), "got: {s}");
+}
+
+#[test]
+fn up_with_steps_climbs_multiple_levels() {
+    let tmp = linear_stack();
+    let p = tmp.path();
+    run_git(p, &["checkout", "-q", "a"]);
+    assert!(stacc(p, &["up", "2"]).status.success());
+    assert_eq!(current_branch(p), "c");
+}
+
+#[test]
+fn pretty_output_reports_the_move() {
+    let tmp = linear_stack(); // on c
+    let p = tmp.path();
+    let out = stacc(p, &["down"]);
+    assert!(out.status.success());
     assert!(
-        String::from_utf8_lossy(&out.stdout).contains(r#""error":"ambiguous""#),
+        String::from_utf8_lossy(&out.stdout).contains("Switched to b."),
+        "got: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(stacc(p, &["up"]).status.success()); // back on c (the tip)
+    let out = stacc(p, &["up"]); // c is the tip: no move
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("Already at c."),
         "got: {}",
         String::from_utf8_lossy(&out.stdout)
     );

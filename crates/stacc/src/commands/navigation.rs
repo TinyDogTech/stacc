@@ -83,11 +83,8 @@ pub fn down(args: &StepsArgs, format: OutputFormat) -> Result<(), Error> {
 /// `stacc top`: jump to the tip of the current stack (errors at a fork).
 pub fn top(format: OutputFormat) -> Result<(), Error> {
     let (git, current, state, _trunk) = context()?;
-    let target = ops::top(&state.branches, &current);
-    let kids = ops::children(&state.branches, &target);
-    if kids.len() > 1 {
-        return Err(Error::Ambiguous { choices: kids });
-    }
+    let target =
+        ops::top(&state.branches, &current).map_err(|choices| Error::Ambiguous { choices })?;
     go(&git, format, "top", &current, &target)
 }
 

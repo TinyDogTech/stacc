@@ -329,7 +329,7 @@ pub fn abort_cmd(format: OutputFormat) -> Result<(), Error> {
         return Err(err.into());
     }
     match format {
-        OutputFormat::Json => println!("{}", json!({ "aborted": true })),
+        OutputFormat::Json => println!("{}", json!({ "op": "abort", "aborted": true })),
         OutputFormat::Pretty => println!("Aborted."),
     }
     Ok(())

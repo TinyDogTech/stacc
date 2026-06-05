@@ -115,21 +115,21 @@ pub fn bottom(branches: &BTreeMap<String, BranchState>, branch: &str, trunk: &st
     current
 }
 
-/// The top of `branch`'s stack reached by following single children upward.
-/// Stops at a leaf (no children) or a fork (multiple children); the caller
-/// decides how to handle a fork.
-pub fn top(branches: &BTreeMap<String, BranchState>, branch: &str) -> String {
+/// The top of `branch`'s stack, reached by following single children upward.
+/// `Ok` is the tip (a leaf); `Err` carries the children of the fork where the
+/// walk could not continue without a choice.
+pub fn top(branches: &BTreeMap<String, BranchState>, branch: &str) -> Result<String, Vec<String>> {
     let mut current = branch.to_string();
     let mut visited = HashSet::new();
     while visited.insert(current.clone()) {
         let kids = children(branches, &current);
-        if kids.len() == 1 {
-            current = kids.into_iter().next().expect("one child");
-        } else {
-            break;
+        match kids.len() {
+            0 => return Ok(current),
+            1 => current = kids.into_iter().next().expect("one child"),
+            _ => return Err(kids),
         }
     }
-    current
+    Ok(current)
 }
 
 /// Walk from `current` up the base chain to the trunk (exclusive). Returns the
@@ -260,7 +260,7 @@ mod tests {
         assert!(children(&s, "c").is_empty());
         assert_eq!(bottom(&s, "c", "main"), "a");
         assert_eq!(bottom(&s, "a", "main"), "a");
-        assert_eq!(top(&s, "a"), "c");
+        assert_eq!(top(&s, "a"), Ok("c".to_string()));
     }
 
     #[test]
@@ -268,9 +268,17 @@ mod tests {
         // main -> a -> { b, c }
         let s = nav_stack(&[("a", "main"), ("b", "a"), ("c", "a")]);
         assert_eq!(children(&s, "a"), ["b", "c"]);
-        assert_eq!(top(&s, "a"), "a"); // fork: stops at the fork point
-        assert_eq!(top(&s, "b"), "b"); // leaf
+        assert_eq!(top(&s, "a"), Err(vec!["b".to_string(), "c".to_string()])); // fork
+        assert_eq!(top(&s, "b"), Ok("b".to_string())); // leaf
         assert_eq!(bottom(&s, "b", "main"), "a");
+    }
+
+    #[test]
+    fn nav_helpers_terminate_on_a_cycle() {
+        // a -> b -> a (corrupt state): the visited guard must stop the walk.
+        let s = nav_stack(&[("a", "b"), ("b", "a")]);
+        let _ = bottom(&s, "a", "main");
+        let _ = top(&s, "a");
     }
     use std::path::Path;
     use tempfile::TempDir;

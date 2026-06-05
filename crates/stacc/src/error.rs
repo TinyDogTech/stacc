@@ -94,7 +94,11 @@ impl Error {
             }),
             Error::Usage(msg) => json!({ "error": "usage", "message": msg }),
             Error::NotInProgress(msg) => json!({ "error": "not_in_progress", "message": msg }),
-            Error::Ambiguous { choices } => json!({ "error": "ambiguous", "choices": choices }),
+            Error::Ambiguous { choices } => json!({
+                "error": "ambiguous",
+                "message": format!("multiple choices: {}; check out one directly", choices.join(", ")),
+                "choices": choices,
+            }),
         }
     }
 }
