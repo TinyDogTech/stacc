@@ -85,6 +85,53 @@ pub fn upstack_order(branches: &BTreeMap<String, BranchState>, current: &str) ->
     order
 }
 
+/// The recorded parent (base) of `branch`, or `None` if it is not tracked.
+pub fn parent(branches: &BTreeMap<String, BranchState>, branch: &str) -> Option<String> {
+    branches.get(branch).map(|b| b.base.name.clone())
+}
+
+/// The branches stacked directly on `branch` (recorded base == `branch`), in
+/// name order.
+pub fn children(branches: &BTreeMap<String, BranchState>, branch: &str) -> Vec<String> {
+    branches
+        .iter()
+        .filter(|(_, b)| b.base.name == branch)
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
+/// The bottom of `branch`'s stack: the first non-trunk ancestor (the branch
+/// whose recorded base is the trunk). Returns `branch` itself when it already
+/// sits on the trunk or is untracked.
+pub fn bottom(branches: &BTreeMap<String, BranchState>, branch: &str, trunk: &str) -> String {
+    let mut current = branch.to_string();
+    let mut visited = HashSet::new();
+    while visited.insert(current.clone()) {
+        match branches.get(&current).map(|b| b.base.name.clone()) {
+            Some(base) if base != trunk => current = base,
+            _ => break,
+        }
+    }
+    current
+}
+
+/// The top of `branch`'s stack, reached by following single children upward.
+/// `Ok` is the tip (a leaf); `Err` carries the children of the fork where the
+/// walk could not continue without a choice.
+pub fn top(branches: &BTreeMap<String, BranchState>, branch: &str) -> Result<String, Vec<String>> {
+    let mut current = branch.to_string();
+    let mut visited = HashSet::new();
+    while visited.insert(current.clone()) {
+        let kids = children(branches, &current);
+        match kids.len() {
+            0 => return Ok(current),
+            1 => current = kids.into_iter().next().expect("one child"),
+            _ => return Err(kids),
+        }
+    }
+    Ok(current)
+}
+
 /// Walk from `current` up the base chain to the trunk (exclusive). Returns the
 /// branches in **bottom-up** order, base before dependent, so each push/PR
 /// sees its parent already on the remote.
@@ -183,6 +230,56 @@ pub fn restack(
 mod tests {
     use super::*;
     use stacc_state::{Base, RepoConfig};
+
+    /// Build a branch map from (branch, base) pairs.
+    fn nav_stack(pairs: &[(&str, &str)]) -> BTreeMap<String, BranchState> {
+        pairs
+            .iter()
+            .map(|(name, base)| {
+                (
+                    (*name).to_string(),
+                    BranchState {
+                        base: Base {
+                            name: (*base).to_string(),
+                            hash: "h".into(),
+                        },
+                        pr: None,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn nav_helpers_on_a_linear_stack() {
+        // main -> a -> b -> c
+        let s = nav_stack(&[("a", "main"), ("b", "a"), ("c", "b")]);
+        assert_eq!(parent(&s, "b").as_deref(), Some("a"));
+        assert_eq!(parent(&s, "missing"), None);
+        assert_eq!(children(&s, "a"), ["b"]);
+        assert!(children(&s, "c").is_empty());
+        assert_eq!(bottom(&s, "c", "main"), "a");
+        assert_eq!(bottom(&s, "a", "main"), "a");
+        assert_eq!(top(&s, "a"), Ok("c".to_string()));
+    }
+
+    #[test]
+    fn nav_helpers_on_a_branched_stack() {
+        // main -> a -> { b, c }
+        let s = nav_stack(&[("a", "main"), ("b", "a"), ("c", "a")]);
+        assert_eq!(children(&s, "a"), ["b", "c"]);
+        assert_eq!(top(&s, "a"), Err(vec!["b".to_string(), "c".to_string()])); // fork
+        assert_eq!(top(&s, "b"), Ok("b".to_string())); // leaf
+        assert_eq!(bottom(&s, "b", "main"), "a");
+    }
+
+    #[test]
+    fn nav_helpers_terminate_on_a_cycle() {
+        // a -> b -> a (corrupt state): the visited guard must stop the walk.
+        let s = nav_stack(&[("a", "b"), ("b", "a")]);
+        let _ = bottom(&s, "a", "main");
+        let _ = top(&s, "a");
+    }
     use std::path::Path;
     use tempfile::TempDir;
 

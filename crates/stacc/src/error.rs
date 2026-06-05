@@ -35,6 +35,12 @@ pub enum Error {
     #[error("{0}")]
     #[diagnostic(code(stacc::not_in_progress))]
     NotInProgress(String),
+
+    /// A navigation step has multiple candidates and stacc cannot choose without
+    /// a prompt; the caller should pick one of `choices` and check it out.
+    #[error("multiple choices: {}; check out one directly", choices.join(", "))]
+    #[diagnostic(code(stacc::ambiguous))]
+    Ambiguous { choices: Vec<String> },
 }
 
 // The operations engine has its own error type so `stacc-core` stays off the
@@ -88,6 +94,11 @@ impl Error {
             }),
             Error::Usage(msg) => json!({ "error": "usage", "message": msg }),
             Error::NotInProgress(msg) => json!({ "error": "not_in_progress", "message": msg }),
+            Error::Ambiguous { choices } => json!({
+                "error": "ambiguous",
+                "message": format!("multiple choices: {}; check out one directly", choices.join(", ")),
+                "choices": choices,
+            }),
         }
     }
 }
