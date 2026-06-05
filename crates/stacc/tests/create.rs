@@ -83,6 +83,8 @@ fn create_with_staged_changes_commits_and_tracks() {
     assert!(git_ok(p, &["cat-file", "-e", "HEAD:f.txt"]));
     assert!(git_ok(p, &["diff", "--cached", "--quiet"]));
     assert_eq!(git_out(p, &["log", "-1", "--format=%s"]), "feat-x");
+    let head = git_out(p, &["rev-parse", "HEAD"]);
+    assert!(s.contains(&format!(r#""sha":"{head}""#)), "got: {s}");
 
     // Tracked with base main.
     let log = stacc(p, &["log", "--format", "json"]);
@@ -166,5 +168,72 @@ fn create_from_detached_head_errors() {
         String::from_utf8_lossy(&out.stdout).contains("detached HEAD"),
         "got: {}",
         String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
+fn create_refuses_an_already_tracked_name() {
+    let tmp = init_repo();
+    let p = tmp.path();
+    assert!(stacc(p, &["create", "dup"]).status.success());
+    let out = stacc(p, &["create", "dup", "--format", "json"]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("already tracked"),
+        "got: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
+fn create_refuses_the_trunk_name() {
+    let tmp = init_repo();
+    let p = tmp.path();
+    let out = stacc(p, &["create", "main", "--format", "json"]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("trunk"),
+        "got: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
+fn create_on_an_existing_git_branch_fails_without_partial_state() {
+    let tmp = init_repo();
+    let p = tmp.path();
+    // A git branch stacc does not track.
+    run_git(p, &["branch", "taken"]);
+    let out = stacc(p, &["create", "taken", "--format", "json"]);
+    assert!(!out.status.success());
+    // No checkout happened and nothing was tracked.
+    assert_eq!(current_branch(p), "main");
+    let log = stacc(p, &["log", "--format", "json"]);
+    assert!(!String::from_utf8_lossy(&log.stdout).contains(r#""name":"taken""#));
+}
+
+#[test]
+fn create_handles_slashed_branch_names() {
+    let tmp = init_repo();
+    let p = tmp.path();
+    std::fs::write(p.join("f.txt"), "hi\n").expect("write");
+    run_git(p, &["add", "f.txt"]);
+    let out = stacc(p, &["create", "jillian/feat", "--format", "json"]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains(r#""branch":"jillian/feat""#),
+        "got: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert_eq!(current_branch(p), "jillian/feat");
+    let log = stacc(p, &["log", "--format", "json"]);
+    assert!(
+        String::from_utf8_lossy(&log.stdout).contains(r#""name":"jillian/feat""#),
+        "got: {}",
+        String::from_utf8_lossy(&log.stdout)
     );
 }

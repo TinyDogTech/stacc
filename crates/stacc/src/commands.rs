@@ -114,10 +114,24 @@ pub fn create(args: &CreateArgs, format: OutputFormat) -> Result<(), Error> {
     let git = Git::open(".");
     let store = StateStore::new(git.clone());
     let mut state = store.load()?;
-    if state.repo.is_none() {
-        return Err(Error::Usage(
-            "stacc is not initialized; run `stacc init` first".into(),
-        ));
+    let repo = state
+        .repo
+        .clone()
+        .ok_or_else(|| Error::Usage("stacc is not initialized; run `stacc init` first".into()))?;
+
+    // Refuse names that would shadow the trunk or clobber a tracked branch
+    // (which would silently drop its recorded PR), before mutating anything.
+    if args.name == repo.trunk {
+        return Err(Error::Usage(format!(
+            "cannot create the trunk branch `{}`",
+            repo.trunk
+        )));
+    }
+    if state.branches.contains_key(&args.name) {
+        return Err(Error::Usage(format!(
+            "branch `{}` is already tracked",
+            args.name
+        )));
     }
 
     let base = git.current_branch().map_err(|_| {
@@ -129,14 +143,8 @@ pub fn create(args: &CreateArgs, format: OutputFormat) -> Result<(), Error> {
 
     git.checkout_new_branch(&args.name)?;
 
-    let committed = if git.has_staged_changes()? {
-        let message = args.message.clone().unwrap_or_else(|| args.name.clone());
-        git.commit(&message)?;
-        true
-    } else {
-        false
-    };
-
+    // Track the branch before committing so a failing commit (e.g. a pre-commit
+    // hook) can't strand it untracked; the staged changes survive for a retry.
     state.branches.insert(
         args.name.clone(),
         BranchState {
@@ -147,7 +155,20 @@ pub fn create(args: &CreateArgs, format: OutputFormat) -> Result<(), Error> {
             pr: None,
         },
     );
-    store.save(&state)?;
+    store.save(&state).map_err(|e| {
+        Error::Usage(format!(
+            "created branch `{}` but could not save state: {e}; run `stacc track` to recover",
+            args.name
+        ))
+    })?;
+
+    let (committed, sha) = if git.has_staged_changes()? {
+        let message = args.message.clone().unwrap_or_else(|| args.name.clone());
+        git.commit(&message)?;
+        (true, Some(git.rev_parse("HEAD")?))
+    } else {
+        (false, None)
+    };
 
     match format {
         OutputFormat::Json => println!(
@@ -157,6 +178,7 @@ pub fn create(args: &CreateArgs, format: OutputFormat) -> Result<(), Error> {
                 "branch": args.name,
                 "base": base,
                 "committed": committed,
+                "sha": sha,
             })
         ),
         OutputFormat::Pretty => {
