@@ -14,9 +14,11 @@ use crate::cli::{CreateArgs, InitArgs, OutputFormat, SubmitArgs, TrackArgs};
 use crate::error::Error;
 
 mod auth;
+mod navigation;
 mod operations;
 
 pub use auth::auth;
+pub use navigation::{bottom, down, top, up};
 pub use operations::{abort_cmd, continue_cmd, modify, restack, sync};
 
 /// `stacc init`: detect trunk/remote, then record them in the state ref.

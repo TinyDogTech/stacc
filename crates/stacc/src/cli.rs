@@ -73,6 +73,14 @@ pub enum Command {
     Continue,
     /// Abort the operation interrupted by a conflict, undoing the in-progress rebase.
     Abort,
+    /// Move up the stack toward the tip (optionally N levels).
+    Up(StepsArgs),
+    /// Move down the stack toward the trunk (optionally N levels).
+    Down(StepsArgs),
+    /// Jump to the top of the current stack.
+    Top,
+    /// Jump to the bottom of the current stack (the trunk's child).
+    Bottom,
     /// Print the stack.
     Log,
     /// Show the current branch's position and PR status.
@@ -142,6 +150,14 @@ pub struct ModifyArgs {
     /// subject when amending.
     #[arg(long, short)]
     pub message: Option<String>,
+}
+
+/// Arguments for `stacc up` / `stacc down`: how many levels to move.
+#[derive(Debug, clap::Args)]
+pub struct StepsArgs {
+    /// Number of levels to move (default 1).
+    #[arg(default_value_t = 1)]
+    pub steps: usize,
 }
 
 /// Arguments for `stacc submit`.
