@@ -71,6 +71,8 @@ pub enum Command {
     Restack(RestackArgs),
     /// Re-parent the current branch (and its upstack) onto a new base.
     Move(MoveArgs),
+    /// Rename the current branch, updating local state, children, and the remote.
+    Rename(RenameArgs),
     /// Resume the operation interrupted by a conflict, after resolving it.
     Continue,
     /// Abort the operation interrupted by a conflict, undoing the in-progress rebase.
@@ -213,5 +215,15 @@ pub struct MoveArgs {
     /// Branch (or the trunk) to re-parent the current branch onto.
     #[arg(long)]
     pub onto: String,
+}
+
+/// Arguments for `stacc rename`.
+#[derive(Debug, clap::Args)]
+pub struct RenameArgs {
+    /// New name for the current branch.
+    pub name: String,
+    /// Rename even when it will close the branch's own open PR on the remote.
+    #[arg(long)]
+    pub force: bool,
 }
 

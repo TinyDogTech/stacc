@@ -182,6 +182,13 @@ impl Git {
         self.run(&["branch", "-f", branch, target]).map(|_| ())
     }
 
+    /// Rename a local branch (`git branch -m <old> <new>`). Works on the current
+    /// branch (HEAD follows to `new`). Errors if `old` does not exist or `new`
+    /// already does.
+    pub fn rename_branch(&self, old: &str, new: &str) -> Result<(), GitError> {
+        self.run(&["branch", "-m", old, new]).map(|_| ())
+    }
+
     /// Whether the index has staged changes. `git diff --cached --quiet` exits 0
     /// when the index is clean and 1 when something is staged.
     pub fn has_staged_changes(&self) -> Result<bool, GitError> {

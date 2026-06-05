@@ -154,6 +154,26 @@ impl GitHub {
         Ok(raw.into())
     }
 
+    /// Rename a branch on the remote
+    /// (`POST /repos/{owner}/{repo}/branches/{branch}/rename`). GitHub retargets
+    /// the base of open pull requests to the renamed branch, but CLOSES any pull
+    /// request whose head is the renamed branch.
+    pub fn rename_branch(
+        &self,
+        owner: &str,
+        repo: &str,
+        branch: &str,
+        new_name: &str,
+    ) -> Result<(), GitHubError> {
+        let url = format!(
+            "{}/repos/{owner}/{repo}/branches/{branch}/rename",
+            self.base_url
+        );
+        let body = serde_json::json!({ "new_name": new_name });
+        let _: serde_json::Value = self.send("POST", &url, &body)?;
+        Ok(())
+    }
+
     /// Fetch a pull request, including whether it was merged.
     pub fn get_pull_request(
         &self,
