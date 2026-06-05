@@ -187,9 +187,95 @@ fn abort_of_a_conflicted_move_restores_the_base() {
     );
     // a's recorded base rolled back to main, and a does not descend c.
     let log = String::from_utf8_lossy(&stacc(p, &["log", "--format", "json"]).stdout).into_owned();
-    assert!(
-        log.contains(r#""name":"a""#) && log.contains(r#""base":"main""#),
-        "got: {log}"
-    );
+    assert!(log.contains(r#""name":"a""#), "got: {log}");
+    // The rollback put a back on main, so nothing is based on c any more (a
+    // staying on c would leave `"base":"c"` in the tree).
+    assert!(!log.contains(r#""base":"c""#), "a was not rolled back: {log}");
     assert!(!git_ok(p, &["merge-base", "--is-ancestor", "c", "a"]));
+}
+
+#[test]
+fn move_onto_a_downstack_ancestor_is_rejected() {
+    let tmp = init_repo();
+    let p = tmp.path();
+    // main -> a -> b; b already descends a, so moving b onto main would only
+    // flatten a out, which move does not do.
+    create(p, "a", "a.txt", "a\n");
+    create(p, "b", "b.txt", "b\n"); // on b
+    let out = stacc(p, &["move", "--onto", "main", "--format", "json"]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("already descends"),
+        "got: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
+fn move_onto_the_current_base_is_rejected() {
+    let tmp = init_repo();
+    let p = tmp.path();
+    create(p, "a", "a.txt", "a\n"); // a on main
+    let out = stacc(p, &["move", "--onto", "main", "--format", "json"]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("already based on"),
+        "got: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
+fn move_onto_an_untracked_base_is_rejected() {
+    let tmp = init_repo();
+    let p = tmp.path();
+    create(p, "a", "a.txt", "a\n");
+    let out = stacc(p, &["move", "--onto", "ghost", "--format", "json"]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("not the trunk or a tracked branch"),
+        "got: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
+fn abort_after_a_partial_move_keeps_the_move_and_warns() {
+    let tmp = init_repo();
+    let p = tmp.path();
+    // main -> x -> c -> g, where only g collides with n on shared.txt.
+    create(p, "x", "x.txt", "x\n");
+    create(p, "c", "c.txt", "c\n");
+    create(p, "g", "shared.txt", "g-version\n");
+    // main -> n (sibling) also touching shared.txt.
+    run_git(p, &["checkout", "-q", "main"]);
+    create(p, "n", "shared.txt", "n-version\n");
+
+    // Move x's subtree onto n: x and c restack cleanly, g conflicts on shared.txt.
+    run_git(p, &["checkout", "-q", "x"]);
+    assert!(
+        !stacc(p, &["move", "--onto", "n"]).status.success(),
+        "expected a conflict on g"
+    );
+    assert!(
+        std::fs::read_to_string(p.join(".git/stacc-continue.json"))
+            .unwrap()
+            .contains(r#""remaining":["g"]"#),
+        "expected the conflict to land on g"
+    );
+
+    // Abort: x (and c) already restacked onto n, so the move is KEPT + warned.
+    let out = stacc(p, &["abort", "--format", "json"]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("stays moved"),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // The move stuck: x is on n.
+    assert!(git_ok(p, &["merge-base", "--is-ancestor", "n", "x"]));
 }

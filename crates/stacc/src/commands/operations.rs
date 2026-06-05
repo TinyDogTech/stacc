@@ -185,6 +185,17 @@ pub fn move_cmd(args: &MoveArgs, format: OutputFormat) -> Result<(), Error> {
             "cannot move `{branch}` onto `{onto}`: that is the branch itself or part of its upstack (a cycle)"
         )));
     }
+    // If the branch already descends `onto`, a move would only flatten the
+    // intermediate branches out, a different operation, and `restack` would skip
+    // the branch as already-based and silently no-op, leaving state claiming a
+    // new base the history never adopted. Reject it. `rev_parse` also confirms
+    // `onto` exists in git, not just in recorded state.
+    let onto_tip = git.rev_parse(onto)?;
+    if git.is_ancestor(&onto_tip, &branch)? {
+        return Err(Error::Usage(format!(
+            "`{branch}` already descends `{onto}`; move re-parents onto a different lineage, it does not flatten the stack"
+        )));
+    }
 
     // Re-point the recorded base name. Keep base.hash: it marks where the
     // branch's own commits start, which restack replays onto the new base's tip.
@@ -201,7 +212,11 @@ pub fn move_cmd(args: &MoveArgs, format: OutputFormat) -> Result<(), Error> {
             }
         })?;
 
-    store.save(&state)?;
+    store.save(&state).map_err(|e| {
+        Error::Usage(format!(
+            "move succeeded but could not save state: {e}; run `stacc restack` to re-sync"
+        ))
+    })?;
     clear_conflict_artifacts(&git);
     // Best-effort: the move is already saved, so a failure to switch back to the
     // moved branch must not report the whole move as failed.
@@ -209,15 +224,16 @@ pub fn move_cmd(args: &MoveArgs, format: OutputFormat) -> Result<(), Error> {
         eprintln!("warning: could not switch back to `{branch}`: {err}");
     }
 
-    report_move(format, &branch, onto, &restacked);
+    let tip = git.rev_parse(&branch)?;
+    report_move(format, &branch, onto, &tip, &restacked);
     Ok(())
 }
 
-fn report_move(format: OutputFormat, branch: &str, base: &str, restacked: &[String]) {
+fn report_move(format: OutputFormat, branch: &str, base: &str, sha: &str, restacked: &[String]) {
     match format {
         OutputFormat::Json => println!(
             "{}",
-            json!({ "op": "move", "branch": branch, "base": base, "restacked": restacked })
+            json!({ "op": "move", "branch": branch, "base": base, "sha": sha, "restacked": restacked })
         ),
         OutputFormat::Pretty => {
             println!("Moved {branch} onto {base}");
@@ -434,24 +450,29 @@ pub fn abort_cmd(format: OutputFormat) -> Result<(), Error> {
         }) = &cont
         {
             let store = StateStore::new(git.clone());
-            let subtree = store
-                .load()
-                .map_or(0, |s| ops::upstack_order(&s.branches, branch).len());
-            if remaining.len() == subtree {
-                if let Ok(mut state) = store.load() {
-                    if let Some(b) = state.branches.get_mut(branch) {
-                        b.base.name.clone_from(pre_base);
-                    }
-                    if let Err(err) = store.save(&state) {
+            match store.load() {
+                Ok(mut state) => {
+                    let subtree = ops::upstack_order(&state.branches, branch).len();
+                    if remaining.len() == subtree {
+                        if let Some(b) = state.branches.get_mut(branch) {
+                            b.base.name.clone_from(pre_base);
+                        }
+                        if let Err(err) = store.save(&state) {
+                            eprintln!(
+                                "warning: could not restore `{branch}`'s base to `{pre_base}`: {err}; run `stacc move --onto {pre_base}` to roll it back"
+                            );
+                        }
+                    } else {
                         eprintln!(
-                            "warning: could not restore `{branch}`'s base to `{pre_base}`: {err}"
+                            "warning: `{branch}` stays moved; upstack branches were already restacked onto the new base. Run `stacc restack` to finish, or `stacc move --onto {pre_base}` to move it back."
                         );
                     }
                 }
-            } else {
-                eprintln!(
-                    "warning: `{branch}` stays moved; upstack branches were already restacked onto the new base. Run `stacc restack` to finish, or `stacc move --onto {pre_base}` to move it back."
-                );
+                Err(err) => {
+                    eprintln!(
+                        "warning: could not load state to restore `{branch}`'s base: {err}; run `stacc move --onto {pre_base}` to roll it back"
+                    );
+                }
             }
         }
     }
@@ -576,9 +597,10 @@ fn continue_op(
                 .branches
                 .get(branch)
                 .map_or("", |b| b.base.name.as_str());
+            let sha = git.rev_parse(branch).unwrap_or_default();
             println!(
                 "{}",
-                json!({ "op": "move", "branch": branch, "base": base, "restacked": restacked })
+                json!({ "op": "move", "branch": branch, "base": base, "sha": sha, "restacked": restacked })
             );
         }
         _ => report_restacked(format, op.tag(), &restacked),
