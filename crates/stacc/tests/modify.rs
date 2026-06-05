@@ -189,6 +189,14 @@ fn modify_conflict_records_modify_continuation_and_continue_finishes() {
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains(r#""op":"modify""#), "got: {s}");
     assert!(s.contains(r#""restacked":["b"]"#), "got: {s}");
+    // The resumed modify carries the same branch/sha shape as the direct command,
+    // minus `amended` (the continuation does not record the amend/append choice).
+    assert!(s.contains(r#""branch":"a""#), "got: {s}");
+    assert!(
+        s.contains(&format!(r#""sha":"{}""#, git_out(p, &["rev-parse", "a"]))),
+        "got: {s}"
+    );
+    assert!(!s.contains("amended"), "amended is direct-only: {s}");
     assert!(git_ok(p, &["merge-base", "--is-ancestor", "a", "b"]));
 }
 

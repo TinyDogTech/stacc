@@ -423,10 +423,22 @@ fn continue_op(
         }
     }
 
-    if matches!(op, recovery::Operation::Sync { .. }) {
-        report_sync(format, op.tag(), &BTreeSet::new(), &[], &restacked);
-    } else {
-        report_restacked(format, op.tag(), &restacked);
+    match &op {
+        recovery::Operation::Sync { .. } => {
+            report_sync(format, op.tag(), &BTreeSet::new(), &[], &restacked);
+        }
+        // A resumed modify carries its branch, so JSON gets the same
+        // {op,branch,sha,restacked} shape as the direct command, minus `amended`
+        // (the continuation does not record the amend-vs-append choice). Pretty
+        // uses the shared restacked output.
+        recovery::Operation::Modify { branch, .. } if matches!(format, OutputFormat::Json) => {
+            let tip = git.rev_parse(branch).unwrap_or_default();
+            println!(
+                "{}",
+                json!({ "op": "modify", "branch": branch, "sha": tip, "restacked": restacked })
+            );
+        }
+        _ => report_restacked(format, op.tag(), &restacked),
     }
     Ok(())
 }
