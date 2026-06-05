@@ -6,10 +6,10 @@ use std::collections::BTreeSet;
 use serde_json::{json, Value};
 use stacc_core::{ops, recovery};
 use stacc_git::{Git, RebaseError};
-use stacc_github::{GitHub, PrState};
+use stacc_github::{GitHub, PrState, PullRequestUpdate};
 use stacc_state::{RepoConfig, State, StateStore};
 
-use crate::cli::{ModifyArgs, MoveArgs, OutputFormat, RestackArgs, SyncArgs};
+use crate::cli::{MergeArgs, ModifyArgs, MoveArgs, OutputFormat, RestackArgs, SyncArgs};
 use crate::error::Error;
 
 /// `stacc modify`: fold staged changes into the current branch (amend its tip by
@@ -262,14 +262,37 @@ pub fn sync(args: &SyncArgs, format: OutputFormat) -> Result<(), Error> {
         return continue_op(&git, &store, &mut state, &repo, format);
     }
 
-    // Branches that have a recorded PR.
+    let merged = detect_merged(&git, &state, &repo)?;
+    let outcome = reconcile_with(&git, &store, &mut state, &repo, merged, args.offline)?;
+    report_sync(
+        format,
+        "sync",
+        &outcome.merged,
+        &outcome.reparented,
+        &outcome.restacked,
+    );
+    Ok(())
+}
+
+/// What a reconcile pass did: the merged branches it dropped, the children it
+/// re-parented (name -> new base), and the branches it restacked.
+struct SyncOutcome {
+    merged: BTreeSet<String>,
+    reparented: Vec<(String, String)>,
+    restacked: Vec<String>,
+}
+
+/// Ask GitHub which recorded PRs have merged, returning their branch names.
+fn detect_merged(
+    git: &Git,
+    state: &State,
+    repo: &RepoConfig,
+) -> Result<BTreeSet<String>, Error> {
     let with_prs: Vec<(String, u64)> = state
         .branches
         .iter()
         .filter_map(|(name, b)| b.pr.as_ref().map(|pr| (name.clone(), pr.number)))
         .collect();
-
-    // Ask GitHub which of those PRs have merged.
     let mut merged: BTreeSet<String> = BTreeSet::new();
     if !with_prs.is_empty() {
         let (owner, repo_name) = stacc_github::parse_remote(&git.remote_url(&repo.remote)?)
@@ -281,7 +304,22 @@ pub fn sync(args: &SyncArgs, format: OutputFormat) -> Result<(), Error> {
             }
         }
     }
+    Ok(merged)
+}
 
+/// Reconcile a known-merged set and restack the stack, the shared core of `sync`
+/// (which detects `merged` via GitHub) and `merge` (which already knows what it
+/// merged): re-parent the merged branches' children onto the nearest surviving
+/// base, drop them, fast-forward the trunk (unless `offline`), then restack the
+/// remainder bottom-up. Persists state and best-effort pushes it.
+fn reconcile_with(
+    git: &Git,
+    store: &StateStore,
+    state: &mut State,
+    repo: &RepoConfig,
+    merged: BTreeSet<String>,
+    offline: bool,
+) -> Result<SyncOutcome, Error> {
     // Re-parent children of merged branches onto the nearest surviving base.
     let mut reparented: Vec<(String, String)> = Vec::new();
     for (name, branch) in &state.branches {
@@ -305,8 +343,8 @@ pub fn sync(args: &SyncArgs, format: OutputFormat) -> Result<(), Error> {
     // Pull the trunk from upstream. Strict by default, a flaky network or a
     // bad remote should surface immediately. `--offline` opts out and restacks
     // on whatever refs are already local.
-    if !args.offline {
-        if let Err(err) = fast_forward_trunk(&git, &repo.remote, &repo.trunk) {
+    if !offline {
+        if let Err(err) = fast_forward_trunk(git, &repo.remote, &repo.trunk) {
             eprintln!("hint: pass --offline to skip the fetch and restack on local refs only");
             return Err(err);
         }
@@ -314,14 +352,174 @@ pub fn sync(args: &SyncArgs, format: OutputFormat) -> Result<(), Error> {
 
     // Pull-and-restack the remaining branches bottom-up onto their bases.
     let order = ops::topo_order(&state.branches, &repo.trunk);
-    let restacked = restack_with_recovery(&git, &store, &mut state, &repo, &order, |remaining| {
+    let restacked = restack_with_recovery(git, store, state, repo, &order, |remaining| {
         recovery::Operation::Sync { remaining }
     })?;
 
-    store.save(&state)?;
-    finish_sync(&git, &store, &repo);
-    report_sync(format, "sync", &merged, &reparented, &restacked);
+    store.save(state)?;
+    finish_sync(git, store, repo);
+    Ok(SyncOutcome {
+        merged,
+        reparented,
+        restacked,
+    })
+}
+
+/// `stacc merge`: squash-merge the ready PRs from the trunk up to the current
+/// branch, bottom-up, then reconcile via the `sync` logic. Stops at the first PR
+/// that is not cleanly mergeable. No-op (with a message) when nothing is ready.
+pub fn merge(args: &MergeArgs, format: OutputFormat) -> Result<(), Error> {
+    let git = Git::open(".");
+    let store = StateStore::new(git.clone());
+    let mut state = store.load()?;
+    let repo = state
+        .repo
+        .clone()
+        .ok_or_else(|| Error::Usage("stacc is not initialized; run `stacc init` first".into()))?;
+
+    let current = git.current_branch().map_err(|_| {
+        Error::Usage("cannot merge from a detached HEAD; check out a branch first".into())
+    })?;
+    if current == repo.trunk {
+        return Err(Error::Usage("cannot merge the trunk branch".into()));
+    }
+
+    let (owner, repo_name) = stacc_github::parse_remote(&git.remote_url(&repo.remote)?)
+        .ok_or_else(|| Error::Usage(format!("remote `{}` is not a GitHub URL", repo.remote)))?;
+    let github = GitHub::from_env()?;
+
+    // Build the downstack chain ONCE: merged branches leave state, which would
+    // make a re-derived `downstack_chain` error mid-loop.
+    let chain = ops::downstack_chain(&state, &current, &repo.trunk)?;
+
+    // Without trunk branch protection, GitHub's "clean" means only "no merge
+    // conflicts": required checks and reviews are not enforced. Warn loudly.
+    let protected = github
+        .branch_protected(&owner, &repo_name, &repo.trunk)
+        .unwrap_or(false);
+    if !protected {
+        eprintln!(
+            "warning: `{}` has no branch protection, so a `clean` PR means only `no merge conflicts`; required checks and reviews are NOT enforced here.",
+            repo.trunk
+        );
+    }
+
+    let mut merged_prs: Vec<(String, u64)> = Vec::new();
+    let mut stopped: Option<Value> = None;
+    for (i, branch) in chain.iter().enumerate() {
+        let Some(pr) = state.branches.get(branch).and_then(|b| b.pr.clone()) else {
+            stopped = Some(json!({ "branch": branch, "reason": "no recorded PR; submit it first" }));
+            break;
+        };
+        // After a prior merge the base of this PR (the merged branch) is gone, so
+        // re-point it to the trunk and let GitHub recompute readiness against it.
+        if i > 0 {
+            let update = PullRequestUpdate {
+                base: Some(repo.trunk.clone()),
+                ..Default::default()
+            };
+            github.update_pull_request(&owner, &repo_name, pr.number, &update)?;
+        }
+        let live = poll_pr_ready(&github, &owner, &repo_name, pr.number)?;
+        if !live.ready() {
+            stopped = Some(json!({
+                "branch": branch,
+                "number": pr.number,
+                "mergeable_state": live.mergeable_state,
+            }));
+            break;
+        }
+        github.merge_pull_request(&owner, &repo_name, pr.number)?;
+        merged_prs.push((branch.clone(), pr.number));
+    }
+
+    // Reconcile locally (drop merged branches, re-parent, restack) only if we
+    // actually merged something. We already know what merged, so skip the GitHub
+    // re-detection that `sync` does.
+    let outcome = if merged_prs.is_empty() {
+        None
+    } else {
+        let merged: BTreeSet<String> = merged_prs.iter().map(|(b, _)| b.clone()).collect();
+        Some(reconcile_with(&git, &store, &mut state, &repo, merged, args.offline)?)
+    };
+
+    report_merge(format, &merged_prs, stopped.as_ref(), protected, outcome.as_ref());
     Ok(())
+}
+
+/// Read a PR's readiness, re-polling briefly while GitHub still reports
+/// `mergeable_state` as not-yet-computed (`null`/`unknown`), which it often does
+/// right after a base change.
+fn poll_pr_ready(
+    github: &GitHub,
+    owner: &str,
+    repo: &str,
+    number: u64,
+) -> Result<stacc_github::PullRequest, Error> {
+    let mut pr = github.get_pull_request(owner, repo, number)?;
+    let mut tries = 0;
+    while matches!(pr.mergeable_state.as_deref(), None | Some("unknown")) && tries < 4 {
+        std::thread::sleep(std::time::Duration::from_millis(700));
+        pr = github.get_pull_request(owner, repo, number)?;
+        tries += 1;
+    }
+    Ok(pr)
+}
+
+fn report_merge(
+    format: OutputFormat,
+    merged: &[(String, u64)],
+    stopped: Option<&Value>,
+    protected: bool,
+    outcome: Option<&SyncOutcome>,
+) {
+    match format {
+        OutputFormat::Json => {
+            let merged_json: Vec<Value> = merged
+                .iter()
+                .map(|(b, n)| json!({ "branch": b, "number": n }))
+                .collect();
+            let synced = outcome.map(|o| {
+                json!({
+                    "dropped": o.merged.iter().cloned().collect::<Vec<_>>(),
+                    "reparented": o
+                        .reparented
+                        .iter()
+                        .map(|(name, base)| json!({ "branch": name, "base": base }))
+                        .collect::<Vec<_>>(),
+                    "restacked": o.restacked,
+                })
+            });
+            println!(
+                "{}",
+                json!({
+                    "op": "merge",
+                    "merged": merged_json,
+                    "stopped_at": stopped,
+                    "trunk_protected": protected,
+                    "synced": synced,
+                })
+            );
+        }
+        OutputFormat::Pretty => {
+            if merged.is_empty() {
+                println!("Nothing ready to merge.");
+            } else {
+                for (branch, number) in merged {
+                    println!("Merged {branch} (#{number})");
+                }
+            }
+            if let Some(stop) = stopped {
+                let branch = stop.get("branch").and_then(Value::as_str).unwrap_or("?");
+                println!("Stopped at {branch}.");
+            }
+            if let Some(o) = outcome {
+                for name in &o.restacked {
+                    println!("Restacked {name}");
+                }
+            }
+        }
+    }
 }
 
 /// `stacc restack`: rebase tracked branches back onto their bases, repairing a

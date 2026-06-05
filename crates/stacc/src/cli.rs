@@ -73,6 +73,8 @@ pub enum Command {
     Move(MoveArgs),
     /// Rename the current branch, updating local state, children, and the remote.
     Rename(RenameArgs),
+    /// Squash-merge the ready PRs from the trunk up to the current branch, then sync.
+    Merge(MergeArgs),
     /// Resume the operation interrupted by a conflict, after resolving it.
     Continue,
     /// Abort the operation interrupted by a conflict, undoing the in-progress rebase.
@@ -215,6 +217,14 @@ pub struct MoveArgs {
     /// Branch (or the trunk) to re-parent the current branch onto.
     #[arg(long)]
     pub onto: String,
+}
+
+/// Arguments for `stacc merge`.
+#[derive(Debug, clap::Args)]
+pub struct MergeArgs {
+    /// Skip the post-merge upstream fetch and reconcile on local refs only.
+    #[arg(long)]
+    pub offline: bool,
 }
 
 /// Arguments for `stacc rename`.

@@ -8,6 +8,9 @@ pub enum GitHubError {
     #[error("GitHub API returned status {status}: {body}")]
     Status { status: u16, body: String },
 
+    #[error("pull request is not mergeable (head moved, or required checks/reviews not satisfied)")]
+    NotMergeable,
+
     #[error("HTTP transport error: {0}")]
     Transport(String),
 

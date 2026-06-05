@@ -28,6 +28,17 @@ pub struct PullRequest {
     pub state: PrState,
     pub title: String,
     pub body: String,
+    /// GitHub's `mergeable_state` (e.g. `clean`, `blocked`, `behind`, `dirty`,
+    /// `unknown`), or `None` when GitHub has not computed it yet.
+    pub mergeable_state: Option<String>,
+}
+
+impl PullRequest {
+    /// Whether GitHub reports the PR as cleanly mergeable. `null`/absent or any
+    /// state other than `clean` reads as not-ready.
+    pub fn ready(&self) -> bool {
+        self.mergeable_state.as_deref() == Some("clean")
+    }
 }
 
 /// Fields for creating a pull request.
@@ -62,6 +73,9 @@ struct RawPullRequest {
     title: String,
     #[serde(default)]
     body: Option<String>,
+    // Existing fixtures omit this; without the default they fail to deserialize.
+    #[serde(default)]
+    mergeable_state: Option<String>,
 }
 
 impl From<RawPullRequest> for PullRequest {
@@ -79,8 +93,16 @@ impl From<RawPullRequest> for PullRequest {
             state,
             title: raw.title,
             body: raw.body.unwrap_or_default(),
+            mergeable_state: raw.mergeable_state,
         }
     }
+}
+
+/// GitHub's response to a merge request: the bits stacc reads.
+#[derive(Debug, Deserialize)]
+struct MergeResponse {
+    #[serde(default)]
+    merged: bool,
 }
 
 /// An authenticated GitHub API client.
@@ -186,6 +208,45 @@ impl GitHub {
         Ok(raw.into())
     }
 
+    /// Squash-merge a pull request (`PUT /repos/{o}/{r}/pulls/{number}/merge`).
+    /// Returns whether GitHub reports it merged. 405/409 (not mergeable, or the
+    /// head moved since readiness was read) map to [`GitHubError::NotMergeable`].
+    pub fn merge_pull_request(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<bool, GitHubError> {
+        let url = format!("{}/repos/{owner}/{repo}/pulls/{number}/merge", self.base_url);
+        let body = serde_json::json!({ "merge_method": "squash" });
+        match self.send::<_, MergeResponse>("PUT", &url, &body) {
+            Ok(resp) => Ok(resp.merged),
+            Err(GitHubError::Status { status, .. }) if status == 405 || status == 409 => {
+                Err(GitHubError::NotMergeable)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Whether `branch` has branch protection enabled
+    /// (`GET /repos/{o}/{r}/branches/{branch}/protection`; 404 means none).
+    pub fn branch_protected(
+        &self,
+        owner: &str,
+        repo: &str,
+        branch: &str,
+    ) -> Result<bool, GitHubError> {
+        let url = format!(
+            "{}/repos/{owner}/{repo}/branches/{branch}/protection",
+            self.base_url
+        );
+        match self.get::<serde_json::Value>(&url) {
+            Ok(_) => Ok(true),
+            Err(GitHubError::Status { status: 404, .. }) => Ok(false),
+            Err(err) => Err(err),
+        }
+    }
+
     /// Build a request with the auth + GitHub headers already set.
     fn request(&self, method: &str, url: &str) -> ureq::Request {
         self.agent
@@ -263,6 +324,7 @@ mod tests {
             merged,
             title: "t".into(),
             body: None,
+            mergeable_state: None,
         }
     }
 
@@ -368,5 +430,72 @@ mod tests {
         };
         assert_eq!(gh.update_pull_request("o", "r", 7, &update).unwrap().number, 7);
         mock.assert();
+    }
+
+    #[test]
+    fn ready_reflects_mergeable_state() {
+        let mk = |ms: Option<&str>| {
+            PullRequest::from(RawPullRequest {
+                number: 1,
+                html_url: "u".into(),
+                state: "open".into(),
+                merged: false,
+                title: "t".into(),
+                body: None,
+                mergeable_state: ms.map(String::from),
+            })
+        };
+        assert!(mk(Some("clean")).ready());
+        assert!(!mk(Some("blocked")).ready());
+        assert!(!mk(Some("behind")).ready());
+        assert!(!mk(Some("dirty")).ready());
+        assert!(!mk(Some("unknown")).ready());
+        assert!(!mk(None).ready()); // absent/null reads as not-ready
+    }
+
+    #[test]
+    fn merge_pull_request_squashes() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(httpmock::Method::PUT)
+                .path("/repos/o/r/pulls/7/merge")
+                .json_body(json!({ "merge_method": "squash" }));
+            then.status(200).json_body(json!({ "merged": true, "sha": "abc" }));
+        });
+
+        let gh = GitHub::with_base_url("t", server.base_url());
+        assert!(gh.merge_pull_request("o", "r", 7).unwrap());
+        mock.assert();
+    }
+
+    #[test]
+    fn merge_405_maps_to_not_mergeable() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(httpmock::Method::PUT)
+                .path("/repos/o/r/pulls/7/merge");
+            then.status(405)
+                .json_body(json!({ "message": "Pull Request is not mergeable" }));
+        });
+
+        let gh = GitHub::with_base_url("t", server.base_url());
+        assert!(matches!(
+            gh.merge_pull_request("o", "r", 7).unwrap_err(),
+            GitHubError::NotMergeable
+        ));
+    }
+
+    #[test]
+    fn branch_protected_reads_404_as_unprotected() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(httpmock::Method::GET)
+                .path("/repos/o/r/branches/main/protection");
+            then.status(404)
+                .json_body(json!({ "message": "Branch not protected" }));
+        });
+
+        let gh = GitHub::with_base_url("t", server.base_url());
+        assert!(!gh.branch_protected("o", "r", "main").unwrap());
     }
 }
