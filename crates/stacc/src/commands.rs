@@ -19,7 +19,7 @@ mod operations;
 
 pub use auth::auth;
 pub use navigation::{bottom, checkout, down, top, up};
-pub use operations::{abort_cmd, continue_cmd, modify, restack, sync};
+pub use operations::{abort_cmd, continue_cmd, modify, move_cmd, restack, sync};
 
 /// `stacc init`: detect trunk/remote, then record them in the state ref.
 pub fn init(args: &InitArgs, format: OutputFormat) -> Result<(), Error> {

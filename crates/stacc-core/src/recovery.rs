@@ -32,9 +32,10 @@ pub enum Operation {
         remaining: Vec<String>,
         pre_amend: String,
     },
-    /// `move`: re-parented the current branch; `pre_base` is the recorded base
-    /// before the move, restored on abort.
+    /// `move`: re-parented `branch` onto a new base; `pre_base` is its recorded
+    /// base name before the move, which `abort` restores.
     Move {
+        branch: String,
         remaining: Vec<String>,
         pre_base: String,
     },
@@ -67,7 +68,10 @@ impl Operation {
                 remaining,
                 pre_amend: pre_amend.clone(),
             },
-            Operation::Move { pre_base, .. } => Operation::Move {
+            Operation::Move {
+                branch, pre_base, ..
+            } => Operation::Move {
+                branch: branch.clone(),
                 remaining,
                 pre_base: pre_base.clone(),
             },
@@ -177,6 +181,7 @@ mod tests {
                 pre_amend: "deadbeef".into(),
             },
             Operation::Move {
+                branch: "m".into(),
                 remaining: vec!["b".into()],
                 pre_base: "cafef00d".into(),
             },
@@ -237,11 +242,13 @@ mod tests {
         );
         assert_eq!(
             Operation::Move {
+                branch: "m".into(),
                 remaining: vec!["a".into()],
                 pre_base: "p".into(),
             }
             .with_remaining(r.clone()),
             Operation::Move {
+                branch: "m".into(),
                 remaining: r,
                 pre_base: "p".into(),
             }
@@ -259,6 +266,7 @@ mod tests {
         }
         .pushes_state());
         assert!(!Operation::Move {
+            branch: "m".into(),
             remaining: vec![],
             pre_base: "p".into(),
         }
