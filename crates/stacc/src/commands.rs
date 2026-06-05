@@ -1,6 +1,6 @@
 //! Implementations of the CLI subcommands.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use serde_json::{json, Value};
@@ -230,19 +230,36 @@ pub fn log(args: &LogArgs, format: OutputFormat) -> Result<(), Error> {
         }
         OutputFormat::Pretty => {
             let current = git.current_branch().unwrap_or_default();
+            let order = ops::topo_order(&state.branches, &trunk);
             if args.short {
-                for name in ops::topo_order(&state.branches, &trunk) {
+                for name in &order {
                     let base = state
                         .branches
-                        .get(&name)
+                        .get(name)
                         .map_or(trunk.as_str(), |b| b.base.name.as_str());
-                    let glyph = if name == current { "*" } else { "o" };
-                    println!("{glyph} {}", branch_line(&git, &name, base, &state.branches));
+                    let glyph = if *name == current { "*" } else { "o" };
+                    println!("{glyph} {}", branch_line(&git, name, base, &state.branches));
                 }
             } else {
                 let trunk_glyph = if current == trunk { "* " } else { "" };
                 println!("{trunk_glyph}{trunk}");
                 print_graph(&git, &trunk, &children, &state.branches, &current, 1);
+            }
+            // Surface tracked branches not reachable from the trunk (an orphaned
+            // base or a cycle) so corrupted state is not silently hidden.
+            let reachable: BTreeSet<&str> = order.iter().map(String::as_str).collect();
+            let orphans: Vec<&String> = state
+                .branches
+                .keys()
+                .filter(|name| !reachable.contains(name.as_str()))
+                .collect();
+            if !orphans.is_empty() {
+                println!("unreachable:");
+                for name in orphans {
+                    let glyph = if *name == current { "*" } else { "o" };
+                    let base = state.branches.get(name).map_or("", |b| b.base.name.as_str());
+                    println!("  {glyph} {name} (base: {base})");
+                }
             }
         }
     }
