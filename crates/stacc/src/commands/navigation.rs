@@ -1,12 +1,14 @@
 //! Stack navigation: `up` / `down` / `top` / `bottom` move HEAD around the
 //! tracked stack via `git checkout`.
 
+use std::io::IsTerminal;
+
 use serde_json::json;
 use stacc_core::ops;
 use stacc_git::Git;
 use stacc_state::{State, StateStore};
 
-use crate::cli::{OutputFormat, StepsArgs};
+use crate::cli::{CheckoutArgs, OutputFormat, StepsArgs};
 use crate::error::Error;
 
 /// Load state, the trunk, and the current branch, refusing on an uninitialized
@@ -93,4 +95,39 @@ pub fn bottom(format: OutputFormat) -> Result<(), Error> {
     let (git, current, state, trunk) = context()?;
     let target = ops::bottom(&state.branches, &current, &trunk);
     go(&git, format, "bottom", &current, &target)
+}
+
+/// `stacc checkout`: switch to `args.branch`, or pick one interactively when run
+/// bare on a terminal. Bare + non-interactive errors structured (never prompts).
+pub fn checkout(
+    args: &CheckoutArgs,
+    format: OutputFormat,
+    no_interactive: bool,
+) -> Result<(), Error> {
+    let git = Git::open(".");
+    let current = git.current_branch().unwrap_or_default();
+    if let Some(branch) = &args.branch {
+        // A leading dash would be parsed by `git checkout` as an option.
+        if branch.starts_with('-') {
+            return Err(Error::Usage(format!("`{branch}` is not a valid branch name")));
+        }
+        return go(&git, format, "checkout", &current, branch);
+    }
+    if !crate::interactive::allowed(std::io::stdin().is_terminal(), no_interactive, format) {
+        return Err(Error::Usage(
+            "`stacc checkout` needs a branch name when not interactive; pass one explicitly".into(),
+        ));
+    }
+    let store = StateStore::new(git.clone());
+    let state = store.load()?;
+    let mut items: Vec<String> = Vec::new();
+    if let Some(repo) = &state.repo {
+        items.push(repo.trunk.clone());
+    }
+    items.extend(state.branches.keys().cloned());
+    if items.is_empty() {
+        return Err(Error::Usage("no branches to choose from".into()));
+    }
+    let choice = crate::interactive::prompt_select("Check out which branch?", &items)?;
+    go(&git, format, "checkout", &current, &choice)
 }

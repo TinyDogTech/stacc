@@ -11,6 +11,7 @@ use clap::Parser;
 mod cli;
 mod commands;
 mod error;
+mod interactive;
 
 use cli::{Cli, Command, OutputFormat};
 use error::Error;
@@ -18,7 +19,7 @@ use error::Error;
 /// Names that stacc always handles itself. These always shadow any user alias.
 const BUILTINS: &[&str] = &[
     "init", "track", "create", "modify", "log", "status", "submit", "sync", "restack", "continue",
-    "abort", "up", "down", "top", "bottom", "auth",
+    "abort", "up", "down", "top", "bottom", "checkout", "auth",
 ];
 
 /// Parse the command line, dispatch, and return the process exit code.
@@ -73,6 +74,9 @@ fn dispatch(cli: &Cli) -> Result<(), Error> {
         Command::Down(args) => commands::down(args, cli.global.format),
         Command::Top => commands::top(cli.global.format),
         Command::Bottom => commands::bottom(cli.global.format),
+        Command::Checkout(args) => {
+            commands::checkout(args, cli.global.format, cli.global.no_interactive)
+        }
         Command::Auth(args) => commands::auth(args, cli.global.format),
         Command::External(_) => unreachable!("external subcommands are proxied in run"),
     }
