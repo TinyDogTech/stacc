@@ -118,6 +118,28 @@ fn log_short_emits_one_line_per_branch() {
     let lines: Vec<&str> = s.lines().collect();
     assert_eq!(lines.len(), 2, "one line per branch expected: {s}"); // a, b (no trunk header)
     assert!(s.contains("o a") && s.contains("* b"), "got: {s}");
+    assert!(!s.contains("main"), "trunk should not appear in --short: {s}");
+    assert!(!s.contains("needs restack"), "clean stack should have no marker: {s}");
+}
+
+#[test]
+fn log_renders_a_forked_stack() {
+    let tmp = repo();
+    let p = tmp.path();
+    assert!(stacc(p, &["init"]).status.success());
+    // main -> a and main -> b: two children of the trunk.
+    run_git(p, &["checkout", "-q", "-b", "a"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "a1"]);
+    assert!(stacc(p, &["track"]).status.success());
+    run_git(p, &["checkout", "-q", "main"]);
+    run_git(p, &["checkout", "-q", "-b", "b"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "b1"]);
+    assert!(stacc(p, &["track"]).status.success());
+
+    let s = String::from_utf8_lossy(&stacc(p, &["log"]).stdout).into_owned();
+    // Both children render at depth 1 (a two-space indent); b is current.
+    assert!(s.contains("  o a"), "got: {s}");
+    assert!(s.contains("  * b"), "got: {s}");
 }
 
 #[test]

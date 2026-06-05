@@ -257,11 +257,8 @@ fn print_graph(
     current: &str,
     depth: usize,
 ) {
-    // A valid tree path can't be longer than the branch count; a deeper path
-    // means malformed cyclic state, so bail rather than recurse forever.
-    if depth > branches.len() + 1 {
-        return;
-    }
+    // Each branch is keyed under its single recorded base, so the
+    // trunk-reachable graph is a tree and this recursion always terminates.
     let Some(kids) = children.get(node) else {
         return;
     };
@@ -294,13 +291,11 @@ fn branch_line(
 }
 
 /// Whether `branch` has drifted off `base` (its base tip is no longer an
-/// ancestor). Any git lookup failure is treated as up-to-date, so `log` never
+/// ancestor). `is_ancestor` resolves `base` to its tip itself, so this is one
+/// git call per branch; any lookup failure reads as up-to-date so `log` never
 /// raises a false alarm on a transient error.
 fn needs_restack(git: &Git, branch: &str, base: &str) -> bool {
-    let Ok(base_tip) = git.rev_parse(base) else {
-        return false;
-    };
-    !git.is_ancestor(&base_tip, branch).unwrap_or(true)
+    !git.is_ancestor(base, branch).unwrap_or(true)
 }
 
 fn stack_json(
