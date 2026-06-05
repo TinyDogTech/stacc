@@ -19,7 +19,7 @@ use error::Error;
 /// Names that stacc always handles itself. These always shadow any user alias.
 const BUILTINS: &[&str] = &[
     "init", "track", "create", "modify", "log", "status", "submit", "sync", "restack", "move",
-    "continue", "abort", "up", "down", "top", "bottom", "checkout", "auth",
+    "rename", "continue", "abort", "up", "down", "top", "bottom", "checkout", "auth",
 ];
 
 /// Parse the command line, dispatch, and return the process exit code.
@@ -69,6 +69,7 @@ fn dispatch(cli: &Cli) -> Result<(), Error> {
         Command::Sync(args) => commands::sync(args, cli.global.format),
         Command::Restack(args) => commands::restack(args, cli.global.format),
         Command::Move(args) => commands::move_cmd(args, cli.global.format),
+        Command::Rename(args) => commands::rename(args, cli.global.format),
         Command::Continue => commands::continue_cmd(cli.global.format),
         Command::Abort => commands::abort_cmd(cli.global.format),
         Command::Up(args) => commands::up(args, cli.global.format),
