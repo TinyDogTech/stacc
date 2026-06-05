@@ -143,6 +143,32 @@ fn log_renders_a_forked_stack() {
 }
 
 #[test]
+fn log_surfaces_unreachable_branches() {
+    let tmp = repo();
+    let p = tmp.path();
+    assert!(stacc(p, &["init"]).status.success());
+    run_git(p, &["checkout", "-q", "-b", "a"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "a1"]);
+    assert!(stacc(p, &["track"]).status.success()); // a.base = main
+    run_git(p, &["checkout", "-q", "-b", "b"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "b1"]);
+    assert!(stacc(p, &["track", "--base", "a"]).status.success()); // b.base = a
+    // Re-track a onto b: now a.base=b and b.base=a, a cycle neither reachable
+    // from the trunk.
+    run_git(p, &["checkout", "-q", "a"]);
+    assert!(stacc(p, &["track", "--base", "b"]).status.success());
+
+    let s = String::from_utf8_lossy(&stacc(p, &["log"]).stdout).into_owned();
+    assert!(s.contains("unreachable:"), "got: {s}");
+    assert!(s.contains("a (base: b)"), "got: {s}");
+    assert!(s.contains("b (base: a)"), "got: {s}");
+
+    // R15: the JSON path still hides them (no `unreachable` leak).
+    let j = String::from_utf8_lossy(&stacc(p, &["log", "--format", "json"]).stdout).into_owned();
+    assert!(!j.contains("unreachable"), "got: {j}");
+}
+
+#[test]
 fn log_json_is_not_changed_by_drift() {
     // R15: the JSON contract must never gain pretty-only fields like needs-restack.
     let tmp = repo();
