@@ -105,10 +105,13 @@ pub fn checkout(
     no_interactive: bool,
 ) -> Result<(), Error> {
     let git = Git::open(".");
+    let current = git.current_branch().unwrap_or_default();
     if let Some(branch) = &args.branch {
-        git.checkout(branch)?;
-        report_checkout(format, branch);
-        return Ok(());
+        // A leading dash would be parsed by `git checkout` as an option.
+        if branch.starts_with('-') {
+            return Err(Error::Usage(format!("`{branch}` is not a valid branch name")));
+        }
+        return go(&git, format, "checkout", &current, branch);
     }
     if !crate::interactive::allowed(std::io::stdin().is_terminal(), no_interactive, format) {
         return Err(Error::Usage(
@@ -126,14 +129,5 @@ pub fn checkout(
         return Err(Error::Usage("no branches to choose from".into()));
     }
     let choice = crate::interactive::prompt_select("Check out which branch?", &items)?;
-    git.checkout(&choice)?;
-    report_checkout(format, &choice);
-    Ok(())
-}
-
-fn report_checkout(format: OutputFormat, branch: &str) {
-    match format {
-        OutputFormat::Json => println!("{}", json!({ "op": "checkout", "branch": branch })),
-        OutputFormat::Pretty => println!("Switched to {branch}."),
-    }
+    go(&git, format, "checkout", &current, &choice)
 }

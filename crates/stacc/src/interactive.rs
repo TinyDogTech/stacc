@@ -1,6 +1,5 @@
-//! TTY-gated interactive selection. Every prompt is reached only after
-//! [`allowed`] confirms a real terminal, no `--no-interactive`, and pretty
-//! output, so no agent/non-interactive path can ever block on input.
+//! TTY-gated interactive selection. Prompts are reached only after [`allowed`]
+//! confirms a real terminal, no `--no-interactive`, and pretty output.
 
 use std::io::Write;
 
@@ -16,13 +15,12 @@ pub fn allowed(is_terminal: bool, no_interactive: bool, format: OutputFormat) ->
 /// Render a numbered menu to stderr and read a 1-based choice from stdin. Only
 /// call once [`allowed`] has gated the path.
 pub fn prompt_select(prompt: &str, items: &[String]) -> Result<String, Error> {
-    let mut err = std::io::stderr();
-    let _ = writeln!(err, "{prompt}");
+    eprintln!("{prompt}");
     for (i, item) in items.iter().enumerate() {
-        let _ = writeln!(err, "  {}) {item}", i + 1);
+        eprintln!("  {}) {item}", i + 1);
     }
-    let _ = write!(err, "Select [1-{}]: ", items.len());
-    let _ = err.flush();
+    eprint!("Select [1-{}]: ", items.len());
+    let _ = std::io::stderr().flush();
 
     let mut line = String::new();
     std::io::stdin()

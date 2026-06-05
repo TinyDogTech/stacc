@@ -63,11 +63,38 @@ fn checkout_switches_to_an_explicit_branch() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert_eq!(current_branch(p), "a");
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains(r#""op":"checkout""#), "got: {s}");
+    assert!(s.contains(r#""branch":"a""#), "got: {s}");
+    assert!(s.contains(r#""moved":true"#), "got: {s}");
+}
+
+#[test]
+fn checkout_a_nonexistent_branch_errors_without_moving() {
+    let tmp = init_repo();
+    let p = tmp.path();
+    create(p, "a"); // on a
+    let out = stacc(p, &["checkout", "ghost", "--format", "json"]);
+    assert!(!out.status.success());
+    assert_eq!(current_branch(p), "a"); // unchanged
+}
+
+#[test]
+fn checkout_rejects_a_dash_prefixed_arg() {
+    let tmp = init_repo();
+    let p = tmp.path();
+    create(p, "a");
+    let before = current_branch(p);
+    // `--` ends clap parsing, so without the guard `--orphan=x` would reach
+    // `git checkout` as an option and mutate the repo.
+    let out = stacc(p, &["checkout", "--format", "json", "--", "--orphan=x"]);
+    assert!(!out.status.success());
     assert!(
-        String::from_utf8_lossy(&out.stdout).contains(r#""branch":"a""#),
+        String::from_utf8_lossy(&out.stdout).contains("not a valid branch name"),
         "got: {}",
         String::from_utf8_lossy(&out.stdout)
     );
+    assert_eq!(current_branch(p), before); // repo untouched
 }
 
 #[test]
