@@ -54,3 +54,8 @@ module_name_repetitions = "allow"   # `stacc_config::Config` is fine
 must_use_candidate = "allow"        # libraries care more than CLIs
 doc_markdown = "allow"              # strict backtick rules in doc comments
 unused_self = "allow"               # `self.helper(...)` groups by type even when self is unused
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
