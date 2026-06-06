@@ -372,9 +372,14 @@ fn reconcile_with(
     })
 }
 
-/// A PR `merge` squash-merged: (branch, number, squash commit SHA if we were the
-/// one to merge it; `None` for one already merged out of band).
-type MergedPr = (String, u64, Option<String>);
+/// A PR `merge` resolved: the branch, its number, the squash commit SHA when we
+/// merged it (`None` otherwise), and whether GitHub already had it merged.
+struct MergedPr {
+    branch: String,
+    number: u64,
+    sha: Option<String>,
+    out_of_band: bool,
+}
 
 /// The result of walking the downstack chain: what merged, where it stopped
 /// short (structured), and any deferred hard error.
@@ -413,31 +418,38 @@ pub fn merge(args: &MergeArgs, format: OutputFormat) -> Result<(), Error> {
 
     // Without trunk branch protection, GitHub's "clean" means only "no merge
     // conflicts": required checks and reviews are not enforced. Warn loudly.
+    // Distinguish "confirmed unprotected" (404) from "could not check" (a token
+    // scope or transient API error): `--require-protected` refuses both, but with
+    // different, honest messages.
     let protected = match github.branch_protected(&owner, &repo_name, &repo.trunk) {
-        Ok(protected) => protected,
-        // A failed check (bad token scope, transient API error) is not proof of
-        // "unprotected"; say so explicitly rather than silently treating it as
-        // unprotected, but still proceed (the merge gate is GitHub's own state).
-        Err(err) => {
+        Ok(true) => true,
+        Ok(false) => {
+            if args.require_protected {
+                return Err(Error::Usage(format!(
+                    "`{}` has no branch protection; enable it, or drop --require-protected to merge anyway",
+                    repo.trunk
+                )));
+            }
             eprintln!(
-                "warning: could not check `{}` branch protection ({err}); proceeding as if unprotected",
+                "warning: `{}` has no branch protection, so a `clean` PR means only `no merge conflicts`; required checks and reviews are NOT enforced here.",
+                repo.trunk
+            );
+            false
+        }
+        Err(err) => {
+            if args.require_protected {
+                return Err(Error::Usage(format!(
+                    "could not verify `{}` branch protection ({err}); resolve it, or drop --require-protected to merge anyway",
+                    repo.trunk
+                )));
+            }
+            eprintln!(
+                "warning: could not check `{}` branch protection ({err}); proceeding as if unprotected, so required checks and reviews are NOT enforced.",
                 repo.trunk
             );
             false
         }
     };
-    if !protected {
-        if args.require_protected {
-            return Err(Error::Usage(format!(
-                "`{}` is not known to be protected; enable branch protection, or drop --require-protected to merge anyway",
-                repo.trunk
-            )));
-        }
-        eprintln!(
-            "warning: `{}` is not known to be protected, so a `clean` PR means only `no merge conflicts`; required checks and reviews are NOT enforced here.",
-            repo.trunk
-        );
-    }
 
     let MergeWalk {
         merged: merged_prs,
@@ -451,7 +463,7 @@ pub fn merge(args: &MergeArgs, format: OutputFormat) -> Result<(), Error> {
     let outcome = if merged_prs.is_empty() {
         None
     } else {
-        let merged: BTreeSet<String> = merged_prs.iter().map(|(b, _, _)| b.clone()).collect();
+        let merged: BTreeSet<String> = merged_prs.iter().map(|m| m.branch.clone()).collect();
         match reconcile_with(&git, &store, &mut state, &repo, merged, args.offline) {
             Ok(outcome) => Some(outcome),
             Err(err) => {
@@ -460,6 +472,12 @@ pub fn merge(args: &MergeArgs, format: OutputFormat) -> Result<(), Error> {
             }
         }
     };
+
+    if args.offline && outcome.is_some() {
+        eprintln!(
+            "note: --offline skipped the fetch; run `stacc sync` to rebase the local stack onto the merged commits."
+        );
+    }
 
     report_merge(format, &merged_prs, stopped.as_ref(), protected, outcome.as_ref());
     if let Some(err) = loop_err {
@@ -503,7 +521,12 @@ fn merge_ready_downstack(
         };
         match current.state {
             PrState::Merged => {
-                merged_prs.push((branch.clone(), pr.number, None));
+                merged_prs.push(MergedPr {
+                    branch: branch.clone(),
+                    number: pr.number,
+                    sha: None,
+                    out_of_band: true,
+                });
                 continue;
             }
             PrState::Closed => {
@@ -543,7 +566,12 @@ fn merge_ready_downstack(
         }
         match github.merge_pull_request(owner, repo_name, pr.number) {
             Ok(outcome) if outcome.merged => {
-                merged_prs.push((branch.clone(), pr.number, outcome.sha));
+                merged_prs.push(MergedPr {
+                    branch: branch.clone(),
+                    number: pr.number,
+                    sha: outcome.sha,
+                    out_of_band: false,
+                });
             }
             // 200 but not merged: a clean stop, not a silent drop.
             Ok(_) => {
@@ -601,7 +629,9 @@ fn report_merge(
         OutputFormat::Json => {
             let merged_json: Vec<Value> = merged
                 .iter()
-                .map(|(b, n, sha)| json!({ "branch": b, "number": n, "sha": sha }))
+                .map(|m| {
+                    json!({ "branch": m.branch, "number": m.number, "sha": m.sha, "out_of_band": m.out_of_band })
+                })
                 .collect();
             let synced = outcome.map(|o| {
                 json!({
@@ -629,8 +659,8 @@ fn report_merge(
             if merged.is_empty() {
                 println!("Nothing ready to merge.");
             } else {
-                for (branch, number, _) in merged {
-                    println!("Merged {branch} (#{number})");
+                for m in merged {
+                    println!("Merged {} (#{})", m.branch, m.number);
                 }
             }
             if let Some(stop) = stopped {

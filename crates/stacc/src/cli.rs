@@ -224,7 +224,8 @@ pub struct MoveArgs {
 /// Arguments for `stacc merge`.
 #[derive(Debug, clap::Args)]
 pub struct MergeArgs {
-    /// Skip the post-merge upstream fetch and reconcile on local refs only.
+    /// Skip the post-merge fetch: merged branches still leave local state, but the
+    /// stack is not rebased onto the merged commits until a later `stacc sync`.
     #[arg(long)]
     pub offline: bool,
     /// Refuse to merge unless the trunk has branch protection enabled.
