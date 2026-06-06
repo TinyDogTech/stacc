@@ -319,6 +319,97 @@ fn merge_with_a_protected_trunk_emits_no_warning() {
 }
 
 #[test]
+fn merge_skips_a_pr_already_merged_out_of_band_and_surfaces_the_sha() {
+    let tmp = repo();
+    let p = tmp.path();
+    run_git(p, &["checkout", "-q", "-b", "bottom"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "b"]);
+    run_git(p, &["checkout", "-q", "-b", "top"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "t"]);
+    track_pr(p, "bottom", "main", 1);
+    track_pr(p, "top", "bottom", 2);
+
+    let server = MockServer::start();
+    let base = "/repos/stacc-sandbox/example";
+    server.mock(|w, t| {
+        w.method(Method::GET).path(format!("{base}/branches/main/protection"));
+        t.status(404).json_body(serde_json::json!({ "message": "not protected" }));
+    });
+    // bottom (#1) is already merged out of band: detected, counted, not re-merged
+    // (there is no PUT /pulls/1/merge mock, so a re-merge attempt would error).
+    server.mock(|w, t| {
+        w.method(Method::GET).path(format!("{base}/pulls/1"));
+        t.status(200).json_body(serde_json::json!({
+            "number": 1, "html_url": "u", "state": "closed", "merged": true,
+        }));
+    });
+    server.mock(|w, t| {
+        w.method(Method::GET).path(format!("{base}/pulls/2"));
+        t.status(200).json_body(pr_open(2, "clean"));
+    });
+    server.mock(|w, t| {
+        w.method(Method::PATCH).path(format!("{base}/pulls/2"));
+        t.status(200).json_body(pr_open(2, "clean"));
+    });
+    let merge2 = server.mock(|w, t| {
+        w.method(Method::PUT).path(format!("{base}/pulls/2/merge"));
+        t.status(200).json_body(serde_json::json!({ "merged": true, "sha": "deadbeef" }));
+    });
+
+    run_git(p, &["checkout", "-q", "top"]);
+    let out = stacc_env(
+        p,
+        &["merge", "--offline", "--format", "json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    // Does not stall or error on the out-of-band-merged bottom.
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains(r#""number":1"#) && s.contains(r#""number":2"#), "got: {s}");
+    assert!(s.contains(r#""sha":"deadbeef""#), "merge sha not surfaced: {s}");
+    merge2.assert(); // top WAS merged by us
+    // Both branches dropped from state by the reconcile.
+    let log = String::from_utf8_lossy(&stacc(p, &["log", "--format", "json"]).stdout).into_owned();
+    assert!(
+        !log.contains(r#""name":"bottom""#) && !log.contains(r#""name":"top""#),
+        "got: {log}"
+    );
+}
+
+#[test]
+fn merge_require_protected_refuses_an_unprotected_trunk() {
+    let tmp = repo();
+    let p = tmp.path();
+    run_git(p, &["checkout", "-q", "-b", "feat"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "f"]);
+    track_pr(p, "feat", "main", 1);
+
+    let server = MockServer::start();
+    server.mock(|w, t| {
+        w.method(Method::GET)
+            .path("/repos/stacc-sandbox/example/branches/main/protection");
+        t.status(404).json_body(serde_json::json!({ "message": "not protected" }));
+    });
+
+    run_git(p, &["checkout", "-q", "feat"]);
+    let out = stacc_env(
+        p,
+        &["merge", "--offline", "--require-protected", "--format", "json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("not known to be protected"),
+        "got: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
 fn merge_on_the_trunk_errors() {
     let tmp = repo();
     let p = tmp.path();

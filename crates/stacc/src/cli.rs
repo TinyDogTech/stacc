@@ -227,6 +227,9 @@ pub struct MergeArgs {
     /// Skip the post-merge upstream fetch and reconcile on local refs only.
     #[arg(long)]
     pub offline: bool,
+    /// Refuse to merge unless the trunk has branch protection enabled.
+    #[arg(long)]
+    pub require_protected: bool,
 }
 
 /// Arguments for `stacc rename`.
