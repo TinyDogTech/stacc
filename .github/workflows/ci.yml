@@ -1,0 +1,62 @@
+name: CI
+
+# Build, lint, and test on every PR and on pushes to the default branch.
+# This is the gate that used to be run by hand. It is separate from the
+# tag-triggered release workflow (cargo-dist generates that one).
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Least privilege: this job only reads the repo to build, lint, and test.
+# cargo build runs arbitrary build.rs and proc-macro code, so it should not
+# hold a writable token (this also covers the push-to-main trigger).
+permissions:
+  contents: read
+
+# Cancel an in-progress run when new commits land on the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable + clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      # Linux builds the keyring secret-service backend; with the vendored
+      # feature this compiles libdbus from source (cc), so no system
+      # libdbus-1-dev package is needed. This run is the native check of that.
+      - name: Build
+        run: cargo build --workspace
+
+      # Warnings are intentionally not denied: AGENTS.md keeps clippy::pedantic
+      # as a non-blocking second opinion, so this surfaces lints without gating.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets
+
+      - name: Test
+        run: cargo test --workspace
+
+      # Hard project rule: no em-dash (U+2014) anywhere in source, docs, or
+      # manifests. Scoped to tracked source via git grep so it never matches
+      # generated workflow/install files or Cargo.lock. The pattern is written
+      # as the bash \u2014 escape so this file contains no literal em-dash byte.
+      - name: No em dashes
+        run: |
+          if git grep -n $'\u2014' -- '*.rs' '*.md' '*.toml' ':!Cargo.lock'; then
+            echo "::error::em-dash (U+2014) found in tracked source; use a comma, colon, parentheses, or rewrite."
+            exit 1
+          fi
