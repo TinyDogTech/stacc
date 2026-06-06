@@ -1,7 +1,8 @@
 [package]
 name = "stacc"
-version = "0.0.0"
+version.workspace = true
 description = "Stacked-diff CLI for AI coding agents."
+homepage = "https://github.com/TinyDogTech/stacc"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
