@@ -93,6 +93,8 @@ pub enum Command {
     Log(LogArgs),
     /// Show the current branch's position and PR status.
     Status,
+    /// Print the current branch's PR URL (and open it in a browser on a terminal).
+    Pr,
     /// Manage the GitHub access token.
     Auth(AuthArgs),
 

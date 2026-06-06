@@ -1,6 +1,7 @@
 //! Implementations of the CLI subcommands.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::IsTerminal;
 use std::path::Path;
 
 use serde_json::{json, Value};
@@ -417,6 +418,74 @@ fn pr_state_str(state: PrState) -> &'static str {
         PrState::Closed => "closed",
         PrState::Merged => "merged",
     }
+}
+
+/// `stacc pr`: print the current branch's recorded PR URL, and open it in a
+/// browser when run on a terminal. Errors when the branch has no recorded PR.
+pub fn pr(format: OutputFormat) -> Result<(), Error> {
+    let git = Git::open(".");
+    let store = StateStore::new(git.clone());
+    let state = store.load()?;
+    let repo = state
+        .repo
+        .clone()
+        .ok_or_else(|| Error::Usage("stacc is not initialized; run `stacc init` first".into()))?;
+
+    let branch = git.current_branch().map_err(|_| {
+        Error::Usage("cannot resolve a PR for a detached HEAD; check out a branch first".into())
+    })?;
+    let pr = state
+        .branches
+        .get(&branch)
+        .and_then(|b| b.pr.clone())
+        .ok_or_else(|| {
+            Error::Usage(format!(
+                "no PR recorded for `{branch}`; run `stacc submit` first"
+            ))
+        })?;
+
+    // Prefer the recorded URL; build one from the remote when it is absent.
+    let url = if let Some(url) = pr.url {
+        url
+    } else {
+        let (owner, repo_name) = stacc_github::parse_remote(&git.remote_url(&repo.remote)?)
+            .ok_or_else(|| Error::Usage(format!("remote `{}` is not a GitHub URL", repo.remote)))?;
+        format!("https://github.com/{owner}/{repo_name}/pull/{}", pr.number)
+    };
+
+    match format {
+        OutputFormat::Json => {
+            println!("{}", json!({ "branch": branch, "number": pr.number, "url": url }));
+        }
+        OutputFormat::Pretty => {
+            println!("{url}");
+            if std::io::stdout().is_terminal() {
+                open_in_browser(&url);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Best-effort: open `url` in the platform browser, ignoring any failure.
+fn open_in_browser(url: &str) {
+    let mut command = if cfg!(target_os = "macos") {
+        let mut c = std::process::Command::new("open");
+        c.arg(url);
+        c
+    } else if cfg!(target_os = "windows") {
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/C", "start", "", url]);
+        c
+    } else {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(url);
+        c
+    };
+    let _ = command
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
 }
 
 /// `stacc submit`: push the current branch and its ancestors up to the trunk,

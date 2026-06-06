@@ -19,14 +19,30 @@ use error::Error;
 /// Names that stacc always handles itself. These always shadow any user alias.
 const BUILTINS: &[&str] = &[
     "init", "track", "create", "modify", "log", "status", "submit", "sync", "restack", "move",
-    "rename", "merge", "continue", "abort", "up", "down", "top", "bottom", "checkout", "auth",
+    "rename", "merge", "continue", "abort", "up", "down", "top", "bottom", "checkout", "pr",
+    "auth",
+];
+
+/// Short aliases stacc ships with, seeded at the lowest precedence so a user or
+/// repo alias of the same name overrides them. These are aliases (not in
+/// [`BUILTINS`]), so they expand to the real command name.
+const DEFAULT_ALIASES: &[(&str, &str)] = &[
+    ("co", "checkout"),
+    ("u", "up"),
+    ("d", "down"),
+    ("l", "log"),
+    ("st", "status"),
 ];
 
 /// Parse the command line, dispatch, and return the process exit code.
 pub fn run() -> ExitCode {
-    // Aliases load best-effort: user-global first, then repo-local (repo wins).
-    let mut aliases =
-        stacc_config::aliases_from_file(&stacc_config::user_config_path());
+    // Aliases load best-effort, lowest precedence first: built-in defaults, then
+    // user-global, then repo-local (repo wins).
+    let mut aliases: BTreeMap<String, String> = DEFAULT_ALIASES
+        .iter()
+        .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+        .collect();
+    aliases.extend(stacc_config::aliases_from_file(&stacc_config::user_config_path()));
     aliases.extend(stacc_config::aliases_from_file(std::path::Path::new(
         ".stacc.toml",
     )));
@@ -65,6 +81,7 @@ fn dispatch(cli: &Cli) -> Result<(), Error> {
         Command::Modify(args) => commands::modify(args, cli.global.format),
         Command::Log(args) => commands::log(args, cli.global.format),
         Command::Status => commands::status(cli.global.format),
+        Command::Pr => commands::pr(cli.global.format),
         Command::Submit(args) => commands::submit(args, cli.global.format),
         Command::Sync(args) => commands::sync(args, cli.global.format),
         Command::Restack(args) => commands::restack(args, cli.global.format),
@@ -229,5 +246,52 @@ mod tests {
         let a = aliases(&[("st", "status")]);
         let out = expand_aliases(argv(&["stacc"]), &a).unwrap();
         assert_eq!(out, argv(&["stacc"]));
+    }
+
+    /// The alias table as `run` seeds it: built-in defaults plus any overrides.
+    fn seeded(extra: &[(&str, &str)]) -> BTreeMap<String, String> {
+        let mut a: BTreeMap<String, String> = DEFAULT_ALIASES
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect();
+        for (k, v) in extra {
+            a.insert((*k).to_string(), (*v).to_string());
+        }
+        a
+    }
+
+    #[test]
+    fn builtin_aliases_expand_to_real_commands() {
+        let a = seeded(&[]);
+        assert_eq!(
+            expand_aliases(argv(&["stacc", "co", "main"]), &a).unwrap(),
+            argv(&["stacc", "checkout", "main"])
+        );
+        assert_eq!(
+            expand_aliases(argv(&["stacc", "u"]), &a).unwrap(),
+            argv(&["stacc", "up"])
+        );
+    }
+
+    #[test]
+    fn user_alias_overrides_a_builtin_alias() {
+        // A user `co` shadows the shipped `co` -> checkout.
+        let a = seeded(&[("co", "create")]);
+        assert_eq!(
+            expand_aliases(argv(&["stacc", "co", "x"]), &a).unwrap(),
+            argv(&["stacc", "create", "x"])
+        );
+    }
+
+    #[test]
+    fn builtin_aliases_never_collide_with_a_command_name() {
+        // None of the shipped aliases are real command names, so they never
+        // shadow a builtin (which would stop expansion before reaching git).
+        for (alias, _) in DEFAULT_ALIASES {
+            assert!(
+                !BUILTINS.contains(alias),
+                "alias `{alias}` collides with a builtin command"
+            );
+        }
     }
 }
