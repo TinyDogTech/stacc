@@ -11,7 +11,7 @@ ci = "github"
 installers = ["shell", "powershell", "homebrew"]
 # Target platforms to build apps for (Rust target-triple syntax)
 targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
-# Publish the Homebrew formula to our (private) tap. The HOMEBREW_TAP_TOKEN
+# Publish the Homebrew formula to our tap. The HOMEBREW_TAP_TOKEN
 # secret on the source repo grants push access to the tap.
 tap = "TinyDogTech/homebrew-tap"
 publish-jobs = ["homebrew"]
