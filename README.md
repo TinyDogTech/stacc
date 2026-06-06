@@ -31,17 +31,36 @@ surface.
 
 ## Install
 
-Prebuilt binaries, a one-line `curl` installer, and Homebrew arrive with the
-first tagged release. Until then, build from source with a Rust toolchain:
+Install the latest release with the one-line script (macOS and Linux):
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/TinyDogTech/stacc/releases/latest/download/stacc-installer.sh | sh
+```
+
+On Windows (PowerShell):
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/TinyDogTech/stacc/releases/latest/download/stacc-installer.ps1 | iex"
+```
+
+Or with Homebrew:
+
+```sh
+brew install TinyDogTech/tap/stacc
+```
+
+Both the `stacc` and `st` (short alias) binaries are installed. If you would
+rather inspect the script before piping it to a shell, download it first and read
+it. Every release also ships SHA-256 checksums and signed build provenance, verify
+a downloaded binary with `gh attestation verify <binary> --repo TinyDogTech/stacc`.
+
+Building from source needs a Rust toolchain:
 
 ```sh
 git clone https://github.com/TinyDogTech/stacc
 cd stacc
-cargo build --release
-# binaries: target/release/stacc and target/release/st
+cargo build --release   # binaries: target/release/stacc and target/release/st
 ```
-
-Put them on your `PATH`, or point your agent at the built path.
 
 ## Quickstart
 
@@ -238,6 +257,6 @@ The workspace is six crates:
 
 stacc implements the full stacked-diff workflow: create, modify, submit, sync,
 restack, move, rename, merge, navigation, and conflict recovery. It is under
-active development and not yet packaged for distribution (see Install). For the
-design and rationale, see [`plans/stacc.md`](plans/stacc.md) and the core
+active development, with prebuilt binaries and Homebrew available (see Install).
+For the design and rationale, see [`plans/stacc.md`](plans/stacc.md) and the core
 algorithms in [`plans/algorithms.md`](plans/algorithms.md).
