@@ -6,7 +6,7 @@
 
 use clap::{Parser, Subcommand, ValueEnum};
 
-/// stacc: a stacked-diff CLI for AI coding agents.
+/// A stacked-diff CLI.
 #[derive(Debug, Parser)]
 #[command(name = "stacc", version, long_about = None)]
 pub struct Cli {

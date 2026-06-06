@@ -1,4 +1,4 @@
-//! stacc, a stacked-diff CLI for AI coding agents.
+//! stacc, a stacked-diff CLI.
 //!
 //! The CLI logic lives in this library so the `stacc` and `st` binaries can
 //! both be thin wrappers around [`run`].

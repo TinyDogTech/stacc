@@ -2,26 +2,26 @@
 
 [![CI](https://github.com/TinyDogTech/stacc/actions/workflows/ci.yml/badge.svg)](https://github.com/TinyDogTech/stacc/actions/workflows/ci.yml)
 
-A stacked-diff CLI for AI coding agents, and the humans working alongside them.
+A stacked-diff CLI.
 
-stacc keeps a chain of small, dependent pull requests in sync. Every command is
-non-interactive by default and can emit JSON, so an agent drives it without a
-terminal, and you get the same commands with readable output. It installs as
-`stacc` and the short alias `st`.
+stacc makes it easy to break a big change into a stack of one-PR-per-branch commits and rebases
+the right branches automatically when a base moves. Every command is
+non-interactive by default and can emit JSON, so it scripts cleanly in CI, in your
+own tooling, or under an AI agent, and prints readable output when you run it at a
+terminal. It installs as `stacc` and the short alias `st`.
 
 ## Why stacc
 
-Stacked-diff tools assume a person at a terminal: prompts, pagers, interactive
-pickers. stacc assumes an agent, and treats you as a first-class user of the same
-surface.
+Most stacked-diff tools assume a person at a terminal: prompts, pagers,
+interactive pickers. stacc works the same whether you drive it by hand or via an agent. It's non-interactive by default, with machine-readable output on request.
 
 - **Non-interactive by default.** No command blocks on a prompt. Pass
   `--no-interactive` and a would-be prompt becomes a structured error instead of
   a hang.
 - **Machine-readable output.** `--format json` on every command emits a JSON
-  object an agent can parse. The default `pretty` format is for humans.
+  object a script or agent can parse. The default `pretty` format is for humans.
 - **Structured errors.** Failures are JSON objects with a stable `error`
-  discriminator (`conflict`, `usage`, `ambiguous`, and so on), so an agent
+  discriminator (`conflict`, `usage`, `ambiguous`, and so on), so a caller
   branches on the kind instead of scraping text.
 - **Branch per PR.** Each branch is one reviewable change stacked on its parent.
   stacc records the stack in a hidden git ref and rebases the right branches when
@@ -150,7 +150,35 @@ stacc log --format json
 
 Reach for `stacc <command> --help` for the full flags of any command.
 
-## Driving stacc from an agent
+## Aliases
+
+Common commands have built-in short aliases, so you type less:
+
+| Alias | Expands to |
+| --- | --- |
+| `co` | `checkout` |
+| `u` | `up` |
+| `d` | `down` |
+| `l` | `log` |
+| `st` | `status` |
+
+The binary is also installed as `st`, so `st co`, `st u`, and `st l` all work.
+
+Define your own in an `[aliases]` table, globally in `~/.config/stacc/config.toml`
+or per repo in `.stacc.toml`. Each name maps to a command line (multiple tokens
+are fine):
+
+```toml
+[aliases]
+ci = "submit"
+ship = "submit --description @PR.md"
+s = "sync"
+```
+
+Precedence runs built-in defaults, then your global config, then the repo's
+`.stacc.toml` (repo wins).
+
+## For agents
 
 Point your agent at this section (or paste it into your `AGENTS.md`). It is the
 stable contract; the exact per-command JSON shapes live in `stacc <command>
@@ -252,11 +280,3 @@ The workspace is six crates:
 | `stacc-github` | GitHub API client and auth |
 | `stacc-state` | State storage in the `refs/stacc/` git ref |
 | `stacc-config` | Configuration and trunk/remote autodetection |
-
-## Status
-
-stacc implements the full stacked-diff workflow: create, modify, submit, sync,
-restack, move, rename, merge, navigation, and conflict recovery. It is under
-active development, with prebuilt binaries and Homebrew available (see Install).
-For the design and rationale, see [`plans/stacc.md`](plans/stacc.md) and the core
-algorithms in [`plans/algorithms.md`](plans/algorithms.md).
