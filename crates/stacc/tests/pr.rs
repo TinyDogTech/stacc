@@ -111,6 +111,40 @@ fn pr_constructs_the_url_when_none_recorded() {
 }
 
 #[test]
+fn pr_pretty_prints_just_the_url() {
+    let tmp = repo();
+    let p = tmp.path();
+    run_git(p, &["checkout", "-q", "-b", "feat"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "f"]);
+    track_pr(p, "feat", 7, Some("https://github.com/owner/repo/pull/7"));
+
+    // Pretty mode: stdout is piped here (not a TTY), so no browser is spawned.
+    let out = stacc(p, &["pr"]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(s.trim(), "https://github.com/owner/repo/pull/7");
+    assert!(!s.contains('{'), "pretty output should not be JSON: {s}");
+}
+
+#[test]
+fn pr_on_a_detached_head_errors() {
+    let tmp = repo();
+    let p = tmp.path();
+    run_git(p, &["checkout", "-q", "--detach"]);
+    let out = stacc(p, &["pr", "--format", "json"]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("detached"),
+        "got: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
 fn pr_without_a_recorded_pr_errors() {
     let tmp = repo();
     let p = tmp.path();

@@ -420,8 +420,6 @@ fn pr_state_str(state: PrState) -> &'static str {
     }
 }
 
-/// `stacc submit`: push the current branch and its ancestors up to the trunk,
-/// creating or updating each branch's PR with its parent as the base.
 /// `stacc pr`: print the current branch's recorded PR URL, and open it in a
 /// browser when run on a terminal. Errors when the branch has no recorded PR.
 pub fn pr(format: OutputFormat) -> Result<(), Error> {
@@ -456,7 +454,9 @@ pub fn pr(format: OutputFormat) -> Result<(), Error> {
     };
 
     match format {
-        OutputFormat::Json => println!("{}", json!({ "number": pr.number, "url": url })),
+        OutputFormat::Json => {
+            println!("{}", json!({ "branch": branch, "number": pr.number, "url": url }));
+        }
         OutputFormat::Pretty => {
             println!("{url}");
             if std::io::stdout().is_terminal() {
@@ -488,6 +488,8 @@ fn open_in_browser(url: &str) {
         .spawn();
 }
 
+/// `stacc submit`: push the current branch and its ancestors up to the trunk,
+/// creating or updating each branch's PR with its parent as the base.
 pub fn submit(args: &SubmitArgs, format: OutputFormat) -> Result<(), Error> {
     let git = Git::open(".");
     let store = StateStore::new(git.clone());

@@ -48,6 +48,36 @@ fn alias_expands_to_a_stacc_command() {
 }
 
 #[test]
+fn shipped_default_alias_expands() {
+    let tmp = repo(); // no .stacc.toml: only the built-in defaults are seeded
+    // `l` -> log; on an uninitialized repo log errors "not initialized",
+    // proving the shipped alias was seeded and dispatched.
+    let out = stacc(tmp.path(), &["l", "--format", "json"]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("not initialized"),
+        "got: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
+fn repo_alias_overrides_a_shipped_default() {
+    let tmp = repo();
+    // Remap `co` (shipped: checkout) to log via repo config.
+    write_stacc_toml(tmp.path(), "[aliases]\nco = \"log\"\n");
+    // If the override won, `co` dispatches log -> "not initialized"; the shipped
+    // `co` -> checkout would instead complain it needs a branch name.
+    let out = stacc(tmp.path(), &["co", "--format", "json"]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("not initialized"),
+        "co should map to log, got: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
 fn alias_expands_to_a_git_passthrough() {
     let tmp = repo();
     write_stacc_toml(tmp.path(), "[aliases]\ncur = \"rev-parse --abbrev-ref HEAD\"\n");
