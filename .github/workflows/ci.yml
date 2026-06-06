@@ -8,6 +8,12 @@ on:
   push:
     branches: [main]
 
+# Least privilege: this job only reads the repo to build, lint, and test.
+# cargo build runs arbitrary build.rs and proc-macro code, so it should not
+# hold a writable token (this also covers the push-to-main trigger).
+permissions:
+  contents: read
+
 # Cancel an in-progress run when new commits land on the same ref.
 concurrency:
   group: ci-${{ github.ref }}
@@ -30,8 +36,9 @@ jobs:
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
 
-      # Linux builds the keyring secret-service backend; this exercises the
-      # vendored libdbus path (no system libdbus-1-dev on the runner).
+      # Linux builds the keyring secret-service backend; with the vendored
+      # feature this compiles libdbus from source (cc), so no system
+      # libdbus-1-dev package is needed. This run is the native check of that.
       - name: Build
         run: cargo build --workspace
 
