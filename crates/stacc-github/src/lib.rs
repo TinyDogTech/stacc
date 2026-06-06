@@ -103,11 +103,21 @@ impl From<RawPullRequest> for PullRequest {
     }
 }
 
+/// The outcome of a merge request: whether GitHub merged it, and the squash
+/// commit SHA when it did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergeOutcome {
+    pub merged: bool,
+    pub sha: Option<String>,
+}
+
 /// GitHub's response to a merge request: the bits stacc reads.
 #[derive(Debug, Deserialize)]
 struct MergeResponse {
     #[serde(default)]
     merged: bool,
+    #[serde(default)]
+    sha: Option<String>,
 }
 
 /// An authenticated GitHub API client.
@@ -221,11 +231,14 @@ impl GitHub {
         owner: &str,
         repo: &str,
         number: u64,
-    ) -> Result<bool, GitHubError> {
+    ) -> Result<MergeOutcome, GitHubError> {
         let url = format!("{}/repos/{owner}/{repo}/pulls/{number}/merge", self.base_url);
         let body = serde_json::json!({ "merge_method": "squash" });
         match self.send::<_, MergeResponse>("PUT", &url, &body) {
-            Ok(resp) => Ok(resp.merged),
+            Ok(resp) => Ok(MergeOutcome {
+                merged: resp.merged,
+                sha: resp.sha,
+            }),
             Err(GitHubError::Status { status, .. }) if status == 405 || status == 409 => {
                 Err(GitHubError::NotMergeable)
             }
@@ -469,7 +482,9 @@ mod tests {
         });
 
         let gh = GitHub::with_base_url("t", server.base_url());
-        assert!(gh.merge_pull_request("o", "r", 7).unwrap());
+        let outcome = gh.merge_pull_request("o", "r", 7).unwrap();
+        assert!(outcome.merged);
+        assert_eq!(outcome.sha.as_deref(), Some("abc"));
         mock.assert();
     }
 

@@ -372,6 +372,23 @@ fn reconcile_with(
     })
 }
 
+/// A PR `merge` resolved: the branch, its number, the squash commit SHA when we
+/// merged it (`None` otherwise), and whether GitHub already had it merged.
+struct MergedPr {
+    branch: String,
+    number: u64,
+    sha: Option<String>,
+    out_of_band: bool,
+}
+
+/// The result of walking the downstack chain: what merged, where it stopped
+/// short (structured), and any deferred hard error.
+struct MergeWalk {
+    merged: Vec<MergedPr>,
+    stopped: Option<Value>,
+    error: Option<Error>,
+}
+
 /// `stacc merge`: squash-merge the ready PRs from the trunk up to the current
 /// branch, bottom-up, then reconcile via the `sync` logic. Stops at the first PR
 /// that is not cleanly mergeable. No-op (with a message) when nothing is ready.
@@ -401,83 +418,44 @@ pub fn merge(args: &MergeArgs, format: OutputFormat) -> Result<(), Error> {
 
     // Without trunk branch protection, GitHub's "clean" means only "no merge
     // conflicts": required checks and reviews are not enforced. Warn loudly.
+    // Distinguish "confirmed unprotected" (404) from "could not check" (a token
+    // scope or transient API error): `--require-protected` refuses both, but with
+    // different, honest messages.
     let protected = match github.branch_protected(&owner, &repo_name, &repo.trunk) {
-        Ok(protected) => protected,
-        // A failed check (bad token scope, transient API error) is not proof of
-        // "unprotected"; say so explicitly rather than silently treating it as
-        // unprotected, but still proceed (the merge gate is GitHub's own state).
-        Err(err) => {
+        Ok(true) => true,
+        Ok(false) => {
+            if args.require_protected {
+                return Err(Error::Usage(format!(
+                    "`{}` has no branch protection; enable it, or drop --require-protected to merge anyway",
+                    repo.trunk
+                )));
+            }
             eprintln!(
-                "warning: could not check `{}` branch protection ({err}); proceeding as if unprotected",
+                "warning: `{}` has no branch protection, so a `clean` PR means only `no merge conflicts`; required checks and reviews are NOT enforced here.",
+                repo.trunk
+            );
+            false
+        }
+        Err(err) => {
+            if args.require_protected {
+                return Err(Error::Usage(format!(
+                    "could not verify `{}` branch protection ({err}); resolve it, or drop --require-protected to merge anyway",
+                    repo.trunk
+                )));
+            }
+            eprintln!(
+                "warning: could not check `{}` branch protection ({err}); proceeding as if unprotected, so required checks and reviews are NOT enforced.",
                 repo.trunk
             );
             false
         }
     };
-    if !protected {
-        eprintln!(
-            "warning: `{}` is not known to be protected, so a `clean` PR means only `no merge conflicts`; required checks and reviews are NOT enforced here.",
-            repo.trunk
-        );
-    }
 
-    let mut merged_prs: Vec<(String, u64)> = Vec::new();
-    let mut stopped: Option<Value> = None;
-    // A hard error (network, an unexpected API failure) is deferred, not returned
-    // immediately: we still reconcile whatever already merged before surfacing it,
-    // so PRs merged on GitHub are never left stranded in local state.
-    let mut loop_err: Option<Error> = None;
-    for (i, branch) in chain.iter().enumerate() {
-        let Some(pr) = state.branches.get(branch).and_then(|b| b.pr.clone()) else {
-            stopped = Some(json!({ "branch": branch, "reason": "no recorded PR; submit it first" }));
-            break;
-        };
-        // After a prior merge the base of this PR (the merged branch) is gone, so
-        // re-point it to the trunk and let GitHub recompute readiness against it.
-        if i > 0 {
-            let update = PullRequestUpdate {
-                base: Some(repo.trunk.clone()),
-                ..Default::default()
-            };
-            if let Err(err) = github.update_pull_request(&owner, &repo_name, pr.number, &update) {
-                loop_err = Some(err.into());
-                break;
-            }
-        }
-        let live = match poll_pr_ready(&github, &owner, &repo_name, pr.number) {
-            Ok(live) => live,
-            Err(err) => {
-                loop_err = Some(err);
-                break;
-            }
-        };
-        if !live.ready() {
-            stopped = Some(json!({
-                "branch": branch,
-                "number": pr.number,
-                "mergeable_state": live.mergeable_state,
-                "reason": "not cleanly mergeable",
-            }));
-            break;
-        }
-        match github.merge_pull_request(&owner, &repo_name, pr.number) {
-            Ok(true) => merged_prs.push((branch.clone(), pr.number)),
-            // 200 but not merged, or no longer mergeable (the head moved since the
-            // readiness read): a clean stop, not a silent drop.
-            Ok(false) => {
-                stopped = Some(json!({ "branch": branch, "number": pr.number, "reason": "GitHub accepted the request but did not merge the PR" }));
-                break;
-            }
-            Err(stacc_github::GitHubError::NotMergeable) => {
-                stopped = Some(json!({ "branch": branch, "number": pr.number, "reason": "no longer mergeable (head moved or checks failed)" }));
-                break;
-            }
-            Err(err) => {
-                loop_err = Some(err.into());
-                break;
-            }
-        }
-    }
+    let MergeWalk {
+        merged: merged_prs,
+        stopped,
+        error: mut loop_err,
+    } = merge_ready_downstack(&github, &owner, &repo_name, &repo.trunk, &state, &chain);
 
     // Reconcile whatever merged (drop those branches, re-parent, restack), even
     // when the loop errored, so PRs already merged on GitHub are not stranded. We
@@ -485,7 +463,7 @@ pub fn merge(args: &MergeArgs, format: OutputFormat) -> Result<(), Error> {
     let outcome = if merged_prs.is_empty() {
         None
     } else {
-        let merged: BTreeSet<String> = merged_prs.iter().map(|(b, _)| b.clone()).collect();
+        let merged: BTreeSet<String> = merged_prs.iter().map(|m| m.branch.clone()).collect();
         match reconcile_with(&git, &store, &mut state, &repo, merged, args.offline) {
             Ok(outcome) => Some(outcome),
             Err(err) => {
@@ -495,11 +473,127 @@ pub fn merge(args: &MergeArgs, format: OutputFormat) -> Result<(), Error> {
         }
     };
 
+    if args.offline && outcome.is_some() {
+        eprintln!(
+            "note: --offline skipped the fetch; run `stacc sync` to rebase the local stack onto the merged commits."
+        );
+    }
+
     report_merge(format, &merged_prs, stopped.as_ref(), protected, outcome.as_ref());
     if let Some(err) = loop_err {
         return Err(err);
     }
     Ok(())
+}
+
+/// Walk the downstack `chain` bottom-up, squash-merging each ready PR and
+/// re-pointing the next one's base to the trunk after a merge. Returns the merged
+/// `(branch, number, sha)` tuples, the structured stop reason if it stopped
+/// short, and any deferred hard error (so the caller can reconcile the merged
+/// prefix before surfacing it). Mutates no local state.
+fn merge_ready_downstack(
+    github: &GitHub,
+    owner: &str,
+    repo_name: &str,
+    trunk: &str,
+    state: &State,
+    chain: &[String],
+) -> MergeWalk {
+    let mut merged_prs: Vec<MergedPr> = Vec::new();
+    let mut stopped: Option<Value> = None;
+    // A hard error is deferred, not returned immediately, so the caller can still
+    // reconcile whatever already merged before surfacing it.
+    let mut loop_err: Option<Error> = None;
+    for (i, branch) in chain.iter().enumerate() {
+        let Some(pr) = state.branches.get(branch).and_then(|b| b.pr.clone()) else {
+            stopped = Some(json!({ "kind": "no_pr", "branch": branch, "reason": "no recorded PR; submit it first" }));
+            break;
+        };
+        // Classify the PR's current state before mutating it: one merged out of
+        // band is already done (count it and keep walking up); a closed one stops
+        // the walk. Checking first also avoids re-pointing a non-open PR's base.
+        let current = match github.get_pull_request(owner, repo_name, pr.number) {
+            Ok(current) => current,
+            Err(err) => {
+                loop_err = Some(err.into());
+                break;
+            }
+        };
+        match current.state {
+            PrState::Merged => {
+                merged_prs.push(MergedPr {
+                    branch: branch.clone(),
+                    number: pr.number,
+                    sha: None,
+                    out_of_band: true,
+                });
+                continue;
+            }
+            PrState::Closed => {
+                stopped = Some(json!({ "kind": "closed", "branch": branch, "number": pr.number, "reason": "PR is closed, not merged" }));
+                break;
+            }
+            PrState::Open => {}
+        }
+        // After a prior merge the base of this PR (the merged branch) is gone, so
+        // re-point it to the trunk and let GitHub recompute readiness against it.
+        if i > 0 {
+            let update = PullRequestUpdate {
+                base: Some(trunk.to_string()),
+                ..Default::default()
+            };
+            if let Err(err) = github.update_pull_request(owner, repo_name, pr.number, &update) {
+                loop_err = Some(err.into());
+                break;
+            }
+        }
+        let live = match poll_pr_ready(github, owner, repo_name, pr.number) {
+            Ok(live) => live,
+            Err(err) => {
+                loop_err = Some(err);
+                break;
+            }
+        };
+        if !live.ready() {
+            stopped = Some(json!({
+                "kind": "not_ready",
+                "branch": branch,
+                "number": pr.number,
+                "mergeable_state": live.mergeable_state,
+                "reason": "not cleanly mergeable",
+            }));
+            break;
+        }
+        match github.merge_pull_request(owner, repo_name, pr.number) {
+            Ok(outcome) if outcome.merged => {
+                merged_prs.push(MergedPr {
+                    branch: branch.clone(),
+                    number: pr.number,
+                    sha: outcome.sha,
+                    out_of_band: false,
+                });
+            }
+            // 200 but not merged: a clean stop, not a silent drop.
+            Ok(_) => {
+                stopped = Some(json!({ "kind": "did_not_merge", "branch": branch, "number": pr.number, "reason": "GitHub accepted the request but did not merge the PR" }));
+                break;
+            }
+            // No longer mergeable (the head moved since the readiness read).
+            Err(stacc_github::GitHubError::NotMergeable) => {
+                stopped = Some(json!({ "kind": "not_mergeable", "branch": branch, "number": pr.number, "reason": "no longer mergeable (head moved or checks failed)" }));
+                break;
+            }
+            Err(err) => {
+                loop_err = Some(err.into());
+                break;
+            }
+        }
+    }
+    MergeWalk {
+        merged: merged_prs,
+        stopped,
+        error: loop_err,
+    }
 }
 
 /// Read a PR's readiness, re-polling briefly while GitHub still reports
@@ -514,6 +608,9 @@ fn poll_pr_ready(
     let mut pr = github.get_pull_request(owner, repo, number)?;
     let mut tries = 0;
     while matches!(pr.mergeable_state.as_deref(), None | Some("unknown")) && tries < 4 {
+        if tries == 0 {
+            eprintln!("waiting for GitHub to compute mergeability for #{number}...");
+        }
         std::thread::sleep(std::time::Duration::from_millis(700));
         pr = github.get_pull_request(owner, repo, number)?;
         tries += 1;
@@ -523,7 +620,7 @@ fn poll_pr_ready(
 
 fn report_merge(
     format: OutputFormat,
-    merged: &[(String, u64)],
+    merged: &[MergedPr],
     stopped: Option<&Value>,
     protected: bool,
     outcome: Option<&SyncOutcome>,
@@ -532,7 +629,9 @@ fn report_merge(
         OutputFormat::Json => {
             let merged_json: Vec<Value> = merged
                 .iter()
-                .map(|(b, n)| json!({ "branch": b, "number": n }))
+                .map(|m| {
+                    json!({ "branch": m.branch, "number": m.number, "sha": m.sha, "out_of_band": m.out_of_band })
+                })
                 .collect();
             let synced = outcome.map(|o| {
                 json!({
@@ -560,8 +659,8 @@ fn report_merge(
             if merged.is_empty() {
                 println!("Nothing ready to merge.");
             } else {
-                for (branch, number) in merged {
-                    println!("Merged {branch} (#{number})");
+                for m in merged {
+                    println!("Merged {} (#{})", m.branch, m.number);
                 }
             }
             if let Some(stop) = stopped {
