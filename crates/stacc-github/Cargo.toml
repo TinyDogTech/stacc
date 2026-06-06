@@ -1,6 +1,6 @@
 [package]
 name = "stacc-github"
-version = "0.0.0"
+version.workspace = true
 description = "GitHub API client and auth for stacc."
 edition.workspace = true
 license.workspace = true

@@ -1,6 +1,6 @@
 [package]
 name = "stacc-config"
-version = "0.0.0"
+version.workspace = true
 description = "Configuration and trunk/remote autodetection for stacc."
 edition.workspace = true
 license.workspace = true

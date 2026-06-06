@@ -8,6 +8,7 @@ members = ["crates/*"]
 # Values every member crate can inherit with `key.workspace = true`, so we set
 # edition/license/etc. in one place instead of repeating them per crate.
 [workspace.package]
+version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/TinyDogTech/stacc"
@@ -28,7 +29,10 @@ shlex = "1"
 # Backends are platform-gated, so we list every one we want to ship for and
 # let cargo cfg-gate them. `crypto-rust` keeps us off OpenSSL system libs on
 # Linux (secret-service uses session crypto for the dbus transport).
-keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
+# `vendored` statically compiles libdbus (via dbus-secret-service) instead of
+# linking the system `libdbus-1`, so the Linux release binaries build on plain
+# CI runners and on musl without a `libdbus-1-dev` system package.
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust", "vendored"] }
 
 # Workspace-wide lints. Member crates opt in with `[lints] workspace = true`.
 #
