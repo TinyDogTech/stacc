@@ -118,8 +118,10 @@ fn merge_squashes_ready_downstack_and_stops_at_unready() {
         t.status(200).json_body(pr_open(3, "blocked"));
     });
     // Base re-points for middle and top (after the prior merge).
-    server.mock(|w, t| {
-        w.method(Method::PATCH).path(format!("{base}/pulls/2"));
+    let patch2 = server.mock(|w, t| {
+        w.method(Method::PATCH)
+            .path(format!("{base}/pulls/2"))
+            .json_body(serde_json::json!({ "base": "main" }));
         t.status(200).json_body(pr_open(2, "clean"));
     });
     server.mock(|w, t| {
@@ -155,9 +157,10 @@ fn merge_squashes_ready_downstack_and_stops_at_unready() {
     assert!(s.contains(r#""trunk_protected":false"#), "got: {s}");
     merge1.assert();
     merge2.assert();
+    patch2.assert(); // middle's base was re-pointed to trunk after bottom merged
     // The no-protection warning is surfaced.
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains("no branch protection"),
+        String::from_utf8_lossy(&out.stderr).contains("not known to be protected"),
         "stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
@@ -206,6 +209,113 @@ fn merge_with_nothing_ready_is_a_noop() {
     // Nothing dropped: feat is still tracked.
     let log = String::from_utf8_lossy(&stacc(p, &["log", "--format", "json"]).stdout).into_owned();
     assert!(log.contains(r#""name":"feat""#), "got: {log}");
+}
+
+#[test]
+fn merge_reconciles_the_prefix_when_a_later_pr_is_no_longer_mergeable() {
+    let tmp = repo();
+    let p = tmp.path();
+    // main -> bottom -> top.
+    run_git(p, &["checkout", "-q", "-b", "bottom"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "b"]);
+    run_git(p, &["checkout", "-q", "-b", "top"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "t"]);
+    track_pr(p, "bottom", "main", 1);
+    track_pr(p, "top", "bottom", 2);
+
+    let server = MockServer::start();
+    let base = "/repos/stacc-sandbox/example";
+    server.mock(|w, t| {
+        w.method(Method::GET).path(format!("{base}/branches/main/protection"));
+        t.status(404).json_body(serde_json::json!({ "message": "not protected" }));
+    });
+    server.mock(|w, t| {
+        w.method(Method::GET).path(format!("{base}/pulls/1"));
+        t.status(200).json_body(pr_open(1, "clean"));
+    });
+    server.mock(|w, t| {
+        w.method(Method::GET).path(format!("{base}/pulls/2"));
+        t.status(200).json_body(pr_open(2, "clean"));
+    });
+    server.mock(|w, t| {
+        w.method(Method::PATCH).path(format!("{base}/pulls/2"));
+        t.status(200).json_body(pr_open(2, "clean"));
+    });
+    let merge1 = server.mock(|w, t| {
+        w.method(Method::PUT).path(format!("{base}/pulls/1/merge"));
+        t.status(200).json_body(serde_json::json!({ "merged": true }));
+    });
+    // bottom merges, but top's merge 409s (head moved) -> NotMergeable -> stop.
+    server.mock(|w, t| {
+        w.method(Method::PUT).path(format!("{base}/pulls/2/merge"));
+        t.status(409).json_body(serde_json::json!({ "message": "head moved" }));
+    });
+
+    run_git(p, &["checkout", "-q", "top"]);
+    let out = stacc_env(
+        p,
+        &["merge", "--offline", "--format", "json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    // NotMergeable mid-loop is a clean stop, not a hard error.
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains(r#""number":1"#), "bottom should have merged: {s}");
+    assert!(s.contains("no longer mergeable"), "stopped reason: {s}");
+    merge1.assert();
+    // The merged prefix WAS reconciled: bottom is dropped, top remains.
+    let log = String::from_utf8_lossy(&stacc(p, &["log", "--format", "json"]).stdout).into_owned();
+    assert!(
+        !log.contains(r#""name":"bottom""#),
+        "merged bottom not reconciled: {log}"
+    );
+    assert!(log.contains(r#""name":"top""#), "got: {log}");
+}
+
+#[test]
+fn merge_with_a_protected_trunk_emits_no_warning() {
+    let tmp = repo();
+    let p = tmp.path();
+    run_git(p, &["checkout", "-q", "-b", "feat"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "f"]);
+    track_pr(p, "feat", "main", 1);
+
+    let server = MockServer::start();
+    let base = "/repos/stacc-sandbox/example";
+    server.mock(|w, t| {
+        w.method(Method::GET).path(format!("{base}/branches/main/protection"));
+        t.status(200).json_body(serde_json::json!({ "required_status_checks": {} }));
+    });
+    server.mock(|w, t| {
+        w.method(Method::GET).path(format!("{base}/pulls/1"));
+        t.status(200).json_body(pr_open(1, "blocked")); // nothing ready, keep it simple
+    });
+
+    run_git(p, &["checkout", "-q", "feat"]);
+    let out = stacc_env(
+        p,
+        &["merge", "--offline", "--format", "json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains(r#""trunk_protected":true"#),
+        "got: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("not known to be protected"),
+        "unexpected protection warning: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 #[test]

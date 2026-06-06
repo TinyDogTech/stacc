@@ -340,6 +340,13 @@ fn reconcile_with(
         state.branches.remove(name);
     }
 
+    // Persist the dropped/re-parented branches before the fallible fetch and
+    // restack, so PRs already merged on GitHub are not stranded in local state
+    // if the fetch or restack then fails (a re-run reconciles from here).
+    if !merged.is_empty() {
+        store.save(state)?;
+    }
+
     // Pull the trunk from upstream. Strict by default, a flaky network or a
     // bad remote should surface immediately. `--offline` opts out and restacks
     // on whatever refs are already local.
@@ -394,18 +401,32 @@ pub fn merge(args: &MergeArgs, format: OutputFormat) -> Result<(), Error> {
 
     // Without trunk branch protection, GitHub's "clean" means only "no merge
     // conflicts": required checks and reviews are not enforced. Warn loudly.
-    let protected = github
-        .branch_protected(&owner, &repo_name, &repo.trunk)
-        .unwrap_or(false);
+    let protected = match github.branch_protected(&owner, &repo_name, &repo.trunk) {
+        Ok(protected) => protected,
+        // A failed check (bad token scope, transient API error) is not proof of
+        // "unprotected"; say so explicitly rather than silently treating it as
+        // unprotected, but still proceed (the merge gate is GitHub's own state).
+        Err(err) => {
+            eprintln!(
+                "warning: could not check `{}` branch protection ({err}); proceeding as if unprotected",
+                repo.trunk
+            );
+            false
+        }
+    };
     if !protected {
         eprintln!(
-            "warning: `{}` has no branch protection, so a `clean` PR means only `no merge conflicts`; required checks and reviews are NOT enforced here.",
+            "warning: `{}` is not known to be protected, so a `clean` PR means only `no merge conflicts`; required checks and reviews are NOT enforced here.",
             repo.trunk
         );
     }
 
     let mut merged_prs: Vec<(String, u64)> = Vec::new();
     let mut stopped: Option<Value> = None;
+    // A hard error (network, an unexpected API failure) is deferred, not returned
+    // immediately: we still reconcile whatever already merged before surfacing it,
+    // so PRs merged on GitHub are never left stranded in local state.
+    let mut loop_err: Option<Error> = None;
     for (i, branch) in chain.iter().enumerate() {
         let Some(pr) = state.branches.get(branch).and_then(|b| b.pr.clone()) else {
             stopped = Some(json!({ "branch": branch, "reason": "no recorded PR; submit it first" }));
@@ -418,32 +439,66 @@ pub fn merge(args: &MergeArgs, format: OutputFormat) -> Result<(), Error> {
                 base: Some(repo.trunk.clone()),
                 ..Default::default()
             };
-            github.update_pull_request(&owner, &repo_name, pr.number, &update)?;
+            if let Err(err) = github.update_pull_request(&owner, &repo_name, pr.number, &update) {
+                loop_err = Some(err.into());
+                break;
+            }
         }
-        let live = poll_pr_ready(&github, &owner, &repo_name, pr.number)?;
+        let live = match poll_pr_ready(&github, &owner, &repo_name, pr.number) {
+            Ok(live) => live,
+            Err(err) => {
+                loop_err = Some(err);
+                break;
+            }
+        };
         if !live.ready() {
             stopped = Some(json!({
                 "branch": branch,
                 "number": pr.number,
                 "mergeable_state": live.mergeable_state,
+                "reason": "not cleanly mergeable",
             }));
             break;
         }
-        github.merge_pull_request(&owner, &repo_name, pr.number)?;
-        merged_prs.push((branch.clone(), pr.number));
+        match github.merge_pull_request(&owner, &repo_name, pr.number) {
+            Ok(true) => merged_prs.push((branch.clone(), pr.number)),
+            // 200 but not merged, or no longer mergeable (the head moved since the
+            // readiness read): a clean stop, not a silent drop.
+            Ok(false) => {
+                stopped = Some(json!({ "branch": branch, "number": pr.number, "reason": "GitHub accepted the request but did not merge the PR" }));
+                break;
+            }
+            Err(stacc_github::GitHubError::NotMergeable) => {
+                stopped = Some(json!({ "branch": branch, "number": pr.number, "reason": "no longer mergeable (head moved or checks failed)" }));
+                break;
+            }
+            Err(err) => {
+                loop_err = Some(err.into());
+                break;
+            }
+        }
     }
 
-    // Reconcile locally (drop merged branches, re-parent, restack) only if we
-    // actually merged something. We already know what merged, so skip the GitHub
-    // re-detection that `sync` does.
+    // Reconcile whatever merged (drop those branches, re-parent, restack), even
+    // when the loop errored, so PRs already merged on GitHub are not stranded. We
+    // know what merged, so skip the GitHub re-detection that `sync` does.
     let outcome = if merged_prs.is_empty() {
         None
     } else {
         let merged: BTreeSet<String> = merged_prs.iter().map(|(b, _)| b.clone()).collect();
-        Some(reconcile_with(&git, &store, &mut state, &repo, merged, args.offline)?)
+        match reconcile_with(&git, &store, &mut state, &repo, merged, args.offline) {
+            Ok(outcome) => Some(outcome),
+            Err(err) => {
+                loop_err.get_or_insert(err);
+                None
+            }
+        }
     };
 
     report_merge(format, &merged_prs, stopped.as_ref(), protected, outcome.as_ref());
+    if let Some(err) = loop_err {
+        return Err(err);
+    }
     Ok(())
 }
 
