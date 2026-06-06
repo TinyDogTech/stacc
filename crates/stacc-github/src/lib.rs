@@ -6,11 +6,16 @@ mod error;
 pub use auth::{clear_token, load_token, store_token, DeviceCode, DeviceFlow};
 pub use error::GitHubError;
 
+use std::time::Duration;
+
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 const DEFAULT_BASE_URL: &str = "https://api.github.com";
 const USER_AGENT: &str = concat!("stacc/", env!("CARGO_PKG_VERSION"));
+/// Overall per-request deadline, so a slow or hung GitHub endpoint can't wedge
+/// the CLI (ureq's default read timeout is unbounded).
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The lifecycle state of a pull request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,7 +126,7 @@ impl GitHub {
     /// Build a client pointed at a specific base URL (used by tests).
     pub fn with_base_url(token: impl Into<String>, base_url: impl Into<String>) -> Self {
         Self {
-            agent: ureq::AgentBuilder::new().build(),
+            agent: ureq::AgentBuilder::new().timeout(REQUEST_TIMEOUT).build(),
             token: token.into(),
             base_url: base_url.into(),
         }
