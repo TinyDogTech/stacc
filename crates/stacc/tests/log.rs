@@ -372,9 +372,68 @@ fn log_marks_a_tracked_branch_whose_git_ref_is_gone() {
     let short = String::from_utf8_lossy(&stacc(p, &["log", "short"]).stdout).into_owned();
     assert!(short.contains("gone (deleted)"), "short marks deleted too: {short}");
 
-    // JSON flags it.
+    // JSON flags the gone branch only; live nodes never gain the key.
     let j = String::from_utf8_lossy(&stacc(p, &["log", "--format", "json"]).stdout).into_owned();
     assert!(j.contains(r#""deleted":true"#), "JSON deleted flag expected: {j}");
+    assert_eq!(j.matches(r#""deleted""#).count(), 1, "only the gone branch is flagged: {j}");
+}
+
+#[test]
+fn log_keeps_a_live_child_connected_under_a_deleted_base() {
+    let tmp = repo();
+    let p = tmp.path();
+    assert!(stacc(p, &["init"]).status.success());
+    run_git(p, &["checkout", "-q", "-b", "keep"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "keep1"]);
+    assert!(stacc(p, &["track"]).status.success());
+    run_git(p, &["checkout", "-q", "-b", "child"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "child1"]);
+    assert!(stacc(p, &["track", "--base", "keep"]).status.success());
+    // Delete the BASE branch's git ref, leaving the child tracked on it.
+    run_git(p, &["checkout", "-q", "main"]);
+    run_git(p, &["branch", "-D", "keep"]);
+
+    // The base is marked deleted; the child stays in the graph, connected to it.
+    // (The child renders bare since its base ref can no longer be resolved; the
+    // fix is to `stacc untrack keep`, which reparents the child onto main.)
+    let s = String::from_utf8_lossy(&stacc(p, &["log"]).stdout).into_owned();
+    assert!(s.contains("keep (deleted)"), "base marked deleted: {s}");
+    assert!(s.contains("child"), "child still renders: {s}");
+
+    let j = String::from_utf8_lossy(&stacc(p, &["log", "--format", "json"]).stdout).into_owned();
+    assert!(j.contains(r#""name":"child""#), "child present: {j}");
+    assert_eq!(j.matches(r#""deleted""#).count(), 1, "only the base is flagged: {j}");
+}
+
+#[test]
+fn log_skips_the_pr_fetch_for_a_deleted_branch() {
+    let tmp = github_repo();
+    let p = tmp.path();
+    assert!(stacc(p, &["init"]).status.success());
+    run_git(p, &["checkout", "-q", "-b", "feature"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "feat1"]);
+    assert!(stacc(p, &["track"]).status.success());
+    seed_pr(p, "feature", 7);
+    run_git(p, &["checkout", "-q", "main"]);
+    run_git(p, &["branch", "-D", "feature"]);
+
+    let server = MockServer::start();
+    let mock = server.mock(|when, then| {
+        when.method(httpmock::Method::GET)
+            .path("/repos/TinyDogTech/stacc/pulls/7");
+        then.status(200).json_body(serde_json::json!({
+            "number": 7, "html_url": "u", "state": "open", "merged": false,
+        }));
+    });
+    let base = server.base_url();
+    let envs: &[(&str, &str)] = &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", base.as_str())];
+
+    let out = stacc_env(p, &["log"], envs);
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let s = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(s.contains("feature (deleted)"), "got: {s}");
+    assert!(!s.contains("#7"), "no PR line for a deleted branch: {s}");
+    mock.assert_hits(0); // a deleted branch must not trigger the PR fetch
 }
 
 #[test]
