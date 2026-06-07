@@ -9,6 +9,7 @@
 //! `git log --graph` pass-through.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::IsTerminal;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -29,8 +30,78 @@ const FALLBACK_WIDTH: usize = 80;
 const CURRENT_GLYPH: char = '◉';
 const BRANCH_GLYPH: char = '○';
 
+const RESET: &str = "\x1b[0m";
+const DIM: &str = "\x1b[2m";
+/// Foreground colors cycled across stacks, so each stack reads as a unit.
+const PALETTE: &[&str] = &[
+    "\x1b[36m", // cyan
+    "\x1b[32m", // green
+    "\x1b[35m", // magenta
+    "\x1b[33m", // yellow
+    "\x1b[34m", // blue
+    "\x1b[31m", // red
+];
+
+/// Per-stack coloring for the pretty graph. When disabled (piped output or
+/// `--color never`), every styling call is a no-op, so the renderers produce
+/// the exact plain text the tests assert.
+struct Palette {
+    enabled: bool,
+    /// branch name -> its stack's color code.
+    colors: BTreeMap<String, &'static str>,
+}
+
+impl Palette {
+    /// Assign each stack (grouped by its bottom branch) a cycling palette color;
+    /// the trunk and untracked rows stay default.
+    fn build(
+        enabled: bool,
+        branches: &BTreeMap<String, BranchState>,
+        visible: &BTreeSet<String>,
+        trunk: &str,
+    ) -> Self {
+        let mut bottoms: BTreeMap<String, &'static str> = BTreeMap::new();
+        let mut colors = BTreeMap::new();
+        if enabled {
+            for name in visible {
+                if name.as_str() == trunk || !branches.contains_key(name) {
+                    continue;
+                }
+                let bottom = ops::bottom(branches, name, trunk);
+                let next = PALETTE[bottoms.len() % PALETTE.len()];
+                let color = *bottoms.entry(bottom).or_insert(next);
+                colors.insert(name.clone(), color);
+            }
+        }
+        Self { enabled, colors }
+    }
+
+    /// The color for a branch's glyph and name, if coloring is on.
+    fn node(&self, name: &str) -> Option<&'static str> {
+        self.enabled.then(|| self.colors.get(name).copied()).flatten()
+    }
+
+    /// Dim metadata text (leaving the graph lanes their normal weight).
+    fn dim(&self, text: &str) -> String {
+        if self.enabled && !text.is_empty() {
+            format!("{DIM}{text}{RESET}")
+        } else {
+            text.to_string()
+        }
+    }
+}
+
+/// Whether to emit ANSI styling for the given choice and output stream.
+fn color_enabled(choice: ColorChoice) -> bool {
+    match choice {
+        ColorChoice::Always => true,
+        ColorChoice::Never => false,
+        ColorChoice::Auto => std::io::stdout().is_terminal(),
+    }
+}
+
 /// `stacc log`: render the tracked stack from the state ref.
-pub fn log(args: &LogArgs, format: OutputFormat, _color: ColorChoice) -> Result<(), Error> {
+pub fn log(args: &LogArgs, format: OutputFormat, color: ColorChoice) -> Result<(), Error> {
     let git = Git::open(".");
     let store = StateStore::new(git.clone());
     let state = store.load()?;
@@ -82,11 +153,20 @@ pub fn log(args: &LogArgs, format: OutputFormat, _color: ColorChoice) -> Result<
             println!("{}", json!({ "trunk": trunk, "stack": stack }));
         }
         OutputFormat::Pretty => {
-            let full = args.form().is_none();
+            let palette = Palette::build(color_enabled(color), branches, &visible, &trunk);
+            let ctx = RenderCtx {
+                branches,
+                trunk: &trunk,
+                current: &current,
+                git: &git,
+                full: args.form().is_none(),
+                pr_status: &pr_status,
+                palette: &palette,
+            };
             let lines = if args.reverse {
-                render_reverse(&children, branches, &trunk, &current, &git, full, &pr_status)
+                render_reverse(&children, &ctx)
             } else {
-                render_forward(&children, branches, &trunk, &current, &git, full, &pr_status)
+                render_forward(&children, &ctx)
             };
             for line in lines {
                 println!("{}", line.trim_end());
@@ -183,26 +263,31 @@ fn child_map(
     map
 }
 
-// --- Forward render (trunk at the bottom) ----------------------------------
+// --- Render ----------------------------------------------------------------
 
-fn render_forward(
-    children: &BTreeMap<String, Vec<String>>,
-    branches: &BTreeMap<String, BranchState>,
-    trunk: &str,
-    current: &str,
-    git: &Git,
+/// The shared inputs both render directions read, bundled so the renderers take
+/// a graph plus one context rather than a long argument list.
+struct RenderCtx<'a> {
+    branches: &'a BTreeMap<String, BranchState>,
+    trunk: &'a str,
+    current: &'a str,
+    git: &'a Git,
     full: bool,
-    pr_status: &BTreeMap<String, Option<PrState>>,
-) -> Vec<String> {
+    pr_status: &'a BTreeMap<String, Option<PrState>>,
+    palette: &'a Palette,
+}
+
+// Forward render: trunk at the bottom.
+fn render_forward(children: &BTreeMap<String, Vec<String>>, ctx: &RenderCtx) -> Vec<String> {
     let mut order = Vec::new();
-    post_order(trunk, children, &mut order);
+    post_order(ctx.trunk, children, &mut order);
 
     let mut lanes: Vec<Option<String>> = Vec::new();
     let mut out: Vec<String> = Vec::new();
     let last = order.len().saturating_sub(1);
 
     for (i, node) in order.iter().enumerate() {
-        let is_trunk = node.as_str() == trunk;
+        let is_trunk = node.as_str() == ctx.trunk;
         let seekers = seekers_of(&lanes, node);
         let node_col = column_for(&mut lanes, &seekers);
 
@@ -214,19 +299,20 @@ fn render_forward(
             }
         }
 
-        let glyph = glyph_for(node, current);
-        out.push(node_row(&lanes, node_col, glyph, &label(node, current, full)));
+        let glyph = glyph_for(node, ctx.current);
+        let lbl = label(node, ctx.current, ctx.full);
+        out.push(node_row(&lanes, node_col, glyph, &lbl, ctx.palette.node(node)));
 
         // The lane now seeks this branch's base (trunk closes its lane).
         lanes[node_col] = if is_trunk {
             None
         } else {
-            Some(branches.get(node).map_or_else(String::new, |b| b.base.name.clone()))
+            Some(ctx.branches.get(node).map_or_else(String::new, |b| b.base.name.clone()))
         };
 
-        if full {
-            for meta in meta_lines(git, node, is_trunk, branches, pr_status) {
-                out.push(cont_row(&lanes, node_col, &meta));
+        if ctx.full {
+            for meta in meta_lines(ctx.git, node, is_trunk, ctx.branches, ctx.pr_status) {
+                out.push(cont_row(&lanes, node_col, &ctx.palette.dim(&meta)));
             }
             if i != last {
                 out.push(cont_row(&lanes, node_col, ""));
@@ -236,31 +322,23 @@ fn render_forward(
     out
 }
 
-// --- Reverse render (trunk on top) -----------------------------------------
-
-fn render_reverse(
-    children: &BTreeMap<String, Vec<String>>,
-    branches: &BTreeMap<String, BranchState>,
-    trunk: &str,
-    current: &str,
-    git: &Git,
-    full: bool,
-    pr_status: &BTreeMap<String, Option<PrState>>,
-) -> Vec<String> {
+// Reverse render: trunk on top.
+fn render_reverse(children: &BTreeMap<String, Vec<String>>, ctx: &RenderCtx) -> Vec<String> {
     let mut order = Vec::new();
-    pre_order(trunk, children, &mut order);
+    pre_order(ctx.trunk, children, &mut order);
 
     let mut lanes: Vec<Option<String>> = Vec::new();
     let mut out: Vec<String> = Vec::new();
     let last = order.len().saturating_sub(1);
 
     for (i, node) in order.iter().enumerate() {
-        let is_trunk = node.as_str() == trunk;
+        let is_trunk = node.as_str() == ctx.trunk;
         let seekers = seekers_of(&lanes, node);
         let node_col = column_for(&mut lanes, &seekers);
 
-        let glyph = glyph_for(node, current);
-        out.push(node_row(&lanes, node_col, glyph, &label(node, current, full)));
+        let glyph = glyph_for(node, ctx.current);
+        let lbl = label(node, ctx.current, ctx.full);
+        out.push(node_row(&lanes, node_col, glyph, &lbl, ctx.palette.node(node)));
 
         // This node's children continue below it: the first inherits this
         // column, the rest fork into fresh columns.
@@ -277,15 +355,15 @@ fn render_reverse(
             }
         }
 
-        if full {
-            for meta in meta_lines(git, node, is_trunk, branches, pr_status) {
-                out.push(cont_row(&lanes, node_col, &meta));
+        if ctx.full {
+            for meta in meta_lines(ctx.git, node, is_trunk, ctx.branches, ctx.pr_status) {
+                out.push(cont_row(&lanes, node_col, &ctx.palette.dim(&meta)));
             }
         }
         if !extra.is_empty() {
             out.push(connector_row(&lanes, node_col, &extra, '┐'));
         }
-        if full && i != last {
+        if ctx.full && i != last {
             out.push(cont_row(&lanes, node_col, ""));
         }
     }
@@ -368,22 +446,42 @@ fn render_width(lanes: &[Option<String>], node_col: usize) -> usize {
 }
 
 /// A branch row: the glyph at `node_col`, `│` for other active lanes, then the
-/// label.
-fn node_row(lanes: &[Option<String>], node_col: usize, glyph: char, label: &str) -> String {
+/// label. The glyph and label carry the stack `color` when set; the lanes do
+/// not, so columns stay legible.
+fn node_row(
+    lanes: &[Option<String>],
+    node_col: usize,
+    glyph: char,
+    label: &str,
+    color: Option<&str>,
+) -> String {
     let width = render_width(lanes, node_col);
     let mut s = String::new();
     for c in 0..width {
-        let ch = if c == node_col {
-            glyph
+        if c == node_col {
+            match color {
+                Some(code) => {
+                    s.push_str(code);
+                    s.push(glyph);
+                    s.push_str(RESET);
+                }
+                None => s.push(glyph),
+            }
         } else if lanes.get(c).is_some_and(Option::is_some) {
-            '│'
+            s.push('│');
         } else {
-            ' '
-        };
-        s.push(ch);
+            s.push(' ');
+        }
         s.push(' ');
     }
-    s.push_str(label);
+    match color {
+        Some(code) => {
+            s.push_str(code);
+            s.push_str(label);
+            s.push_str(RESET);
+        }
+        None => s.push_str(label),
+    }
     s
 }
 
@@ -686,10 +784,20 @@ mod tests {
         let children = child_map(&visible, &branches, trunk);
         let git = Git::open(".");
         let pr = BTreeMap::new();
+        let palette = Palette::build(false, &branches, &visible, trunk);
+        let ctx = RenderCtx {
+            branches: &branches,
+            trunk,
+            current,
+            git: &git,
+            full: false,
+            pr_status: &pr,
+            palette: &palette,
+        };
         if reverse {
-            render_reverse(&children, &branches, trunk, current, &git, false, &pr)
+            render_reverse(&children, &ctx)
         } else {
-            render_forward(&children, &branches, trunk, current, &git, false, &pr)
+            render_forward(&children, &ctx)
         }
     }
 
@@ -764,6 +872,46 @@ mod tests {
         assert!(out.chars().count() < long.chars().count());
         // A short subject is returned untouched.
         assert_eq!(truncate_subject("feat: small"), "feat: small");
+    }
+
+    #[test]
+    fn palette_colors_each_stack_distinctly() {
+        let branches = stack(&[("a", "main"), ("b", "a"), ("c", "main")]);
+        let visible = all_visible(&branches, "main");
+        let on = Palette::build(true, &branches, &visible, "main");
+        // Same stack (b is upstack of a) shares a color; a different stack differs.
+        assert_eq!(on.node("a"), on.node("b"), "same stack shares a color");
+        assert_ne!(on.node("a"), on.node("c"), "different stacks differ");
+        assert!(on.node("a").is_some());
+
+        // A disabled palette never colors or dims.
+        let off = Palette::build(false, &branches, &visible, "main");
+        assert!(off.node("a").is_none());
+        assert_eq!(off.dim("x"), "x");
+        let dimmed = on.dim("x");
+        assert!(dimmed.contains('x') && dimmed != "x", "dim wraps: {dimmed:?}");
+    }
+
+    #[test]
+    fn enabled_palette_wraps_glyph_and_name_in_ansi() {
+        let branches = stack(&[("a", "main")]);
+        let visible = all_visible(&branches, "main");
+        let children = child_map(&visible, &branches, "main");
+        let git = Git::open(".");
+        let pr = BTreeMap::new();
+        let on = Palette::build(true, &branches, &visible, "main");
+        let ctx = RenderCtx {
+            branches: &branches,
+            trunk: "main",
+            current: "a",
+            git: &git,
+            full: false,
+            pr_status: &pr,
+            palette: &on,
+        };
+        let joined = render_forward(&children, &ctx).join("\n");
+        assert!(joined.contains("\x1b["), "expected ANSI codes: {joined:?}");
+        assert!(joined.contains(RESET), "expected a reset: {joined:?}");
     }
 
     fn log_args(stack: bool, steps: Option<usize>) -> LogArgs {

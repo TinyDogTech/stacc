@@ -246,6 +246,23 @@ fn log_json_includes_commit_object_and_null_pr() {
 }
 
 #[test]
+fn log_color_flag_controls_ansi() {
+    let tmp = repo();
+    let p = tmp.path();
+    assert!(stacc(p, &["init"]).status.success());
+    run_git(p, &["checkout", "-q", "-b", "a"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "a1"]);
+    assert!(stacc(p, &["track"]).status.success());
+
+    let never = String::from_utf8_lossy(&stacc(p, &["log", "--color", "never"]).stdout).into_owned();
+    assert!(!never.contains('\u{1b}'), "no ANSI with --color never: {never:?}");
+
+    let always =
+        String::from_utf8_lossy(&stacc(p, &["log", "--color", "always"]).stdout).into_owned();
+    assert!(always.contains('\u{1b}'), "ANSI expected with --color always: {always:?}");
+}
+
+#[test]
 fn log_show_untracked_lists_untracked_branches() {
     let tmp = repo();
     let p = tmp.path();
