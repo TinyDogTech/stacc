@@ -412,13 +412,18 @@ impl Git {
         })
     }
 
-    /// How many commits `branch` has that `base` does not (`base..branch`). Zero
-    /// means `branch` adds nothing of its own (an empty stacked branch), which
-    /// `log` renders as a bare name with no commit metadata.
-    pub fn commits_ahead(&self, base: &str, branch: &str) -> Result<usize, GitError> {
-        let range = format!("{base}..{branch}");
-        let out = self.run(&["rev-list", "--count", &range])?;
-        Ok(out.parse().unwrap_or(0))
+    /// `(ahead, behind)` commit counts of `branch` relative to `base`: `ahead` is
+    /// commits `branch` has that `base` lacks (zero means an empty stacked
+    /// branch), `behind` is commits `base` has that `branch` lacks (nonzero means
+    /// `branch` has drifted off `base` and needs a restack). One `rev-list`
+    /// answers both, so `log` does not need a separate ancestry check.
+    pub fn ahead_behind(&self, base: &str, branch: &str) -> Result<(usize, usize), GitError> {
+        let range = format!("{base}...{branch}");
+        let out = self.run(&["rev-list", "--left-right", "--count", &range])?;
+        let mut counts = out.split_whitespace();
+        let behind = counts.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+        let ahead = counts.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+        Ok((ahead, behind))
     }
 
     /// Git's own graph history for the given branch `tips`, excluding the
@@ -798,13 +803,17 @@ mod tests {
     }
 
     #[test]
-    fn commits_ahead_counts_branch_only_commits() {
+    fn ahead_behind_counts_both_sides() {
         let (tmp, repo) = init_repo();
         let path = tmp.path();
-        run_git(path, &["checkout", "-q", "-b", "empty"]); // no commits beyond main
-        assert_eq!(repo.commits_ahead("main", "empty").unwrap(), 0);
-        write_commit(path, "f.txt", "x\n", "own work");
-        assert_eq!(repo.commits_ahead("main", "empty").unwrap(), 1);
+        run_git(path, &["checkout", "-q", "-b", "feature"]); // even with main
+        assert_eq!(repo.ahead_behind("main", "feature").unwrap(), (0, 0));
+        write_commit(path, "f.txt", "x\n", "own work"); // one commit ahead
+        assert_eq!(repo.ahead_behind("main", "feature").unwrap(), (1, 0));
+        // Advance main so feature is also one commit behind (drifted off base).
+        run_git(path, &["checkout", "-q", "main"]);
+        write_commit(path, "m.txt", "m\n", "main moves");
+        assert_eq!(repo.ahead_behind("main", "feature").unwrap(), (1, 1));
     }
 
     #[test]

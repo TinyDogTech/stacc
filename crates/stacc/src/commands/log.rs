@@ -341,7 +341,8 @@ fn render_reverse(children: &BTreeMap<String, Vec<String>>, ctx: &RenderCtx) -> 
         out.push(node_row(&lanes, node_col, glyph, &lbl, ctx.palette.node(node)));
 
         // This node's children continue below it: the first inherits this
-        // column, the rest fork into fresh columns.
+        // column, the rest fork into fresh columns to the RIGHT (so the fork
+        // connector always points rightward, never back across a lower lane).
         let kids = children.get(node).cloned().unwrap_or_default();
         let mut extra = Vec::new();
         if kids.is_empty() {
@@ -349,22 +350,24 @@ fn render_reverse(children: &BTreeMap<String, Vec<String>>, ctx: &RenderCtx) -> 
         } else {
             lanes[node_col] = Some(kids[0].clone());
             for kid in &kids[1..] {
-                let lane = free_lane(&mut lanes);
+                let lane = free_lane_after(&mut lanes, node_col);
                 lanes[lane] = Some(kid.clone());
                 extra.push(lane);
             }
         }
 
+        // The fork connector is drawn before the metadata so the metadata rows
+        // sit under legitimately-open lanes, not phantom ones.
+        if !extra.is_empty() {
+            out.push(connector_row(&lanes, node_col, &extra, '┐'));
+        }
         if ctx.full {
             for meta in meta_lines(ctx.git, node, is_trunk, ctx.branches, ctx.pr_status) {
                 out.push(cont_row(&lanes, node_col, &ctx.palette.dim(&meta)));
             }
-        }
-        if !extra.is_empty() {
-            out.push(connector_row(&lanes, node_col, &extra, '┐'));
-        }
-        if ctx.full && i != last {
-            out.push(cont_row(&lanes, node_col, ""));
+            if i != last {
+                out.push(cont_row(&lanes, node_col, ""));
+            }
         }
     }
     out
@@ -412,6 +415,18 @@ fn column_for(lanes: &mut Vec<Option<String>>, seekers: &[usize]) -> usize {
 fn free_lane(lanes: &mut Vec<Option<String>>) -> usize {
     if let Some(col) = lanes.iter().position(Option::is_none) {
         col
+    } else {
+        lanes.push(None);
+        lanes.len() - 1
+    }
+}
+
+/// The first free lane strictly to the right of `min`, widening if needed. Used
+/// when forking children downward so a new branch never claims a column to the
+/// left of its parent.
+fn free_lane_after(lanes: &mut Vec<Option<String>>, min: usize) -> usize {
+    if let Some(col) = lanes.iter().skip(min + 1).position(Option::is_none) {
+        min + 1 + col
     } else {
         lanes.push(None);
         lanes.len() - 1
@@ -511,19 +526,32 @@ fn connector_row(
     branch_cols: &[usize],
     end: char,
 ) -> String {
-    let max_col = branch_cols.iter().copied().max().unwrap_or(node_col).max(node_col);
-    let mut row = vec![' '; 2 * max_col + 1];
-    for c in 0..node_col {
-        if lanes.get(c).is_some_and(Option::is_some) {
-            row[2 * c] = '│';
-        }
-    }
+    let span_end = branch_cols.iter().copied().max().unwrap_or(node_col).max(node_col);
+    // The row must also cover any active lane beyond the connector span, so an
+    // unrelated column to the right keeps its spine.
+    let max_active = (0..lanes.len())
+        .filter(|&c| lanes[c].is_some())
+        .max()
+        .unwrap_or(node_col);
+    let width = span_end.max(max_active) + 1;
+    let mut row = vec![' '; 2 * width - 1];
+
+    // The horizontal run from the fork point to the furthest branching column.
     row[2 * node_col] = '├';
-    for cell in row.iter_mut().take(2 * max_col + 1).skip(2 * node_col + 1) {
+    for cell in row.iter_mut().take(2 * span_end).skip(2 * node_col + 1) {
         *cell = '─';
     }
     for &col in branch_cols {
         row[2 * col] = end;
+    }
+    // Restore the spine of every active lane that is not a branching column:
+    // those left of / right of the span pass straight through (`│`), those the
+    // horizontal run crosses are drawn as a crossing (`┼`).
+    for c in 0..width {
+        if c == node_col || branch_cols.contains(&c) || !lanes.get(c).is_some_and(Option::is_some) {
+            continue;
+        }
+        row[2 * c] = if c > node_col && c < span_end { '┼' } else { '│' };
     }
     row.into_iter().collect()
 }
@@ -549,14 +577,19 @@ fn meta_lines(
         return lines;
     }
 
+    // A branch with no commits of its own (an empty stacked branch) renders as a
+    // bare name, like graphite's untouched branches.
     let base = branches.get(node).map_or_else(String::new, |b| b.base.name.clone());
-    if git.commits_ahead(&base, node).unwrap_or(0) > 0 {
-        if let Ok(info) = git.commit_info(node) {
-            if !info.age.is_empty() {
-                lines.push(info.age);
-            }
-            lines.push(format!("{} - {}", info.sha, truncate_subject(&info.subject)));
+    let (ahead, behind) = git.ahead_behind(&base, node).unwrap_or((0, 0));
+    if ahead == 0 {
+        return lines;
+    }
+
+    if let Ok(info) = git.commit_info(node) {
+        if !info.age.is_empty() {
+            lines.push(info.age);
         }
+        lines.push(format!("{} - {}", info.sha, truncate_subject(&info.subject)));
     }
 
     if let Some(pr) = branches.get(node).and_then(|b| b.pr.as_ref()) {
@@ -567,16 +600,11 @@ fn meta_lines(
         lines.push(line);
     }
 
-    if needs_restack(git, node, &base) {
+    // `behind > 0`: the base has commits this branch lacks, i.e. it drifted.
+    if behind > 0 {
         lines.push("needs restack".to_string());
     }
     lines
-}
-
-/// Whether `branch` has drifted off `base`. Any git failure reads as up to date
-/// so `log` never raises a false alarm on a transient error.
-fn needs_restack(git: &Git, branch: &str, base: &str) -> bool {
-    !git.is_ancestor(base, branch).unwrap_or(true)
 }
 
 fn pr_status_label(state: PrState) -> &'static str {
@@ -587,13 +615,16 @@ fn pr_status_label(state: PrState) -> &'static str {
     }
 }
 
-/// Clip a subject so the `sha - subject` line fits the terminal width.
+/// Sanitize and clip a commit subject for display: strip control bytes (a
+/// hostile or garbled subject must not inject ANSI escapes into the colored
+/// output) and truncate to fit the terminal width.
 fn truncate_subject(subject: &str) -> String {
+    let clean: String = subject.chars().filter(|c| !c.is_control()).collect();
     let budget = term_width().saturating_sub(12).max(20);
-    if subject.chars().count() <= budget {
-        return subject.to_string();
+    if clean.chars().count() <= budget {
+        return clean;
     }
-    let kept: String = subject.chars().take(budget.saturating_sub(3)).collect();
+    let kept: String = clean.chars().take(budget.saturating_sub(3)).collect();
     format!("{kept}...")
 }
 
@@ -637,11 +668,15 @@ fn fetch_pr_status(
         return map;
     };
 
+    // Bound the TOTAL fetch time, not just when we stop starting calls: each
+    // call's timeout is whatever budget remains, so a single hung request can't
+    // blow past STATUS_BUDGET. A branch we run out of time for falls back to None.
     let start = Instant::now();
     for (name, number) in prs {
-        let status = if start.elapsed() < STATUS_BUDGET {
+        let remaining = STATUS_BUDGET.saturating_sub(start.elapsed());
+        let status = if remaining > Duration::from_millis(50) {
             github
-                .get_pull_request(&owner, &repo_name, number)
+                .get_pull_request_within(&owner, &repo_name, number, remaining)
                 .ok()
                 .map(|pr| pr.state)
         } else {
@@ -682,7 +717,7 @@ fn stack_json(
                 json!({
                     "number": p.number,
                     "url": p.url,
-                    "status": pr_status.get(kid).copied().flatten().map(pr_state_str),
+                    "status": pr_status.get(kid).copied().flatten().map(super::pr_state_str),
                 })
             });
             json!({
@@ -697,17 +732,12 @@ fn stack_json(
 }
 
 fn commit_json(git: &Git, branch: &str, base: &str) -> Option<Value> {
-    if git.commits_ahead(base, branch).unwrap_or(0) == 0 {
+    if git.ahead_behind(base, branch).unwrap_or((0, 0)).0 == 0 {
         return None;
     }
     git.commit_info(branch).ok().map(|info| {
         json!({ "sha": info.sha, "subject": info.subject, "age": info.age })
     })
-}
-
-/// Lowercase PR state for the JSON contract (matches `stacc status`).
-fn pr_state_str(state: PrState) -> &'static str {
-    super::pr_state_str(state)
 }
 
 // --- Trailing sections -----------------------------------------------------
@@ -826,6 +856,48 @@ mod tests {
         // the right of the leaf `a`.
         let lines = graph(&[("a", "main"), ("b", "main")], "main", "", true);
         assert_eq!(lines, vec!["○ main", "├─┐", "○ │ a", "  ○ b"]);
+    }
+
+    #[test]
+    fn reverse_nested_fork_preserves_the_crossing_sibling_lane() {
+        // main -> {p, q}; p -> {x, y}. When p forks (├─┼─┐), q's open lane sits
+        // between p's two children and must survive as a crossing (┼), not be
+        // severed by the horizontal run. Regression for the reverse pass-through.
+        let lines = graph(
+            &[("p", "main"), ("q", "main"), ("x", "p"), ("y", "p")],
+            "main",
+            "",
+            true,
+        );
+        assert_eq!(
+            lines,
+            vec![
+                "○ main",
+                "├─┐",
+                "○ │ p",
+                "├─┼─┐",
+                "○ │ │ x",
+                "  │ ○ y",
+                "  ○ q",
+            ]
+        );
+        // The crossing glyph is present and q's lane is never dropped.
+        assert!(lines.iter().any(|l| l.contains('┼')), "crossing expected: {lines:?}");
+    }
+
+    #[test]
+    fn pr_status_label_covers_all_states() {
+        assert_eq!(pr_status_label(PrState::Open), "Open");
+        assert_eq!(pr_status_label(PrState::Merged), "Merged");
+        assert_eq!(pr_status_label(PrState::Closed), "Closed");
+    }
+
+    #[test]
+    fn truncate_subject_strips_control_bytes() {
+        // A subject with an embedded ANSI escape and a bell must not leak them.
+        let out = truncate_subject("feat: \x1b[31mred\x1b[0m\x07 done");
+        assert!(!out.contains('\x1b') && !out.contains('\x07'), "got: {out:?}");
+        assert!(out.contains("red") && out.contains("done"));
     }
 
     #[test]

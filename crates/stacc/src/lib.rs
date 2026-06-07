@@ -273,6 +273,15 @@ mod tests {
             expand_aliases(argv(&["stacc", "u"]), &a).unwrap(),
             argv(&["stacc", "up"])
         );
+        // Multi-token log aliases expand to the form, then stop on the builtin.
+        assert_eq!(
+            expand_aliases(argv(&["stacc", "ls", "--stack"]), &a).unwrap(),
+            argv(&["stacc", "log", "short", "--stack"])
+        );
+        assert_eq!(
+            expand_aliases(argv(&["stacc", "ll"]), &a).unwrap(),
+            argv(&["stacc", "log", "long"])
+        );
     }
 
     #[test]
