@@ -974,7 +974,16 @@ fn restack_with_recovery(
     make_op: impl Fn(Vec<String>) -> recovery::Operation,
 ) -> Result<Vec<String>, Error> {
     match ops::restack(git, store, state, order) {
-        Ok(restacked) => Ok(restacked),
+        Ok(outcome) => {
+            if !outcome.skipped.is_empty() {
+                eprintln!(
+                    "warning: skipped {} branch(es) with no git ref: {}. Remove them with `stacc untrack <branch>`.",
+                    outcome.skipped.len(),
+                    outcome.skipped.join(", ")
+                );
+            }
+            Ok(outcome.restacked)
+        }
         Err(ops::OpsError::Conflict { branch, remaining }) => {
             // `ops::restack` already saved state before returning. Write the
             // agent-readable context first (best-effort), then the resume

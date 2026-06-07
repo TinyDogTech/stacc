@@ -174,22 +174,40 @@ pub fn resolve_base(
     base
 }
 
+/// What a restack pass did: the branches it rebased, and any it skipped because
+/// their own ref or their base's ref no longer resolves (a deleted branch still
+/// left in state). Skipping keeps a single dead branch from aborting the pass.
+#[derive(Debug)]
+pub struct RestackOutcome {
+    pub restacked: Vec<String>,
+    pub skipped: Vec<String>,
+}
+
 /// Restack `order` bottom-up, rebasing each branch onto its base's current tip
 /// and updating its recorded base hash in `state`. On a conflict it saves
 /// `state` and returns [`OpsError::Conflict`] with the unfinished queue, leaving
 /// the rebase in progress. The caller MUST persist a continuation (or abort the
 /// rebase) before returning to the user, see `restack_with_recovery`.
+///
+/// A branch whose own ref or whose base's ref no longer resolves is skipped
+/// (not rebased) and collected into [`RestackOutcome::skipped`], so a deleted
+/// branch left in state does not abort the whole pass with a fatal git error.
 pub fn restack(
     git: &Git,
     store: &StateStore,
     state: &mut State,
     order: &[String],
-) -> Result<Vec<String>, OpsError> {
+) -> Result<RestackOutcome, OpsError> {
     let mut restacked = Vec::new();
+    let mut skipped = Vec::new();
     for (idx, branch) in order.iter().enumerate() {
         let Some(base) = state.branches.get(branch).map(|b| b.base.clone()) else {
             continue;
         };
+        if ref_missing(git, branch) || ref_missing(git, &base.name) {
+            skipped.push(branch.clone());
+            continue;
+        }
         let base_tip = git.rev_parse(&base.name)?;
         if git.is_ancestor(&base_tip, branch)? {
             continue; // already on top of its base
@@ -223,7 +241,13 @@ pub fn restack(
         }
         restacked.push(branch.clone());
     }
-    Ok(restacked)
+    Ok(RestackOutcome { restacked, skipped })
+}
+
+/// Whether `name` resolves to no git ref (a clean not-found). A real git error
+/// reads as present, so a transient failure never drops a live branch.
+fn ref_missing(git: &Git, name: &str) -> bool {
+    matches!(git.ref_commit(name), Ok(None))
 }
 
 #[cfg(test)]
@@ -439,7 +463,9 @@ mod tests {
         write_commit(tmp.path(), "m.txt", "m\n", "main moves");
         let new_main = git.rev_parse("main").unwrap();
 
-        let restacked = restack(&git, &store, &mut state, &["a".into(), "b".into()]).unwrap();
+        let restacked = restack(&git, &store, &mut state, &["a".into(), "b".into()])
+            .unwrap()
+            .restacked;
         assert_eq!(restacked, vec!["a", "b"]);
         assert!(git.is_ancestor(&new_main, "a").unwrap());
         assert!(git.is_ancestor("a", "b").unwrap());
@@ -457,7 +483,7 @@ mod tests {
         restack(&git, &store, &mut state, &["a".into(), "b".into()]).unwrap();
         // Second pass: everything already sits on its base, so nothing moves.
         let again = restack(&git, &store, &mut state, &["a".into(), "b".into()]).unwrap();
-        assert!(again.is_empty());
+        assert!(again.restacked.is_empty());
     }
 
     #[test]
@@ -472,9 +498,41 @@ mod tests {
         // the engine must fall back to `merge-base --fork-point`.
         state.branches.get_mut("a").unwrap().base.hash = "1".repeat(40);
 
-        let restacked = restack(&git, &store, &mut state, &["a".into()]).unwrap();
+        let restacked = restack(&git, &store, &mut state, &["a".into()]).unwrap().restacked;
         assert_eq!(restacked, vec!["a"]);
         assert!(git.is_ancestor(&new_main, "a").unwrap());
+    }
+
+    #[test]
+    fn restack_skips_a_branch_with_no_git_ref() {
+        let (tmp, git) = init_repo();
+        let (store, mut state) = linear_stack(&tmp, &git); // a on main, b on a (real)
+        // A tracked branch whose git ref does not exist (a deleted-but-tracked ghost).
+        state.branches.insert(
+            "ghost".to_string(),
+            BranchState {
+                base: Base {
+                    name: "main".into(),
+                    hash: "0".repeat(40),
+                },
+                pr: None,
+            },
+        );
+        // Advance main so the real branches need restacking.
+        run_git(tmp.path(), &["checkout", "-q", "main"]);
+        write_commit(tmp.path(), "m.txt", "m\n", "main moves");
+
+        // The ghost is skipped (not fatal); the real branches still restack.
+        let outcome = restack(
+            &git,
+            &store,
+            &mut state,
+            &["a".into(), "b".into(), "ghost".into()],
+        )
+        .unwrap();
+        assert_eq!(outcome.skipped, vec!["ghost"]);
+        assert!(outcome.restacked.contains(&"a".to_string()), "real branches restack");
+        assert!(git.is_ancestor("main", "a").unwrap());
     }
 
     #[test]
