@@ -59,6 +59,8 @@ pub enum Command {
     Init(InitArgs),
     /// Track the current branch as part of a stack.
     Track(TrackArgs),
+    /// Stop tracking a branch, reparenting its children onto its base.
+    Untrack(UntrackArgs),
     /// Create a new branch stacked on the current one and track it.
     Create(CreateArgs),
     /// Fold staged changes into the current branch, then restack its upstack.
@@ -138,6 +140,13 @@ pub struct TrackArgs {
     /// Branch this one is stacked on (defaults to the trunk).
     #[arg(long)]
     pub base: Option<String>,
+}
+
+/// Arguments for `stacc untrack`.
+#[derive(Debug, clap::Args)]
+pub struct UntrackArgs {
+    /// Branch to untrack (defaults to the current branch).
+    pub branch: Option<String>,
 }
 
 /// Arguments for `stacc create`.

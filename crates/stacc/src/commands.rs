@@ -10,7 +10,7 @@ use stacc_git::Git;
 use stacc_github::{GitHub, NewPullRequest, PrState, PullRequestUpdate};
 use stacc_state::{Base, BranchState, PullRequest, RepoConfig, StateStore};
 
-use crate::cli::{CreateArgs, InitArgs, OutputFormat, RenameArgs, SubmitArgs, TrackArgs};
+use crate::cli::{CreateArgs, InitArgs, OutputFormat, RenameArgs, SubmitArgs, TrackArgs, UntrackArgs};
 use crate::error::Error;
 
 mod auth;
@@ -110,6 +110,69 @@ pub fn track(args: &TrackArgs, format: OutputFormat) -> Result<(), Error> {
             json!({ "status": "tracked", "branch": branch, "base": base })
         ),
         OutputFormat::Pretty => println!("Tracking {branch} (base: {base})"),
+    }
+    Ok(())
+}
+
+/// `stacc untrack`: drop a branch from the stack, reparenting its children onto
+/// the branch's own base so the rest of the stack stays connected. Edits only
+/// stacc state, never the git branch or the remote.
+pub fn untrack(args: &UntrackArgs, format: OutputFormat) -> Result<(), Error> {
+    let git = Git::open(".");
+    let store = StateStore::new(git.clone());
+    let mut state = store.load()?;
+    let repo = state
+        .repo
+        .clone()
+        .ok_or_else(|| Error::Usage("stacc is not initialized; run `stacc init` first".into()))?;
+
+    // Target the named branch, or the current one.
+    let target = match &args.branch {
+        Some(branch) => branch.clone(),
+        None => git.current_branch().map_err(|_| {
+            Error::Usage(
+                "cannot resolve the current branch on a detached HEAD; pass a branch name".into(),
+            )
+        })?,
+    };
+
+    if target == repo.trunk {
+        return Err(Error::Usage(format!(
+            "cannot untrack the trunk branch `{}`",
+            repo.trunk
+        )));
+    }
+    let Some(removed) = state.branches.remove(&target) else {
+        return Err(Error::Usage(format!("branch `{target}` is not tracked")));
+    };
+
+    // Reparent the removed branch's children onto its base.
+    let base = removed.base.name;
+    let mut reparented: Vec<String> = Vec::new();
+    for (name, branch) in &mut state.branches {
+        if branch.base.name == target {
+            branch.base.name.clone_from(&base);
+            reparented.push(name.clone());
+        }
+    }
+    store.save(&state)?;
+
+    match format {
+        OutputFormat::Json => println!(
+            "{}",
+            json!({
+                "status": "untracked",
+                "branch": target,
+                "base": base,
+                "reparented": reparented,
+            })
+        ),
+        OutputFormat::Pretty => {
+            println!("Untracked {target}");
+            if !reparented.is_empty() {
+                println!("  reparented onto {base}: {}", reparented.join(", "));
+            }
+        }
     }
     Ok(())
 }

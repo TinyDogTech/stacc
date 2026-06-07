@@ -18,8 +18,8 @@ use error::Error;
 
 /// Names that stacc always handles itself. These always shadow any user alias.
 const BUILTINS: &[&str] = &[
-    "init", "track", "create", "modify", "log", "status", "submit", "sync", "restack", "move",
-    "rename", "merge", "continue", "abort", "up", "down", "top", "bottom", "checkout", "pr",
+    "init", "track", "untrack", "create", "modify", "log", "status", "submit", "sync", "restack",
+    "move", "rename", "merge", "continue", "abort", "up", "down", "top", "bottom", "checkout", "pr",
     "auth",
 ];
 
@@ -79,6 +79,7 @@ fn dispatch(cli: &Cli) -> Result<(), Error> {
     match &cli.command {
         Command::Init(args) => commands::init(args, cli.global.format),
         Command::Track(args) => commands::track(args, cli.global.format),
+        Command::Untrack(args) => commands::untrack(args, cli.global.format),
         Command::Create(args) => commands::create(args, cli.global.format),
         Command::Modify(args) => commands::modify(args, cli.global.format),
         Command::Log(args) => commands::log(args, cli.global.format, cli.global.color),
