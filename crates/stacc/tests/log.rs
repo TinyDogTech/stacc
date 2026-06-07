@@ -349,6 +349,35 @@ fn log_reverse_and_stack_flags_apply() {
 }
 
 #[test]
+fn log_marks_a_tracked_branch_whose_git_ref_is_gone() {
+    let tmp = repo();
+    let p = tmp.path();
+    assert!(stacc(p, &["init"]).status.success());
+    run_git(p, &["checkout", "-q", "-b", "keep"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "keep1"]);
+    assert!(stacc(p, &["track"]).status.success());
+    run_git(p, &["checkout", "-q", "-b", "gone"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "gone1"]);
+    assert!(stacc(p, &["track", "--base", "keep"]).status.success());
+    // Delete the git branch but leave it tracked in stacc state.
+    run_git(p, &["checkout", "-q", "keep"]);
+    run_git(p, &["branch", "-D", "gone"]);
+
+    let s = String::from_utf8_lossy(&stacc(p, &["log"]).stdout).into_owned();
+    assert!(s.contains("gone (deleted)"), "deleted marker expected: {s}");
+    assert!(!s.contains("gone1"), "a deleted branch shows no commit metadata: {s}");
+    assert!(s.contains("keep1"), "live branches still render metadata: {s}");
+
+    // The marker shows in the short form too.
+    let short = String::from_utf8_lossy(&stacc(p, &["log", "short"]).stdout).into_owned();
+    assert!(short.contains("gone (deleted)"), "short marks deleted too: {short}");
+
+    // JSON flags it.
+    let j = String::from_utf8_lossy(&stacc(p, &["log", "--format", "json"]).stdout).into_owned();
+    assert!(j.contains(r#""deleted":true"#), "JSON deleted flag expected: {j}");
+}
+
+#[test]
 fn log_full_shows_live_pr_status() {
     let tmp = github_repo();
     let p = tmp.path();

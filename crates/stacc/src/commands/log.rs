@@ -137,19 +137,23 @@ pub fn log(args: &LogArgs, format: OutputFormat, color: ColorChoice) -> Result<(
 
     let children = child_map(&visible, branches, &trunk);
 
+    // Tracked branches whose git ref is gone (deleted or merged-and-pruned). We
+    // mark them and skip their metadata + PR fetch, since git can't resolve them.
+    let deleted = missing_branches(&git, &visible, branches, &trunk);
+
     // Live PR status: fetched for JSON and the full pretty form (unless
     // --no-status); the short form is offline by contract.
     let want_status =
         !args.no_status && (format == OutputFormat::Json || args.form().is_none());
     let pr_status = if want_status {
-        fetch_pr_status(&git, &repo, branches, &visible)
+        fetch_pr_status(&git, &repo, branches, &visible, &deleted)
     } else {
         BTreeMap::new()
     };
 
     match format {
         OutputFormat::Json => {
-            let stack = stack_json(&trunk, &children, branches, &git, &pr_status);
+            let stack = stack_json(&trunk, &children, branches, &git, &pr_status, &deleted);
             println!("{}", json!({ "trunk": trunk, "stack": stack }));
         }
         OutputFormat::Pretty => {
@@ -162,6 +166,7 @@ pub fn log(args: &LogArgs, format: OutputFormat, color: ColorChoice) -> Result<(
                 full: args.form().is_none(),
                 pr_status: &pr_status,
                 palette: &palette,
+                deleted: &deleted,
             };
             let lines = if args.reverse {
                 render_reverse(&children, &ctx)
@@ -263,6 +268,23 @@ fn child_map(
     map
 }
 
+/// Visible tracked branches whose local git ref no longer resolves. A git error
+/// (as opposed to a clean "not found") is treated as present, so a transient
+/// failure never mislabels a live branch as deleted.
+fn missing_branches(
+    git: &Git,
+    visible: &BTreeSet<String>,
+    branches: &BTreeMap<String, BranchState>,
+    trunk: &str,
+) -> BTreeSet<String> {
+    visible
+        .iter()
+        .filter(|name| name.as_str() != trunk && branches.contains_key(*name))
+        .filter(|name| matches!(git.ref_commit(name), Ok(None)))
+        .cloned()
+        .collect()
+}
+
 // --- Render ----------------------------------------------------------------
 
 /// The shared inputs both render directions read, bundled so the renderers take
@@ -275,6 +297,7 @@ struct RenderCtx<'a> {
     full: bool,
     pr_status: &'a BTreeMap<String, Option<PrState>>,
     palette: &'a Palette,
+    deleted: &'a BTreeSet<String>,
 }
 
 // Forward render: trunk at the bottom.
@@ -299,8 +322,9 @@ fn render_forward(children: &BTreeMap<String, Vec<String>>, ctx: &RenderCtx) -> 
             }
         }
 
+        let is_deleted = ctx.deleted.contains(node);
         let glyph = glyph_for(node, ctx.current);
-        let lbl = label(node, ctx.current, ctx.full);
+        let lbl = label(node, ctx.current, ctx.full, is_deleted);
         out.push(node_row(&lanes, node_col, glyph, &lbl, ctx.palette.node(node)));
 
         // The lane now seeks this branch's base (trunk closes its lane).
@@ -311,7 +335,7 @@ fn render_forward(children: &BTreeMap<String, Vec<String>>, ctx: &RenderCtx) -> 
         };
 
         if ctx.full {
-            for meta in meta_lines(ctx.git, node, is_trunk, ctx.branches, ctx.pr_status) {
+            for meta in meta_lines(ctx.git, node, is_trunk, is_deleted, ctx.branches, ctx.pr_status) {
                 out.push(cont_row(&lanes, node_col, &ctx.palette.dim(&meta)));
             }
             if i != last {
@@ -336,8 +360,9 @@ fn render_reverse(children: &BTreeMap<String, Vec<String>>, ctx: &RenderCtx) -> 
         let seekers = seekers_of(&lanes, node);
         let node_col = column_for(&mut lanes, &seekers);
 
+        let is_deleted = ctx.deleted.contains(node);
         let glyph = glyph_for(node, ctx.current);
-        let lbl = label(node, ctx.current, ctx.full);
+        let lbl = label(node, ctx.current, ctx.full, is_deleted);
         out.push(node_row(&lanes, node_col, glyph, &lbl, ctx.palette.node(node)));
 
         // This node's children continue below it: the first inherits this
@@ -362,7 +387,7 @@ fn render_reverse(children: &BTreeMap<String, Vec<String>>, ctx: &RenderCtx) -> 
             out.push(connector_row(&lanes, node_col, &extra, '┐'));
         }
         if ctx.full {
-            for meta in meta_lines(ctx.git, node, is_trunk, ctx.branches, ctx.pr_status) {
+            for meta in meta_lines(ctx.git, node, is_trunk, is_deleted, ctx.branches, ctx.pr_status) {
                 out.push(cont_row(&lanes, node_col, &ctx.palette.dim(&meta)));
             }
             if i != last {
@@ -441,8 +466,10 @@ fn glyph_for(node: &str, current: &str) -> char {
     }
 }
 
-fn label(node: &str, current: &str, full: bool) -> String {
-    if full && node == current {
+fn label(node: &str, current: &str, full: bool, deleted: bool) -> String {
+    if deleted {
+        format!("{node} (deleted)")
+    } else if full && node == current {
         format!("{node} (current)")
     } else {
         node.to_string()
@@ -564,10 +591,16 @@ fn meta_lines(
     git: &Git,
     node: &str,
     is_trunk: bool,
+    is_deleted: bool,
     branches: &BTreeMap<String, BranchState>,
     pr_status: &BTreeMap<String, Option<PrState>>,
 ) -> Vec<String> {
     let mut lines = Vec::new();
+    // A branch whose git ref is gone has no resolvable commits; show the bare
+    // `(deleted)` name with no metadata block.
+    if is_deleted {
+        return lines;
+    }
     if is_trunk {
         if let Ok(info) = git.commit_info(node) {
             if !info.age.is_empty() {
@@ -646,10 +679,12 @@ fn fetch_pr_status(
     repo: &RepoConfig,
     branches: &BTreeMap<String, BranchState>,
     visible: &BTreeSet<String>,
+    deleted: &BTreeSet<String>,
 ) -> BTreeMap<String, Option<PrState>> {
     let mut map = BTreeMap::new();
     let prs: Vec<(String, u64)> = visible
         .iter()
+        .filter(|name| !deleted.contains(*name))
         .filter_map(|name| {
             branches
                 .get(name)
@@ -700,19 +735,22 @@ fn build_client(git: &Git, repo: &RepoConfig) -> Option<(GitHub, String, String)
 
 /// The stack tree for `--format json`. `pr` is an object
 /// `{number, url, status}` (status null when unavailable) and each branch with
-/// its own commits carries a `commit {sha, subject, age}`.
+/// its own commits carries a `commit {sha, subject, age}`. A branch whose git
+/// ref is gone carries `"deleted": true` and no `commit`.
 fn stack_json(
     node: &str,
     children: &BTreeMap<String, Vec<String>>,
     branches: &BTreeMap<String, BranchState>,
     git: &Git,
     pr_status: &BTreeMap<String, Option<PrState>>,
+    deleted: &BTreeSet<String>,
 ) -> Vec<Value> {
     let Some(kids) = children.get(node) else {
         return Vec::new();
     };
     kids.iter()
         .map(|kid| {
+            let is_deleted = deleted.contains(kid);
             let pr = branches.get(kid).and_then(|b| b.pr.as_ref()).map(|p| {
                 json!({
                     "number": p.number,
@@ -720,13 +758,18 @@ fn stack_json(
                     "status": pr_status.get(kid).copied().flatten().map(super::pr_state_str),
                 })
             });
-            json!({
+            let commit = if is_deleted { None } else { commit_json(git, kid, node) };
+            let mut value = json!({
                 "name": kid,
                 "base": node,
                 "pr": pr,
-                "commit": commit_json(git, kid, node),
-                "children": stack_json(kid, children, branches, git, pr_status),
-            })
+                "commit": commit,
+                "children": stack_json(kid, children, branches, git, pr_status, deleted),
+            });
+            if is_deleted {
+                value["deleted"] = Value::Bool(true);
+            }
+            value
         })
         .collect()
 }
@@ -814,6 +857,7 @@ mod tests {
         let children = child_map(&visible, &branches, trunk);
         let git = Git::open(".");
         let pr = BTreeMap::new();
+        let deleted = BTreeSet::new();
         let palette = Palette::build(false, &branches, &visible, trunk);
         let ctx = RenderCtx {
             branches: &branches,
@@ -823,6 +867,7 @@ mod tests {
             full: false,
             pr_status: &pr,
             palette: &palette,
+            deleted: &deleted,
         };
         if reverse {
             render_reverse(&children, &ctx)
@@ -971,6 +1016,7 @@ mod tests {
         let children = child_map(&visible, &branches, "main");
         let git = Git::open(".");
         let pr = BTreeMap::new();
+        let deleted = BTreeSet::new();
         let on = Palette::build(true, &branches, &visible, "main");
         let ctx = RenderCtx {
             branches: &branches,
@@ -980,6 +1026,7 @@ mod tests {
             full: false,
             pr_status: &pr,
             palette: &on,
+            deleted: &deleted,
         };
         let joined = render_forward(&children, &ctx).join("\n");
         assert!(joined.contains("\x1b["), "expected ANSI codes: {joined:?}");

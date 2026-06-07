@@ -162,8 +162,9 @@ stacc log --format json
 
 Each branch carries its `pr` (an object `{number, url, status}`, or `null`
 before submit) and its `commit` (or `null` when the branch adds none of its
-own). Pass `--no-status` to skip the live PR lookup, or `--stack` to scope the
-output to the current branch's stack.
+own). A branch whose git ref no longer exists also carries `"deleted": true`;
+clear it with `stacc untrack`. Pass `--no-status` to skip the live PR lookup, or
+`--stack` to scope the output to the current branch's stack.
 
 Reach for `stacc <command> --help` for the full flags of any command.
 
