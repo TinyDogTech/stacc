@@ -179,6 +179,89 @@ fn sync_keeps_a_missing_ref_branch_with_an_open_pr() {
 }
 
 #[test]
+fn sync_prunes_multiple_missing_ref_branches() {
+    let tmp = repo();
+    let p = tmp.path();
+    assert!(stacc(p, &["init"]).status.success());
+    for b in ["ghost-a", "ghost-b"] {
+        run_git(p, &["checkout", "-q", "main"]);
+        run_git(p, &["checkout", "-q", "-b", b]);
+        run_git(p, &["commit", "-q", "--allow-empty", "-m", b]);
+        assert!(stacc(p, &["track"]).status.success());
+        run_git(p, &["checkout", "-q", "main"]);
+        run_git(p, &["branch", "-D", b]);
+    }
+
+    let out = stacc(p, &["sync", "--offline", "--format", "json"]);
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let s = String::from_utf8_lossy(&out.stdout).into_owned();
+    // Both pruned, in sorted (BTreeSet) order.
+    assert!(s.contains(r#""pruned":["ghost-a","ghost-b"]"#), "both pruned, sorted: {s}");
+
+    let j = String::from_utf8_lossy(&stacc(p, &["log", "--format", "json"]).stdout).into_owned();
+    assert!(!j.contains("ghost-a") && !j.contains("ghost-b"), "both dropped: {j}");
+}
+
+#[test]
+fn sync_reports_a_merged_and_gone_branch_as_merged_not_pruned() {
+    let tmp = repo();
+    let p = tmp.path();
+    assert!(stacc(p, &["init"]).status.success());
+    run_git(p, &["checkout", "-q", "-b", "feature"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "f1"]);
+    // Seed a PR, then delete the git ref: a merged PR whose branch ref is gone.
+    let store = StateStore::new(Git::open(p));
+    let mut state = store.load().unwrap();
+    state.branches.insert(
+        "feature".to_string(),
+        BranchState {
+            base: Base { name: "main".into(), hash: "h".into() },
+            pr: Some(PullRequest { number: 3, url: None }),
+        },
+    );
+    store.save(&state).unwrap();
+    run_git(p, &["checkout", "-q", "main"]);
+    run_git(p, &["branch", "-D", "feature"]);
+
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(httpmock::Method::GET)
+            .path("/repos/stacc-sandbox/example/pulls/3");
+        then.status(200).json_body(serde_json::json!({
+            "number": 3, "html_url": "u", "state": "closed", "merged": true,
+        }));
+    });
+
+    let out = stacc_env(
+        p,
+        &["sync", "--offline", "--format", "json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let s = String::from_utf8_lossy(&out.stdout).into_owned();
+    // Reported as merged (via PR detection), not double-counted as pruned.
+    assert!(s.contains(r#""merged":["feature"]"#), "reported merged: {s}");
+    assert!(s.contains(r#""pruned":[]"#), "not pruned: {s}");
+}
+
+#[test]
+fn sync_pretty_reports_pruned() {
+    let tmp = repo();
+    let p = tmp.path();
+    assert!(stacc(p, &["init"]).status.success());
+    run_git(p, &["checkout", "-q", "-b", "ghost"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "g1"]);
+    assert!(stacc(p, &["track"]).status.success());
+    run_git(p, &["checkout", "-q", "main"]);
+    run_git(p, &["branch", "-D", "ghost"]);
+
+    let out = stacc(p, &["sync", "--offline"]); // pretty output
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let s = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(s.contains("Pruned (no git ref): ghost"), "pretty prune line: {s}");
+}
+
+#[test]
 fn sync_requires_init() {
     let tmp = repo();
     let out = stacc(tmp.path(), &["sync", "--format", "json"]);

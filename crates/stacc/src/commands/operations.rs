@@ -331,9 +331,9 @@ fn detect_merged(
     Ok(merged)
 }
 
-/// Reconcile a known-merged set and restack the stack, the shared core of `sync`
-/// (which detects `merged` via GitHub) and `merge` (which already knows what it
-/// merged): re-parent the merged branches' children onto the nearest surviving
+/// Reconcile a caller-supplied drop set and restack the stack, the shared core
+/// of `sync` (merged-plus-pruned branches) and `merge` (the branches it just
+/// merged): re-parent the dropped branches' children onto the nearest surviving
 /// base, drop them, fast-forward the trunk (unless `offline`), then restack the
 /// remainder bottom-up. Persists state and best-effort pushes it.
 fn reconcile_with(
@@ -341,16 +341,16 @@ fn reconcile_with(
     store: &StateStore,
     state: &mut State,
     repo: &RepoConfig,
-    merged: BTreeSet<String>,
+    dropped: BTreeSet<String>,
     offline: bool,
 ) -> Result<SyncOutcome, Error> {
-    // Re-parent children of merged branches onto the nearest surviving base.
+    // Re-parent children of dropped branches onto the nearest surviving base.
     let mut reparented: Vec<(String, String)> = Vec::new();
     for (name, branch) in &state.branches {
-        if merged.contains(name) {
+        if dropped.contains(name) {
             continue;
         }
-        let new_base = ops::resolve_base(&state.branches, &merged, branch.base.name.clone());
+        let new_base = ops::resolve_base(&state.branches, &dropped, branch.base.name.clone());
         if new_base != branch.base.name {
             reparented.push((name.clone(), new_base));
         }
@@ -360,14 +360,14 @@ fn reconcile_with(
             branch.base.name.clone_from(new_base);
         }
     }
-    for name in &merged {
+    for name in &dropped {
         state.branches.remove(name);
     }
 
     // Persist the dropped/re-parented branches before the fallible fetch and
     // restack, so PRs already merged on GitHub are not stranded in local state
     // if the fetch or restack then fails (a re-run reconciles from here).
-    if !merged.is_empty() {
+    if !dropped.is_empty() {
         store.save(state)?;
     }
 
@@ -390,7 +390,7 @@ fn reconcile_with(
     store.save(state)?;
     finish_sync(git, store, repo);
     Ok(SyncOutcome {
-        merged,
+        merged: dropped,
         reparented,
         restacked,
     })
