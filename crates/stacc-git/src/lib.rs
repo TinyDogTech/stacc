@@ -14,6 +14,17 @@ pub struct Git {
     dir: PathBuf,
 }
 
+/// A commit's display metadata: abbreviated hash, subject, and relative age.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitInfo {
+    /// Abbreviated commit hash (`%h`), e.g. `bd755054`.
+    pub sha: String,
+    /// Subject line (`%s`).
+    pub subject: String,
+    /// Committer date, relative (`%cr`), e.g. `2 hours ago`.
+    pub age: String,
+}
+
 impl Git {
     pub fn open(dir: impl Into<PathBuf>) -> Self {
         Self { dir: dir.into() }
@@ -26,6 +37,11 @@ impl Git {
         // credentials (fail fast instead).
         cmd.env("GIT_EDITOR", "true");
         cmd.env("GIT_TERMINAL_PROMPT", "0");
+        // Force the C locale so machine-read output (notably `log`'s relative
+        // date `%cr`) is stable English regardless of the user's locale. Every
+        // current caller parses exit codes, hashes, refnames, or `--format`
+        // codes, none of which depend on locale, so this only stabilizes output.
+        cmd.env("LC_ALL", "C");
         cmd
     }
 
@@ -382,6 +398,41 @@ impl Git {
         self.run(&["log", "-1", "--format=%s", rev])
     }
 
+    /// Display metadata (short hash, subject, relative age) of `rev`'s tip.
+    /// The three fields are NUL-delimited (`%x00`) so a subject containing any
+    /// other byte round-trips intact; `LC_ALL=C` (set in `command`) keeps the
+    /// relative age in stable English.
+    pub fn commit_info(&self, rev: &str) -> Result<CommitInfo, GitError> {
+        let out = self.run(&["log", "-1", "--format=%h%x00%s%x00%cr", rev])?;
+        let mut parts = out.splitn(3, '\0');
+        Ok(CommitInfo {
+            sha: parts.next().unwrap_or_default().to_string(),
+            subject: parts.next().unwrap_or_default().to_string(),
+            age: parts.next().unwrap_or_default().to_string(),
+        })
+    }
+
+    /// How many commits `branch` has that `base` does not (`base..branch`). Zero
+    /// means `branch` adds nothing of its own (an empty stacked branch), which
+    /// `log` renders as a bare name with no commit metadata.
+    pub fn commits_ahead(&self, base: &str, branch: &str) -> Result<usize, GitError> {
+        let range = format!("{base}..{branch}");
+        let out = self.run(&["rev-list", "--count", &range])?;
+        Ok(out.parse().unwrap_or(0))
+    }
+
+    /// The local branch names (`git branch`), used to surface branches stacc is
+    /// not tracking under `log --show-untracked`.
+    pub fn local_branches(&self) -> Result<Vec<String>, GitError> {
+        Ok(self
+            .run(&["branch", "--format=%(refname:short)"])?
+            .lines()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string)
+            .collect())
+    }
+
     /// The body (the message after the subject) of `rev`'s tip commit.
     pub fn commit_body(&self, rev: &str) -> Result<String, GitError> {
         self.run(&["log", "-1", "--format=%b", rev])
@@ -711,5 +762,46 @@ mod tests {
         let (_tmp, repo) = init_repo();
         assert_eq!(repo.symbolic_ref("HEAD").unwrap().as_deref(), Some("main"));
         assert_eq!(repo.symbolic_ref("refs/heads/main").unwrap(), None);
+    }
+
+    #[test]
+    fn commit_info_returns_sha_subject_and_age() {
+        let (tmp, repo) = init_repo();
+        write_commit(tmp.path(), "f.txt", "x\n", "feat: do the thing");
+        let info = repo.commit_info("HEAD").unwrap();
+        let full = repo.rev_parse("HEAD").unwrap();
+        assert!(full.starts_with(&info.sha), "{} not a prefix of {full}", info.sha);
+        assert!(!info.sha.is_empty() && info.sha.len() < 40, "abbreviated: {}", info.sha);
+        assert_eq!(info.subject, "feat: do the thing");
+        // Relative age is English (LC_ALL=C), e.g. "0 seconds ago"; assert the
+        // shape, not an exact value.
+        assert!(info.age.ends_with("ago"), "age was {:?}", info.age);
+    }
+
+    #[test]
+    fn commit_info_subject_with_pipe_and_tab_round_trips() {
+        let (tmp, repo) = init_repo();
+        // A subject containing the characters a naive delimiter would split on.
+        write_commit(tmp.path(), "f.txt", "x\n", "fix: a | b\tc");
+        assert_eq!(repo.commit_info("HEAD").unwrap().subject, "fix: a | b\tc");
+    }
+
+    #[test]
+    fn commits_ahead_counts_branch_only_commits() {
+        let (tmp, repo) = init_repo();
+        let path = tmp.path();
+        run_git(path, &["checkout", "-q", "-b", "empty"]); // no commits beyond main
+        assert_eq!(repo.commits_ahead("main", "empty").unwrap(), 0);
+        write_commit(path, "f.txt", "x\n", "own work");
+        assert_eq!(repo.commits_ahead("main", "empty").unwrap(), 1);
+    }
+
+    #[test]
+    fn local_branches_lists_all_branches() {
+        let (tmp, repo) = init_repo();
+        run_git(tmp.path(), &["branch", "side"]);
+        let mut branches = repo.local_branches().unwrap();
+        branches.sort();
+        assert_eq!(branches, vec!["main".to_string(), "side".to_string()]);
     }
 }
