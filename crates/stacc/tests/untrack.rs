@@ -76,6 +76,72 @@ fn untrack_reparents_children_onto_the_base() {
 }
 
 #[test]
+fn untrack_reparents_all_children_and_leaves_grandchildren_attached() {
+    let tmp = repo();
+    let p = tmp.path();
+    assert!(stacc(p, &["init"]).status.success());
+    // main <- a <- { b <- d, c }
+    run_git(p, &["checkout", "-q", "-b", "a"]);
+    assert!(stacc(p, &["track"]).status.success());
+    run_git(p, &["checkout", "-q", "-b", "b"]);
+    assert!(stacc(p, &["track", "--base", "a"]).status.success());
+    run_git(p, &["checkout", "-q", "-b", "d"]);
+    assert!(stacc(p, &["track", "--base", "b"]).status.success());
+    run_git(p, &["checkout", "-q", "a"]);
+    run_git(p, &["checkout", "-q", "-b", "c"]);
+    assert!(stacc(p, &["track", "--base", "a"]).status.success());
+
+    let out = stacc(p, &["untrack", "a", "--format", "json"]);
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let s = String::from_utf8_lossy(&out.stdout).into_owned();
+    // Both direct children are reparented (assert membership, not array order).
+    assert!(s.contains(r#""reparented""#) && s.contains(r#""b""#) && s.contains(r#""c""#), "got: {s}");
+
+    // b and c now sit on main; the grandchild d stays attached to b; a is gone.
+    // (JSON object keys serialize alphabetically, so assert on each field, not
+    // on adjacency.)
+    let j = String::from_utf8_lossy(&stacc(p, &["log", "--format", "json"]).stdout).into_owned();
+    assert!(!j.contains(r#""name":"a""#), "a should be gone: {j}");
+    assert!(!j.contains(r#""base":"a""#), "nothing should still base on a: {j}");
+    assert!(j.contains(r#""base":"b""#), "grandchild d stays on b: {j}");
+    assert!(
+        j.contains(r#""name":"b""#) && j.contains(r#""name":"c""#) && j.contains(r#""name":"d""#),
+        "b, c, d all present: {j}"
+    );
+}
+
+#[test]
+fn untrack_pretty_output_reports_reparenting_only_when_there_is_a_child() {
+    let tmp = repo();
+    let p = tmp.path();
+    assert!(stacc(p, &["init"]).status.success());
+    run_git(p, &["checkout", "-q", "-b", "a"]);
+    assert!(stacc(p, &["track"]).status.success());
+    run_git(p, &["checkout", "-q", "-b", "b"]);
+    assert!(stacc(p, &["track", "--base", "a"]).status.success());
+
+    // Untracking a parent reports the reparented child.
+    let parent = String::from_utf8_lossy(&stacc(p, &["untrack", "a"]).stdout).into_owned();
+    assert!(parent.contains("Untracked a"), "got: {parent}");
+    assert!(parent.contains("reparented onto main: b"), "got: {parent}");
+
+    // Untracking a leaf (b is now on main) reports no reparenting.
+    let leaf = String::from_utf8_lossy(&stacc(p, &["untrack", "b"]).stdout).into_owned();
+    assert!(leaf.contains("Untracked b"), "got: {leaf}");
+    assert!(!leaf.contains("reparented onto"), "leaf has no children: {leaf}");
+}
+
+#[test]
+fn untrack_requires_init() {
+    let tmp = repo();
+    let p = tmp.path();
+    let out = stacc(p, &["untrack", "feature", "--format", "json"]);
+    assert!(!out.status.success());
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("is not initialized"), "got: {s}");
+}
+
+#[test]
 fn untrack_refuses_the_trunk() {
     let tmp = repo();
     let p = tmp.path();
