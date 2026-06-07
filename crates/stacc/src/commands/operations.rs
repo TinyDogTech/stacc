@@ -263,15 +263,39 @@ pub fn sync(args: &SyncArgs, format: OutputFormat) -> Result<(), Error> {
     }
 
     let merged = detect_merged(&git, &state, &repo)?;
-    let outcome = reconcile_with(&git, &store, &mut state, &repo, merged, args.offline)?;
+    // Prune tracked branches whose git ref is gone and which carry no PR. (A
+    // branch with a PR is governed by merge-detection above: a merged PR drops
+    // it, an open/closed one keeps it, so an in-flight branch is never silently
+    // pruned.) `--no-prune` opts out.
+    let pruned = if args.no_prune {
+        BTreeSet::new()
+    } else {
+        missing_ref_branches(&git, &state)
+    };
+    let drop: BTreeSet<String> = merged.union(&pruned).cloned().collect();
+    let outcome = reconcile_with(&git, &store, &mut state, &repo, drop, args.offline)?;
     report_sync(
         format,
         "sync",
-        &outcome.merged,
+        &merged,
+        &pruned,
         &outcome.reparented,
         &outcome.restacked,
     );
     Ok(())
+}
+
+/// Tracked branches whose local git ref is gone and which carry no PR, so `sync`
+/// can prune the dead state. Branches with a PR are deliberately excluded: they
+/// flow through merge-detection instead, which keeps an open/closed PR's branch.
+fn missing_ref_branches(git: &Git, state: &State) -> BTreeSet<String> {
+    state
+        .branches
+        .iter()
+        .filter(|(_, b)| b.pr.is_none())
+        .filter(|(name, _)| git.ref_missing(name))
+        .map(|(name, _)| name.clone())
+        .collect()
 }
 
 /// What a reconcile pass did: the merged branches it dropped, the children it
@@ -929,7 +953,14 @@ fn continue_op(
 
     match &op {
         recovery::Operation::Sync { .. } => {
-            report_sync(format, op.tag(), &BTreeSet::new(), &[], &restacked);
+            report_sync(
+                format,
+                op.tag(),
+                &BTreeSet::new(),
+                &BTreeSet::new(),
+                &[],
+                &restacked,
+            );
         }
         // A resumed modify carries its branch, so JSON gets the same
         // {op,branch,sha,restacked} shape as the direct command, minus `amended`
@@ -1038,12 +1069,14 @@ fn report_sync(
     format: OutputFormat,
     op: &str,
     merged: &BTreeSet<String>,
+    pruned: &BTreeSet<String>,
     reparented: &[(String, String)],
     restacked: &[String],
 ) {
     match format {
         OutputFormat::Json => {
             let merged_list: Vec<&String> = merged.iter().collect();
+            let pruned_list: Vec<&String> = pruned.iter().collect();
             let reparented_list: Vec<Value> = reparented
                 .iter()
                 .map(|(branch, base)| json!({ "branch": branch, "base": base }))
@@ -1053,17 +1086,22 @@ fn report_sync(
                 json!({
                     "op": op,
                     "merged": merged_list,
+                    "pruned": pruned_list,
                     "reparented": reparented_list,
                     "restacked": restacked,
                 })
             );
         }
         OutputFormat::Pretty => {
-            if merged.is_empty() && reparented.is_empty() && restacked.is_empty() {
+            if merged.is_empty() && pruned.is_empty() && reparented.is_empty() && restacked.is_empty()
+            {
                 println!("Already up to date.");
             } else {
                 for name in merged {
                     println!("Merged, untracked: {name}");
+                }
+                for name in pruned {
+                    println!("Pruned (no git ref): {name}");
                 }
                 for (name, base) in reparented {
                     println!("Re-parented {name} -> {base}");

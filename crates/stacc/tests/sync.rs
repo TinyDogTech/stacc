@@ -87,6 +87,98 @@ fn sync_is_noop_without_prs() {
 }
 
 #[test]
+fn sync_prunes_a_branch_whose_git_ref_is_gone() {
+    let tmp = repo();
+    let p = tmp.path();
+    assert!(stacc(p, &["init"]).status.success());
+    run_git(p, &["checkout", "-q", "-b", "ghost"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "g1"]);
+    assert!(stacc(p, &["track"]).status.success());
+    run_git(p, &["checkout", "-q", "-b", "child"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "c1"]);
+    assert!(stacc(p, &["track", "--base", "ghost"]).status.success());
+    // Delete ghost's git ref: tracked, no ref, no PR.
+    run_git(p, &["checkout", "-q", "main"]);
+    run_git(p, &["branch", "-D", "ghost"]);
+
+    let out = stacc(p, &["sync", "--offline", "--format", "json"]);
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let s = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(s.contains(r#""pruned":["ghost"]"#), "pruned reported: {s}");
+
+    // ghost is gone from state; child reparented off it onto main.
+    let j = String::from_utf8_lossy(&stacc(p, &["log", "--format", "json"]).stdout).into_owned();
+    assert!(!j.contains(r#""name":"ghost""#), "ghost dropped: {j}");
+    assert!(j.contains(r#""name":"child""#), "child kept: {j}");
+    assert!(!j.contains(r#""base":"ghost""#), "child no longer bases on ghost: {j}");
+}
+
+#[test]
+fn sync_no_prune_keeps_a_branch_whose_git_ref_is_gone() {
+    let tmp = repo();
+    let p = tmp.path();
+    assert!(stacc(p, &["init"]).status.success());
+    run_git(p, &["checkout", "-q", "-b", "ghost"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "g1"]);
+    assert!(stacc(p, &["track"]).status.success());
+    run_git(p, &["checkout", "-q", "main"]);
+    run_git(p, &["branch", "-D", "ghost"]);
+
+    let out = stacc(p, &["sync", "--offline", "--no-prune", "--format", "json"]);
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let s = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(s.contains(r#""pruned":[]"#), "nothing pruned under --no-prune: {s}");
+
+    let j = String::from_utf8_lossy(&stacc(p, &["log", "--format", "json"]).stdout).into_owned();
+    assert!(j.contains(r#""name":"ghost""#), "ghost kept under --no-prune: {j}");
+}
+
+#[test]
+fn sync_keeps_a_missing_ref_branch_with_an_open_pr() {
+    let tmp = repo();
+    let p = tmp.path();
+    assert!(stacc(p, &["init"]).status.success());
+    run_git(p, &["checkout", "-q", "-b", "feature"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "f1"]);
+    // Seed a PR, then delete the git ref: a missing ref but a recorded PR.
+    let store = StateStore::new(Git::open(p));
+    let mut state = store.load().unwrap();
+    state.branches.insert(
+        "feature".to_string(),
+        BranchState {
+            base: Base { name: "main".into(), hash: "h".into() },
+            pr: Some(PullRequest { number: 9, url: None }),
+        },
+    );
+    store.save(&state).unwrap();
+    run_git(p, &["checkout", "-q", "main"]);
+    run_git(p, &["branch", "-D", "feature"]);
+
+    // GitHub: PR 9 is still open, so the branch must not be dropped.
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(httpmock::Method::GET)
+            .path("/repos/stacc-sandbox/example/pulls/9");
+        then.status(200).json_body(serde_json::json!({
+            "number": 9, "html_url": "u", "state": "open", "merged": false,
+        }));
+    });
+
+    let out = stacc_env(
+        p,
+        &["sync", "--offline", "--format", "json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let s = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(s.contains(r#""pruned":[]"#), "open-PR branch must not be pruned: {s}");
+    assert!(s.contains(r#""merged":[]"#), "open PR is not merged: {s}");
+
+    let j = String::from_utf8_lossy(&stacc(p, &["log", "--format", "json"]).stdout).into_owned();
+    assert!(j.contains(r#""name":"feature""#), "open-PR branch kept: {j}");
+}
+
+#[test]
 fn sync_requires_init() {
     let tmp = repo();
     let out = stacc(tmp.path(), &["sync", "--format", "json"]);
