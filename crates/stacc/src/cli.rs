@@ -170,12 +170,67 @@ pub struct StepsArgs {
     pub steps: usize,
 }
 
+/// Which form `stacc log` renders.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum LogForm {
+    /// One row per branch: the graph without per-branch metadata.
+    #[value(alias = "s")]
+    Short,
+    /// Git's own commit history for the stack (`git log --graph`).
+    #[value(alias = "l")]
+    Long,
+}
+
 /// Arguments for `stacc log`.
+// Independent CLI flags are naturally booleans; the count is a surface, not a
+// data-modeling smell.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, clap::Args)]
 pub struct LogArgs {
-    /// One compact line per branch instead of the indented graph.
+    /// Form to render: omit for the full graph, `short` for one row per branch,
+    /// `long` for git's commit history.
+    #[arg(value_enum)]
+    pub form: Option<LogForm>,
+
+    /// Limit to the current branch's stack (its ancestors and descendants).
     #[arg(long)]
+    pub stack: bool,
+
+    /// Limit to N levels around the current branch (implies `--stack`).
+    #[arg(long, value_name = "N")]
+    pub steps: Option<usize>,
+
+    /// Order the trunk on top instead of at the bottom.
+    #[arg(long)]
+    pub reverse: bool,
+
+    /// Also list local branches stacc is not tracking.
+    #[arg(long)]
+    pub show_untracked: bool,
+
+    /// Skip the live PR-status fetch (offline, faster).
+    #[arg(long, alias = "offline")]
+    pub no_status: bool,
+
+    /// Deprecated alias for the `short` form.
+    #[arg(long, hide = true)]
     pub short: bool,
+}
+
+impl LogArgs {
+    /// The effective form, honoring the deprecated `--short` flag.
+    pub fn form(&self) -> Option<LogForm> {
+        self.form.or(if self.short {
+            Some(LogForm::Short)
+        } else {
+            None
+        })
+    }
+
+    /// Whether scoping to the current branch's stack was requested.
+    pub fn scoped(&self) -> bool {
+        self.stack || self.steps.is_some()
+    }
 }
 
 /// Arguments for `stacc checkout`.

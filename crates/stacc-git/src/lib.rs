@@ -421,6 +421,17 @@ impl Git {
         Ok(out.parse().unwrap_or(0))
     }
 
+    /// Git's own graph history for the given branch `tips`, excluding the
+    /// trunk's history (`git log --graph --oneline --decorate <tips> --not
+    /// <trunk>`). Backs `stacc log long`.
+    pub fn log_graph(&self, tips: &[&str], trunk: &str) -> Result<String, GitError> {
+        let mut args = vec!["log", "--graph", "--oneline", "--decorate"];
+        args.extend(tips.iter().copied());
+        args.push("--not");
+        args.push(trunk);
+        self.run(&args)
+    }
+
     /// The local branch names (`git branch`), used to surface branches stacc is
     /// not tracking under `log --show-untracked`.
     pub fn local_branches(&self) -> Result<Vec<String>, GitError> {
