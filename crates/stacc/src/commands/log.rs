@@ -268,8 +268,8 @@ fn child_map(
     map
 }
 
-/// Visible tracked branches whose local git ref no longer resolves. A git error
-/// (as opposed to a clean "not found") is treated as present, so a transient
+/// Visible tracked branches whose local git ref no longer resolves. `ref_missing`
+/// treats a git error (vs a clean "not found") as present, so a transient
 /// failure never mislabels a live branch as deleted.
 fn missing_branches(
     git: &Git,
@@ -280,7 +280,7 @@ fn missing_branches(
     visible
         .iter()
         .filter(|name| name.as_str() != trunk && branches.contains_key(*name))
-        .filter(|name| matches!(git.ref_commit(name), Ok(None)))
+        .filter(|name| git.ref_missing(name))
         .cloned()
         .collect()
 }

@@ -204,7 +204,7 @@ pub fn restack(
         let Some(base) = state.branches.get(branch).map(|b| b.base.clone()) else {
             continue;
         };
-        if ref_missing(git, branch) || ref_missing(git, &base.name) {
+        if git.ref_missing(branch) || git.ref_missing(&base.name) {
             skipped.push(branch.clone());
             continue;
         }
@@ -242,12 +242,6 @@ pub fn restack(
         restacked.push(branch.clone());
     }
     Ok(RestackOutcome { restacked, skipped })
-}
-
-/// Whether `name` resolves to no git ref (a clean not-found). A real git error
-/// reads as present, so a transient failure never drops a live branch.
-fn ref_missing(git: &Git, name: &str) -> bool {
-    matches!(git.ref_commit(name), Ok(None))
 }
 
 #[cfg(test)]
@@ -533,6 +527,57 @@ mod tests {
         assert_eq!(outcome.skipped, vec!["ghost"]);
         assert!(outcome.restacked.contains(&"a".to_string()), "real branches restack");
         assert!(git.is_ancestor("main", "a").unwrap());
+    }
+
+    #[test]
+    fn restack_skips_a_branch_whose_base_ref_is_gone() {
+        let (tmp, git) = init_repo();
+        let (store, mut state) = linear_stack(&tmp, &git); // a on main, b on a (real)
+        // Delete `a`'s git ref (the base of `b`); `b`'s own ref survives.
+        run_git(tmp.path(), &["checkout", "-q", "main"]);
+        run_git(tmp.path(), &["branch", "-D", "a"]);
+
+        let outcome = restack(&git, &store, &mut state, &["a".into(), "b".into()]).unwrap();
+        // `b` is skipped because its base `a` no longer resolves (the missing-base leg).
+        assert!(
+            outcome.skipped.contains(&"b".to_string()),
+            "b skipped via missing base: {:?}",
+            outcome.skipped
+        );
+        assert!(outcome.restacked.is_empty());
+    }
+
+    #[test]
+    fn restack_conflict_queue_excludes_a_preceding_skipped_ghost() {
+        let (tmp, git) = init_repo();
+        let (store, mut state) = linear_stack(&tmp, &git);
+        // A ghost (no git ref) tracked ahead of the conflict in the queue.
+        state.branches.insert(
+            "ghost".to_string(),
+            BranchState {
+                base: Base {
+                    name: "main".into(),
+                    hash: "0".repeat(40),
+                },
+                pr: None,
+            },
+        );
+        // Make `a` conflict with main on a shared file.
+        write_commit(tmp.path(), "a.txt", "a-conflict\n", "a edits shared");
+        run_git(tmp.path(), &["checkout", "-q", "main"]);
+        write_commit(tmp.path(), "a.txt", "main-conflict\n", "main edits shared");
+
+        let err = restack(&git, &store, &mut state, &["ghost".into(), "a".into(), "b".into()])
+            .unwrap_err();
+        match err {
+            OpsError::Conflict { branch, remaining } => {
+                assert_eq!(branch, "a");
+                // The ghost is consumed by the skip, not stranded in the resume queue.
+                assert_eq!(remaining, vec!["a", "b"]);
+            }
+            other => panic!("expected conflict, got {other:?}"),
+        }
+        git.rebase_abort().unwrap();
     }
 
     #[test]
