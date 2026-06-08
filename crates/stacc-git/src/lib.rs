@@ -784,6 +784,21 @@ mod tests {
     }
 
     #[test]
+    fn remote_url_returns_the_canonical_url_not_the_insteadof_rewrite() {
+        let (tmp, repo) = init_repo();
+        let github = "https://github.com/TinyDogTech/stacc.git";
+        run_git(tmp.path(), &["remote", "add", "origin", github]);
+        // A url.<x>.insteadOf rewrite (some users configure these for transport)
+        // changes what `git remote get-url` reports but not `remote.origin.url`.
+        run_git(
+            tmp.path(),
+            &["config", "url./tmp/local-mirror.insteadOf", github],
+        );
+        // remote_url must return the real GitHub URL so owner/repo parsing works.
+        assert_eq!(repo.remote_url("origin").unwrap(), github);
+    }
+
+    #[test]
     fn symbolic_ref_resolves_head_and_rejects_direct() {
         let (_tmp, repo) = init_repo();
         assert_eq!(repo.symbolic_ref("HEAD").unwrap().as_deref(), Some("main"));
