@@ -223,6 +223,26 @@ impl GitHub {
         Ok(raw.into())
     }
 
+    /// Like [`get_pull_request`](Self::get_pull_request) but caps this single
+    /// call at `timeout`, so a caller polling several PRs under a wall-clock
+    /// budget can bound in-flight time, not just when it stops starting calls.
+    pub fn get_pull_request_within(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+        timeout: Duration,
+    ) -> Result<PullRequest, GitHubError> {
+        let url = format!("{}/repos/{owner}/{repo}/pulls/{number}", self.base_url);
+        let response = self
+            .request("GET", &url)
+            .timeout(timeout)
+            .call()
+            .map_err(GitHubError::from_ureq)?;
+        let raw: RawPullRequest = response.into_json()?;
+        Ok(raw.into())
+    }
+
     /// Squash-merge a pull request (`PUT /repos/{o}/{r}/pulls/{number}/merge`).
     /// Returns whether GitHub reports it merged. 405/409 (not mergeable, or the
     /// head moved since readiness was read) map to [`GitHubError::NotMergeable`].

@@ -31,6 +31,8 @@ const DEFAULT_ALIASES: &[(&str, &str)] = &[
     ("u", "up"),
     ("d", "down"),
     ("l", "log"),
+    ("ls", "log short"),
+    ("ll", "log long"),
     ("st", "status"),
 ];
 
@@ -79,7 +81,7 @@ fn dispatch(cli: &Cli) -> Result<(), Error> {
         Command::Track(args) => commands::track(args, cli.global.format),
         Command::Create(args) => commands::create(args, cli.global.format),
         Command::Modify(args) => commands::modify(args, cli.global.format),
-        Command::Log(args) => commands::log(args, cli.global.format),
+        Command::Log(args) => commands::log(args, cli.global.format, cli.global.color),
         Command::Status => commands::status(cli.global.format),
         Command::Pr => commands::pr(cli.global.format),
         Command::Submit(args) => commands::submit(args, cli.global.format),
@@ -270,6 +272,15 @@ mod tests {
         assert_eq!(
             expand_aliases(argv(&["stacc", "u"]), &a).unwrap(),
             argv(&["stacc", "up"])
+        );
+        // Multi-token log aliases expand to the form, then stop on the builtin.
+        assert_eq!(
+            expand_aliases(argv(&["stacc", "ls", "--stack"]), &a).unwrap(),
+            argv(&["stacc", "log", "short", "--stack"])
+        );
+        assert_eq!(
+            expand_aliases(argv(&["stacc", "ll"]), &a).unwrap(),
+            argv(&["stacc", "log", "long"])
         );
     }
 

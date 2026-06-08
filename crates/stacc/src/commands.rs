@@ -1,24 +1,25 @@
 //! Implementations of the CLI subcommands.
 
-use std::collections::{BTreeMap, BTreeSet};
 use std::io::IsTerminal;
 use std::path::Path;
 
-use serde_json::{json, Value};
+use serde_json::json;
 use stacc_config::{detect, read_file, resolve, Overrides};
 use stacc_core::ops;
 use stacc_git::Git;
 use stacc_github::{GitHub, NewPullRequest, PrState, PullRequestUpdate};
 use stacc_state::{Base, BranchState, PullRequest, RepoConfig, StateStore};
 
-use crate::cli::{CreateArgs, InitArgs, LogArgs, OutputFormat, RenameArgs, SubmitArgs, TrackArgs};
+use crate::cli::{CreateArgs, InitArgs, OutputFormat, RenameArgs, SubmitArgs, TrackArgs};
 use crate::error::Error;
 
 mod auth;
+mod log;
 mod navigation;
 mod operations;
 
 pub use auth::auth;
+pub use log::log;
 pub use navigation::{bottom, checkout, down, top, up};
 pub use operations::{abort_cmd, continue_cmd, merge, modify, move_cmd, restack, sync};
 
@@ -199,144 +200,6 @@ pub fn create(args: &CreateArgs, format: OutputFormat) -> Result<(), Error> {
     Ok(())
 }
 
-/// `stacc log`: render the tracked stack from the state ref.
-pub fn log(args: &LogArgs, format: OutputFormat) -> Result<(), Error> {
-    let git = Git::open(".");
-    let store = StateStore::new(git.clone());
-    let state = store.load()?;
-
-    let trunk = match &state.repo {
-        Some(repo) => repo.trunk.clone(),
-        None => {
-            return Err(Error::Usage(
-                "stacc is not initialized; run `stacc init` first".into(),
-            ))
-        }
-    };
-
-    // Group tracked branches by the base they're stacked on.
-    let mut children: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-    for (name, branch) in &state.branches {
-        children
-            .entry(branch.base.name.as_str())
-            .or_default()
-            .push(name.as_str());
-    }
-
-    match format {
-        // JSON is a stable machine contract: do not change its shape here.
-        OutputFormat::Json => {
-            let stack = stack_json(&trunk, &children, &state.branches);
-            println!("{}", json!({ "trunk": trunk, "stack": stack }));
-        }
-        OutputFormat::Pretty => {
-            let current = git.current_branch().unwrap_or_default();
-            let order = ops::topo_order(&state.branches, &trunk);
-            if args.short {
-                for name in &order {
-                    let base = state
-                        .branches
-                        .get(name)
-                        .map_or(trunk.as_str(), |b| b.base.name.as_str());
-                    let glyph = if *name == current { "*" } else { "o" };
-                    println!("{glyph} {}", branch_line(&git, name, base, &state.branches));
-                }
-            } else {
-                let trunk_glyph = if current == trunk { "* " } else { "" };
-                println!("{trunk_glyph}{trunk}");
-                print_graph(&git, &trunk, &children, &state.branches, &current, 1);
-            }
-            // Surface tracked branches not reachable from the trunk (an orphaned
-            // base or a cycle) so corrupted state is not silently hidden.
-            let reachable: BTreeSet<&str> = order.iter().map(String::as_str).collect();
-            let orphans: Vec<&String> = state
-                .branches
-                .keys()
-                .filter(|name| !reachable.contains(name.as_str()))
-                .collect();
-            if !orphans.is_empty() {
-                println!("unreachable:");
-                for name in orphans {
-                    let glyph = if *name == current { "*" } else { "o" };
-                    let base = state.branches.get(name).map_or("", |b| b.base.name.as_str());
-                    println!("  {glyph} {name} (base: {base})");
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-fn print_graph(
-    git: &Git,
-    node: &str,
-    children: &BTreeMap<&str, Vec<&str>>,
-    branches: &BTreeMap<String, BranchState>,
-    current: &str,
-    depth: usize,
-) {
-    // Each branch is keyed under its single recorded base, so the
-    // trunk-reachable graph is a tree and this recursion always terminates.
-    let Some(kids) = children.get(node) else {
-        return;
-    };
-    for &kid in kids {
-        let indent = "  ".repeat(depth);
-        let glyph = if kid == current { "*" } else { "o" };
-        println!("{indent}{glyph} {}", branch_line(git, kid, node, branches));
-        print_graph(git, kid, children, branches, current, depth + 1);
-    }
-}
-
-/// One branch's label: its name, recorded PR number, and a needs-restack marker.
-fn branch_line(
-    git: &Git,
-    name: &str,
-    base: &str,
-    branches: &BTreeMap<String, BranchState>,
-) -> String {
-    let pr = branches
-        .get(name)
-        .and_then(|b| b.pr.as_ref())
-        .map(|p| format!(" (#{})", p.number))
-        .unwrap_or_default();
-    let restack = if needs_restack(git, name, base) {
-        "  (needs restack)"
-    } else {
-        ""
-    };
-    format!("{name}{pr}{restack}")
-}
-
-/// Whether `branch` has drifted off `base` (its base tip is no longer an
-/// ancestor). `is_ancestor` resolves `base` to its tip itself, so this is one
-/// git call per branch; any lookup failure reads as up-to-date so `log` never
-/// raises a false alarm on a transient error.
-fn needs_restack(git: &Git, branch: &str, base: &str) -> bool {
-    !git.is_ancestor(base, branch).unwrap_or(true)
-}
-
-fn stack_json(
-    node: &str,
-    children: &BTreeMap<&str, Vec<&str>>,
-    branches: &BTreeMap<String, BranchState>,
-) -> Vec<Value> {
-    let Some(kids) = children.get(node) else {
-        return Vec::new();
-    };
-    kids.iter()
-        .map(|&kid| {
-            let pr = branches.get(kid).and_then(|b| b.pr.as_ref()).map(|p| p.number);
-            json!({
-                "name": kid,
-                "base": node,
-                "pr": pr,
-                "children": stack_json(kid, children, branches),
-            })
-        })
-        .collect()
-}
-
 /// `stacc status`: the current branch's position in the stack and its PR state.
 pub fn status(format: OutputFormat) -> Result<(), Error> {
     let git = Git::open(".");
@@ -412,7 +275,7 @@ pub fn status(format: OutputFormat) -> Result<(), Error> {
     Ok(())
 }
 
-fn pr_state_str(state: PrState) -> &'static str {
+pub(crate) fn pr_state_str(state: PrState) -> &'static str {
     match state {
         PrState::Open => "open",
         PrState::Closed => "closed",

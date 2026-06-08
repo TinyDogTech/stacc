@@ -112,10 +112,22 @@ stacc log
 ```
 
 ```
-main
-  o add-api
-    * add-ui
+◉ add-ui (current)
+│ 2 minutes ago
+│ 95610c6 - feat: render the user list
+│
+○ add-api
+│ 5 minutes ago
+│ 95338df - feat: add the user API
+│
+○ main
+  1 hour ago
 ```
+
+The trunk sits at the bottom, `◉` marks the branch you are on, and each branch
+shows its latest commit and (once submitted) its live PR status. `stacc log
+short` is the same graph without the per-branch detail, and `stacc log long` is
+git's own history for the stack.
 
 When the bottom PR merges, pull trunk, detect the merge, and restack the rest:
 
@@ -145,8 +157,13 @@ stacc log --format json
 ```
 
 ```json
-{"trunk":"main","stack":[{"name":"add-api","base":"main","pr":null,"children":[{"name":"add-ui","base":"add-api","pr":null,"children":[]}]}]}
+{"trunk":"main","stack":[{"name":"add-api","base":"main","pr":{"number":123,"url":"https://github.com/you/repo/pull/123","status":"open"},"commit":{"sha":"95338df","subject":"feat: add the user API","age":"5 minutes ago"},"children":[{"name":"add-ui","base":"add-api","pr":{"number":124,"url":"https://github.com/you/repo/pull/124","status":"open"},"commit":{"sha":"95610c6","subject":"feat: render the user list","age":"2 minutes ago"},"children":[]}]}]}
 ```
+
+Each branch carries its `pr` (an object `{number, url, status}`, or `null`
+before submit) and its `commit` (or `null` when the branch adds none of its
+own). Pass `--no-status` to skip the live PR lookup, or `--stack` to scope the
+output to the current branch's stack.
 
 Reach for `stacc <command> --help` for the full flags of any command.
 
@@ -160,6 +177,8 @@ Common commands have built-in short aliases, so you type less:
 | `u` | `up` |
 | `d` | `down` |
 | `l` | `log` |
+| `ls` | `log short` |
+| `ll` | `log long` |
 | `st` | `status` |
 
 The binary is also installed as `st`, so `st co`, `st u`, and `st l` all work.
