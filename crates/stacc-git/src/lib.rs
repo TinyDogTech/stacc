@@ -395,9 +395,12 @@ impl Git {
             .collect())
     }
 
-    /// The URL configured for `remote` (e.g. its fetch URL).
+    /// The canonical URL configured for `remote`. Reads `remote.<name>.url`
+    /// rather than `git remote get-url`, which expands `url.*.insteadOf`: stacc
+    /// parses the owner/repo from this, so it must be the real GitHub URL, not a
+    /// local rewrite some users configure for transport.
     pub fn remote_url(&self, remote: &str) -> Result<String, GitError> {
-        self.run(&["remote", "get-url", remote])
+        self.run(&["config", &format!("remote.{remote}.url")])
     }
 
     /// The subject line of `rev`'s tip commit.
@@ -778,6 +781,21 @@ mod tests {
             &["remote", "add", "origin", "https://example.com/r.git"],
         );
         assert_eq!(repo.remotes().unwrap(), vec!["origin".to_string()]);
+    }
+
+    #[test]
+    fn remote_url_returns_the_canonical_url_not_the_insteadof_rewrite() {
+        let (tmp, repo) = init_repo();
+        let github = "https://github.com/TinyDogTech/stacc.git";
+        run_git(tmp.path(), &["remote", "add", "origin", github]);
+        // A url.<x>.insteadOf rewrite (some users configure these for transport)
+        // changes what `git remote get-url` reports but not `remote.origin.url`.
+        run_git(
+            tmp.path(),
+            &["config", "url./tmp/local-mirror.insteadOf", github],
+        );
+        // remote_url must return the real GitHub URL so owner/repo parsing works.
+        assert_eq!(repo.remote_url("origin").unwrap(), github);
     }
 
     #[test]

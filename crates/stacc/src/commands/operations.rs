@@ -405,10 +405,13 @@ struct MergedPr {
     out_of_band: bool,
 }
 
-/// The result of walking the downstack chain: what merged, where it stopped
+/// The result of walking the downstack chain: what merged, the children it
+/// re-parented and restacked onto the trunk between merges, where it stopped
 /// short (structured), and any deferred hard error.
 struct MergeWalk {
     merged: Vec<MergedPr>,
+    reparented: Vec<(String, String)>,
+    restacked: Vec<String>,
     stopped: Option<Value>,
     error: Option<Error>,
 }
@@ -430,6 +433,14 @@ pub fn merge(args: &MergeArgs, format: OutputFormat) -> Result<(), Error> {
     })?;
     if current == repo.trunk {
         return Err(Error::Usage("cannot merge the trunk branch".into()));
+    }
+    // The merge loop restacks between merges; refuse to start on top of an
+    // in-progress rebase (e.g. a prior merge stopped on a conflict) so we never
+    // clobber a continuation or rebase into a half-rebased tree.
+    if git.rebase_in_progress() {
+        return Err(Error::Usage(
+            "a rebase is already in progress; run `stacc continue` to resume it or `stacc abort` to undo".into(),
+        ));
     }
 
     let (owner, repo_name) = stacc_github::parse_remote(&git.remote_url(&repo.remote)?)
@@ -475,67 +486,140 @@ pub fn merge(args: &MergeArgs, format: OutputFormat) -> Result<(), Error> {
         }
     };
 
+    // Retarget every non-bottom open PR to the trunk UP FRONT, before any parent
+    // merges. A child PR whose base is the parent's branch is closed (un-
+    // reopenably) when GitHub deletes that branch on merge; pointing it at the
+    // trunk first keeps it open regardless of branch-deletion timing. (API only,
+    // so it runs in `--offline` too.)
+    retarget_children_to_trunk(&github, &owner, &repo_name, &repo.trunk, &state, &chain)?;
+
+    // Walk bottom-up: merge each PR, then restack the rest onto the freshly
+    // merged trunk and force-push the next branch, so its PR is `trunk + its own
+    // commits` and merges cleanly (no squash-cascade conflict).
     let MergeWalk {
         merged: merged_prs,
+        reparented,
+        restacked,
         stopped,
-        error: mut loop_err,
-    } = merge_ready_downstack(&github, &owner, &repo_name, &repo.trunk, &state, &chain);
+        error: loop_err,
+    } = merge_stack(
+        &git, &store, &mut state, &repo, &github, &owner, &repo_name, &chain, args.offline,
+    );
 
-    // Reconcile whatever merged (drop those branches, re-parent, restack), even
-    // when the loop errored, so PRs already merged on GitHub are not stranded. We
-    // know what merged, so skip the GitHub re-detection that `sync` does.
-    let outcome = if merged_prs.is_empty() {
-        None
-    } else {
-        let merged: BTreeSet<String> = merged_prs.iter().map(|m| m.branch.clone()).collect();
-        match reconcile_with(&git, &store, &mut state, &repo, merged, args.offline) {
-            Ok(outcome) => Some(outcome),
-            Err(err) => {
-                loop_err.get_or_insert(err);
-                None
-            }
-        }
-    };
-
-    if args.offline && outcome.is_some() {
+    if args.offline && !merged_prs.is_empty() {
         eprintln!(
             "note: --offline skipped the fetch; run `stacc sync` to rebase the local stack onto the merged commits."
         );
     }
 
+    let outcome = (!merged_prs.is_empty()).then(|| SyncOutcome {
+        merged: merged_prs.iter().map(|m| m.branch.clone()).collect(),
+        reparented,
+        restacked,
+    });
+
     report_merge(format, &merged_prs, stopped.as_ref(), protected, outcome.as_ref());
+
+    // Restore the user's branch. Each restack leaves HEAD on whichever branch it
+    // rebased last, so without this `merge` silently strands you on a different
+    // branch. Skip when a conflict left a rebase in progress (HEAD must stay on
+    // the conflicting branch for `stacc continue`). The starting branch may have
+    // been merged and dropped from state but its local ref still exists; fall
+    // back to the trunk only if it is truly gone.
+    if !git.rebase_in_progress() {
+        let target = if git.ref_missing(&current) {
+            &repo.trunk
+        } else {
+            &current
+        };
+        let _ = git.checkout(target);
+    }
+
+    // A conflict during a mid-merge restack stops the walk with some PRs already
+    // merged; point the user at the resume path that finishes the remaining PRs.
+    if !merged_prs.is_empty() && matches!(loop_err, Some(Error::Conflict { .. })) {
+        eprintln!(
+            "note: merged {} PR(s) before the restack conflicted; after resolving and `stacc continue`, run `stacc merge` again to finish the rest.",
+            merged_prs.len()
+        );
+    }
+
     if let Some(err) = loop_err {
         return Err(err);
     }
     Ok(())
 }
 
-/// Walk the downstack `chain` bottom-up, squash-merging each ready PR and
-/// re-pointing the next one's base to the trunk after a merge. Returns the merged
-/// `(branch, number, sha)` tuples, the structured stop reason if it stopped
-/// short, and any deferred hard error (so the caller can reconcile the merged
-/// prefix before surfacing it). Mutates no local state.
-fn merge_ready_downstack(
+/// Point every non-bottom open PR in the chain at the trunk, so deleting a
+/// parent's branch on merge cannot close its child. Idempotent (re-setting an
+/// already-trunk base is a no-op). Only the bottom branch keeps its trunk base.
+fn retarget_children_to_trunk(
     github: &GitHub,
     owner: &str,
     repo_name: &str,
     trunk: &str,
     state: &State,
     chain: &[String],
+) -> Result<(), Error> {
+    for branch in chain.iter().skip(1) {
+        let Some(pr) = state.branches.get(branch).and_then(|b| b.pr.as_ref()) else {
+            continue;
+        };
+        if github.get_pull_request(owner, repo_name, pr.number)?.state != PrState::Open {
+            continue;
+        }
+        let update = PullRequestUpdate {
+            base: Some(trunk.to_string()),
+            ..Default::default()
+        };
+        if let Err(err) = github.update_pull_request(owner, repo_name, pr.number, &update) {
+            // A child that merged or closed between the read above and this write
+            // rejects a base change; it no longer needs retargeting, so skip it. A
+            // still-open PR (or a failed re-check) is a real error.
+            let confirmed_gone = github
+                .get_pull_request(owner, repo_name, pr.number)
+                .is_ok_and(|pr| pr.state != PrState::Open);
+            if !confirmed_gone {
+                return Err(err.into());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Walk the downstack `chain` bottom-up. For each PR: squash-merge it, then
+/// reconcile (drop it, re-parent its children onto the trunk, and restack the
+/// remainder onto the freshly merged trunk). Before merging a non-bottom PR,
+/// force-push its branch, which the previous iteration's reconcile already
+/// restacked onto the new trunk, so the PR is `trunk + its own commits` and
+/// merges without a squash-cascade conflict. Stops at the first PR that is not
+/// cleanly mergeable; defers a hard error so the caller still reports the merged
+/// prefix. Mutates `state` (the reconcile drops/restacks as it goes).
+#[allow(clippy::too_many_arguments)]
+fn merge_stack(
+    git: &Git,
+    store: &StateStore,
+    state: &mut State,
+    repo: &RepoConfig,
+    github: &GitHub,
+    owner: &str,
+    repo_name: &str,
+    chain: &[String],
+    offline: bool,
 ) -> MergeWalk {
     let mut merged_prs: Vec<MergedPr> = Vec::new();
+    let mut reparented_all: Vec<(String, String)> = Vec::new();
+    let mut restacked_all: Vec<String> = Vec::new();
     let mut stopped: Option<Value> = None;
     // A hard error is deferred, not returned immediately, so the caller can still
-    // reconcile whatever already merged before surfacing it.
+    // report whatever already merged before surfacing it.
     let mut loop_err: Option<Error> = None;
+
     for (i, branch) in chain.iter().enumerate() {
         let Some(pr) = state.branches.get(branch).and_then(|b| b.pr.clone()) else {
             stopped = Some(json!({ "kind": "no_pr", "branch": branch, "reason": "no recorded PR; submit it first" }));
             break;
         };
-        // Classify the PR's current state before mutating it: one merged out of
-        // band is already done (count it and keep walking up); a closed one stops
-        // the walk. Checking first also avoids re-pointing a non-open PR's base.
         let current = match github.get_pull_request(owner, repo_name, pr.number) {
             Ok(current) => current,
             Err(err) => {
@@ -545,76 +629,91 @@ fn merge_ready_downstack(
         };
         match current.state {
             PrState::Merged => {
-                merged_prs.push(MergedPr {
-                    branch: branch.clone(),
-                    number: pr.number,
-                    sha: None,
-                    out_of_band: true,
-                });
-                continue;
+                // Already merged out of band: count it and reconcile it away below.
+                merged_prs.push(MergedPr { branch: branch.clone(), number: pr.number, sha: None, out_of_band: true });
             }
             PrState::Closed => {
                 stopped = Some(json!({ "kind": "closed", "branch": branch, "number": pr.number, "reason": "PR is closed, not merged" }));
                 break;
             }
-            PrState::Open => {}
-        }
-        // After a prior merge the base of this PR (the merged branch) is gone, so
-        // re-point it to the trunk and let GitHub recompute readiness against it.
-        if i > 0 {
-            let update = PullRequestUpdate {
-                base: Some(trunk.to_string()),
-                ..Default::default()
-            };
-            if let Err(err) = github.update_pull_request(owner, repo_name, pr.number, &update) {
-                loop_err = Some(err.into());
-                break;
+            PrState::Open => {
+                // Online: the previous iteration's reconcile restacked this branch
+                // onto the merged trunk; force-push it so the PR head is `trunk +
+                // its own commits` before GitHub recomputes readiness. Offline
+                // skips this (no fetch, no push) and leans on GitHub's server-side
+                // 3-way merge, which still squashes only the branch's net diff: a
+                // non-overlapping stack merges clean, an overlapping one reads
+                // not-ready below and the walk stops there.
+                if i > 0 && !offline {
+                    if let Err(err) = git.push_force_with_lease(&repo.remote, branch) {
+                        loop_err = Some(Error::Usage(format!(
+                            "merged the PR(s) below, but could not force-push `{branch}` onto the merged trunk ({err}); run `stacc sync` then `stacc merge` to finish"
+                        )));
+                        break;
+                    }
+                }
+                let live = match poll_pr_ready(github, owner, repo_name, pr.number) {
+                    Ok(live) => live,
+                    Err(err) => {
+                        loop_err = Some(err);
+                        break;
+                    }
+                };
+                if !live.ready() {
+                    stopped = Some(json!({ "kind": "not_ready", "branch": branch, "number": pr.number, "mergeable_state": live.mergeable_state, "reason": "not cleanly mergeable" }));
+                    break;
+                }
+                match github.merge_pull_request(owner, repo_name, pr.number) {
+                    Ok(outcome) if outcome.merged => {
+                        merged_prs.push(MergedPr { branch: branch.clone(), number: pr.number, sha: outcome.sha, out_of_band: false });
+                    }
+                    // 200 but not merged: a clean stop, not a silent drop.
+                    Ok(_) => {
+                        stopped = Some(json!({ "kind": "did_not_merge", "branch": branch, "number": pr.number, "reason": "GitHub accepted the request but did not merge the PR" }));
+                        break;
+                    }
+                    // No longer mergeable (the head moved since the readiness read).
+                    Err(stacc_github::GitHubError::NotMergeable) => {
+                        stopped = Some(json!({ "kind": "not_mergeable", "branch": branch, "number": pr.number, "reason": "no longer mergeable (head moved or checks failed)" }));
+                        break;
+                    }
+                    Err(err) => {
+                        loop_err = Some(err.into());
+                        break;
+                    }
+                }
             }
         }
-        let live = match poll_pr_ready(github, owner, repo_name, pr.number) {
-            Ok(live) => live,
+
+        // Reaching here means `branch` merged (out of band or just now): every
+        // non-merging arm above breaks. Drop it and restack the remaining stack
+        // onto the merged trunk, so the next branch becomes `trunk + its own
+        // commits` (force-pushed at the top of the next iteration). Online fetches
+        // the trunk; offline restacks against the local trunk.
+        let drop: BTreeSet<String> = std::iter::once(branch.clone()).collect();
+        match reconcile_with(git, store, state, repo, drop, offline) {
+            Ok(outcome) => {
+                reparented_all.extend(outcome.reparented);
+                restacked_all.extend(outcome.restacked);
+            }
             Err(err) => {
                 loop_err = Some(err);
                 break;
             }
-        };
-        if !live.ready() {
-            stopped = Some(json!({
-                "kind": "not_ready",
-                "branch": branch,
-                "number": pr.number,
-                "mergeable_state": live.mergeable_state,
-                "reason": "not cleanly mergeable",
-            }));
-            break;
-        }
-        match github.merge_pull_request(owner, repo_name, pr.number) {
-            Ok(outcome) if outcome.merged => {
-                merged_prs.push(MergedPr {
-                    branch: branch.clone(),
-                    number: pr.number,
-                    sha: outcome.sha,
-                    out_of_band: false,
-                });
-            }
-            // 200 but not merged: a clean stop, not a silent drop.
-            Ok(_) => {
-                stopped = Some(json!({ "kind": "did_not_merge", "branch": branch, "number": pr.number, "reason": "GitHub accepted the request but did not merge the PR" }));
-                break;
-            }
-            // No longer mergeable (the head moved since the readiness read).
-            Err(stacc_github::GitHubError::NotMergeable) => {
-                stopped = Some(json!({ "kind": "not_mergeable", "branch": branch, "number": pr.number, "reason": "no longer mergeable (head moved or checks failed)" }));
-                break;
-            }
-            Err(err) => {
-                loop_err = Some(err.into());
-                break;
-            }
         }
     }
+
+    // A branch can be restacked across several iterations (each merge restacks
+    // the whole remainder); report each branch once, first-seen order.
+    let mut seen_restacked = BTreeSet::new();
+    restacked_all.retain(|b| seen_restacked.insert(b.clone()));
+    let mut seen_reparented = BTreeSet::new();
+    reparented_all.retain(|(b, _)| seen_reparented.insert(b.clone()));
+
     MergeWalk {
         merged: merged_prs,
+        reparented: reparented_all,
+        restacked: restacked_all,
         stopped,
         error: loop_err,
     }
