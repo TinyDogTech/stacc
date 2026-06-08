@@ -267,6 +267,9 @@ pub struct SyncArgs {
     /// Skip the upstream fetch and restack on local refs only.
     #[arg(long)]
     pub offline: bool,
+    /// Keep tracked branches whose git ref is gone instead of pruning them.
+    #[arg(long)]
+    pub no_prune: bool,
 }
 
 /// Arguments for `stacc restack`.
