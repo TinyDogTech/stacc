@@ -4,7 +4,7 @@ mod error;
 
 pub use error::{GitError, RebaseError, RebaseInterrupt};
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 /// A handle to a git repository on disk. Every method shells out to
@@ -23,6 +23,14 @@ pub struct CommitInfo {
     pub subject: String,
     /// Committer date, relative (`%cr`), e.g. `2 hours ago`.
     pub age: String,
+}
+
+/// A registered git worktree: its working-tree path and the branch checked out
+/// there. `branch` is `None` for a detached-HEAD or bare worktree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Worktree {
+    pub path: PathBuf,
+    pub branch: Option<String>,
 }
 
 impl Git {
@@ -250,6 +258,49 @@ impl Git {
         let contents = std::fs::read_to_string(head_name).ok()?;
         let name = contents.trim();
         Some(name.strip_prefix("refs/heads/").unwrap_or(name).to_string())
+    }
+
+    /// Every registered worktree of this repository, parsed from
+    /// `git worktree list --porcelain`. Records are blank-line separated; a
+    /// `worktree <path>` line opens each one and a `branch refs/heads/<name>`
+    /// line names its checkout (absent for a detached or bare worktree).
+    pub fn worktrees(&self) -> Result<Vec<Worktree>, GitError> {
+        let out = self.run(&["worktree", "list", "--porcelain"])?;
+        let mut worktrees = Vec::new();
+        let mut path: Option<PathBuf> = None;
+        let mut branch: Option<String> = None;
+        for line in out.lines() {
+            if let Some(p) = line.strip_prefix("worktree ") {
+                // A new record begins; flush the one we were building.
+                if let Some(prev) = path.take() {
+                    worktrees.push(Worktree { path: prev, branch: branch.take() });
+                }
+                path = Some(PathBuf::from(p));
+            } else if let Some(b) = line.strip_prefix("branch ") {
+                branch = Some(b.strip_prefix("refs/heads/").unwrap_or(b).to_string());
+            }
+        }
+        if let Some(prev) = path.take() {
+            worktrees.push(Worktree { path: prev, branch });
+        }
+        Ok(worktrees)
+    }
+
+    /// The path of a *different* worktree that currently has `branch` checked
+    /// out, or `None` when `branch` is free or is checked out only here.
+    /// Rewriting a branch checked out elsewhere desyncs that worktree, so a
+    /// caller uses this to refuse or skip such a branch. Paths are compared
+    /// canonically because `git worktree list` reports resolved paths while
+    /// `self.dir` may be a symlink (e.g. `/var` -> `/private/var` on macOS).
+    pub fn branch_checked_out_elsewhere(&self, branch: &str) -> Result<Option<PathBuf>, GitError> {
+        let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        let here = canonical(&self.dir);
+        for wt in self.worktrees()? {
+            if wt.branch.as_deref() == Some(branch) && canonical(&wt.path) != here {
+                return Ok(Some(wt.path));
+            }
+        }
+        Ok(None)
     }
 }
 
@@ -848,5 +899,73 @@ mod tests {
         let mut branches = repo.local_branches().unwrap();
         branches.sort();
         assert_eq!(branches, vec!["main".to_string(), "side".to_string()]);
+    }
+
+    /// `git worktree add <path> <branch>` checks out an existing branch in a new
+    /// linked worktree. Returns the TempDir holding it (kept alive by the caller)
+    /// and the worktree's path.
+    fn add_linked_worktree(main: &std::path::Path, branch: &str) -> (TempDir, PathBuf) {
+        let linked = TempDir::new().expect("temp dir");
+        let wt = linked.path().join("wt");
+        run_git(main, &["worktree", "add", wt.to_str().unwrap(), branch]);
+        (linked, wt)
+    }
+
+    #[test]
+    fn worktrees_lists_main_and_linked_branch() {
+        let (tmp, repo) = init_repo();
+        run_git(tmp.path(), &["branch", "feat"]); // create without checking out in main
+        let (_linked, _wt) = add_linked_worktree(tmp.path(), "feat");
+
+        let wts = repo.worktrees().unwrap();
+        assert_eq!(wts.len(), 2, "main + one linked worktree: {wts:?}");
+        let branches: std::collections::BTreeSet<Option<String>> =
+            wts.iter().map(|w| w.branch.clone()).collect();
+        assert!(branches.contains(&Some("main".to_string())));
+        assert!(branches.contains(&Some("feat".to_string())));
+    }
+
+    #[test]
+    fn branch_checked_out_elsewhere_finds_the_linked_worktree() {
+        let (tmp, repo) = init_repo();
+        run_git(tmp.path(), &["branch", "feat"]);
+        let (_linked, wt) = add_linked_worktree(tmp.path(), "feat");
+
+        // `feat` lives in the linked worktree, not the current one.
+        let found = repo.branch_checked_out_elsewhere("feat").unwrap();
+        assert_eq!(
+            found.map(|p| std::fs::canonicalize(p).unwrap()),
+            Some(std::fs::canonicalize(&wt).unwrap())
+        );
+        // The current worktree's own branch is not "elsewhere".
+        assert_eq!(repo.branch_checked_out_elsewhere("main").unwrap(), None);
+        // A branch nothing has checked out matches nothing.
+        assert_eq!(repo.branch_checked_out_elsewhere("nope").unwrap(), None);
+    }
+
+    #[test]
+    fn detached_worktree_has_no_branch() {
+        let (tmp, repo) = init_repo();
+        let linked = TempDir::new().unwrap();
+        let wt = linked.path().join("wt");
+        run_git(tmp.path(), &["worktree", "add", "--detach", wt.to_str().unwrap()]);
+
+        let wts = repo.worktrees().unwrap();
+        assert_eq!(wts.len(), 2);
+        assert!(
+            wts.iter().any(|w| w.branch.is_none()),
+            "the detached worktree reports no branch: {wts:?}"
+        );
+        // A detached worktree never matches a branch lookup.
+        assert_eq!(repo.branch_checked_out_elsewhere("main").unwrap(), None);
+    }
+
+    #[test]
+    fn single_worktree_has_nothing_checked_out_elsewhere() {
+        let (tmp, repo) = init_repo();
+        run_git(tmp.path(), &["branch", "feat"]);
+        assert_eq!(repo.worktrees().unwrap().len(), 1);
+        assert_eq!(repo.branch_checked_out_elsewhere("main").unwrap(), None);
+        assert_eq!(repo.branch_checked_out_elsewhere("feat").unwrap(), None);
     }
 }
