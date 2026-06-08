@@ -82,6 +82,32 @@ fn track_pr(p: &Path, branch: &str, base: &str, number: u64) {
     store.save(&state).unwrap();
 }
 
+fn commit_file(p: &Path, name: &str, content: &str, msg: &str) {
+    std::fs::write(p.join(name), content).expect("write file");
+    run_git(p, &["add", name]);
+    run_git(p, &["commit", "-q", "-m", msg]);
+}
+
+/// A working repo whose `origin` is a GitHub-shaped URL (so `parse_remote`
+/// works) but is rewritten via `insteadOf` to a local bare repo, so the online
+/// merge's fetch + force-push actually succeed. Returns (work tree, bare remote).
+fn online_repo() -> (TempDir, TempDir) {
+    let bare = TempDir::new().expect("bare");
+    run_git(bare.path(), &["init", "-q", "--bare", "-b", "main"]);
+    let tmp = TempDir::new().expect("work");
+    let p = tmp.path();
+    run_git(p, &["init", "-q", "-b", "main"]);
+    run_git(p, &["config", "user.name", "Test"]);
+    run_git(p, &["config", "user.email", "test@example.com"]);
+    let insteadof = format!("url.{}.insteadOf", bare.path().display());
+    run_git(p, &["config", &insteadof, ORIGIN]);
+    run_git(p, &["remote", "add", "origin", ORIGIN]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "first"]);
+    run_git(p, &["push", "-q", "origin", "main"]);
+    assert!(stacc(p, &["init"]).status.success());
+    (tmp, bare)
+}
+
 #[test]
 fn merge_squashes_ready_downstack_and_stops_at_unready() {
     let tmp = repo();
@@ -499,5 +525,88 @@ fn merge_on_the_trunk_errors() {
         String::from_utf8_lossy(&out.stdout).contains("cannot merge the trunk"),
         "got: {}",
         String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
+fn merge_online_restacks_and_force_pushes_each_child() {
+    let (tmp, bare) = online_repo();
+    let p = tmp.path();
+    // main -> a (a.txt) -> b (b.txt): independent changes, both pushed to origin.
+    run_git(p, &["checkout", "-q", "-b", "a"]);
+    commit_file(p, "a.txt", "a\n", "a1");
+    run_git(p, &["push", "-q", "origin", "a"]);
+    run_git(p, &["checkout", "-q", "-b", "b"]);
+    commit_file(p, "b.txt", "b\n", "b1");
+    run_git(p, &["push", "-q", "origin", "b"]);
+    track_pr(p, "a", "main", 1);
+    track_pr(p, "b", "a", 2);
+
+    // Simulate a's squash landing on the remote trunk, so the restack of b has a
+    // moved trunk to rebase onto (which is what drops a's commit from b).
+    run_git(p, &["checkout", "-q", "main"]);
+    commit_file(p, "a-merged.txt", "merged\n", "squash: a #1");
+    run_git(p, &["push", "-q", "origin", "main"]);
+    run_git(p, &["checkout", "-q", "b"]);
+
+    let server = MockServer::start();
+    let api = "/repos/stacc-sandbox/example";
+    server.mock(|w, t| {
+        w.method(Method::GET).path(format!("{api}/branches/main/protection"));
+        t.status(404).json_body(serde_json::json!({ "message": "not protected" }));
+    });
+    server.mock(|w, t| {
+        w.method(Method::GET).path(format!("{api}/pulls/1"));
+        t.status(200).json_body(pr_open(1, "clean"));
+    });
+    server.mock(|w, t| {
+        w.method(Method::GET).path(format!("{api}/pulls/2"));
+        t.status(200).json_body(pr_open(2, "clean"));
+    });
+    // b (#2) is retargeted to main up front.
+    let patch2 = server.mock(|w, t| {
+        w.method(Method::PATCH)
+            .path(format!("{api}/pulls/2"))
+            .json_body(serde_json::json!({ "base": "main" }));
+        t.status(200).json_body(pr_open(2, "clean"));
+    });
+    let merge1 = server.mock(|w, t| {
+        w.method(Method::PUT).path(format!("{api}/pulls/1/merge"));
+        t.status(200).json_body(serde_json::json!({ "merged": true }));
+    });
+    let merge2 = server.mock(|w, t| {
+        w.method(Method::PUT).path(format!("{api}/pulls/2/merge"));
+        t.status(200).json_body(serde_json::json!({ "merged": true }));
+    });
+
+    run_git(p, &["checkout", "-q", "b"]);
+    let out = stacc_env(
+        p,
+        &["merge", "--format", "json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(
+        out.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains(r#""number":1"#) && s.contains(r#""number":2"#), "both merged: {s}");
+    merge1.assert();
+    merge2.assert();
+    patch2.assert();
+
+    // b was restacked onto main (drop a's commit) and force-pushed: the branch on
+    // the remote is `main + b1`, with no `a1`.
+    let bare_b = git_out(bare.path(), &["log", "--oneline", "b"]);
+    assert!(bare_b.contains("b1"), "b kept its own commit: {bare_b}");
+    assert!(!bare_b.contains("a1"), "b dropped a's commit via the restack: {bare_b}");
+
+    // Both branches dropped from state.
+    let log = String::from_utf8_lossy(&stacc(p, &["log", "--format", "json"]).stdout).into_owned();
+    assert!(
+        !log.contains(r#""name":"a""#) && !log.contains(r#""name":"b""#),
+        "both dropped: {log}"
     );
 }

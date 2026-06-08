@@ -395,9 +395,12 @@ impl Git {
             .collect())
     }
 
-    /// The URL configured for `remote` (e.g. its fetch URL).
+    /// The canonical URL configured for `remote`. Reads `remote.<name>.url`
+    /// rather than `git remote get-url`, which expands `url.*.insteadOf`: stacc
+    /// parses the owner/repo from this, so it must be the real GitHub URL, not a
+    /// local rewrite some users configure for transport.
     pub fn remote_url(&self, remote: &str) -> Result<String, GitError> {
-        self.run(&["remote", "get-url", remote])
+        self.run(&["config", &format!("remote.{remote}.url")])
     }
 
     /// The subject line of `rev`'s tip commit.
