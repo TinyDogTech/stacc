@@ -9,7 +9,10 @@ use crate::model::{BranchState, RepoConfig};
 
 const STATE_REF: &str = "refs/stacc/data";
 const ZERO_OID: &str = "0000000000000000000000000000000000000000";
-const SAVE_ATTEMPTS: usize = 5;
+// Retry budget for a compare-and-swap on the state ref. Paired with jittered
+// backoff (see `backoff`) so a burst of concurrent writers de-synchronizes
+// instead of exhausting the budget in lockstep.
+const SAVE_ATTEMPTS: usize = 10;
 
 #[derive(Debug, Error)]
 pub enum StateError {
@@ -98,7 +101,7 @@ impl StateStore {
         &self,
         mut mutate: impl FnMut(&mut State) -> Result<T, StateError>,
     ) -> Result<T, StateError> {
-        for _ in 0..SAVE_ATTEMPTS {
+        for attempt in 0..SAVE_ATTEMPTS {
             let parent = self.git.ref_commit(&self.git_ref)?;
             let mut state = self.load_at(parent.as_deref())?;
             let value = mutate(&mut state)?;
@@ -113,6 +116,12 @@ impl StateStore {
                     // Otherwise the ref advanced; reload and re-apply next pass.
                     if self.git.ref_commit(&self.git_ref)?.as_deref() == parent.as_deref() {
                         return Err(err.into());
+                    }
+                    // CAS miss: back off with jitter so contending writers spread
+                    // out rather than colliding on every retry. No point sleeping
+                    // after the last attempt, the loop is about to give up.
+                    if attempt + 1 < SAVE_ATTEMPTS {
+                        backoff(attempt);
                     }
                 }
             }
@@ -184,6 +193,18 @@ impl StateStore {
         self.git.fetch(remote, &format!("{0}:{0}", self.git_ref))?;
         Ok(())
     }
+}
+
+/// Exponential backoff with a few ms of jitter between lost compare-and-swap
+/// attempts, so writers that keep colliding spread out rather than retrying in
+/// lockstep. The jitter is seeded from the wall clock; its precision does not
+/// matter, only that two racing processes pick different sleeps.
+fn backoff(attempt: usize) {
+    let base = 1u64 << attempt.min(6); // 1, 2, 4, ... capped at 64 ms
+    let jitter = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::from(d.subsec_nanos()) % 8);
+    std::thread::sleep(std::time::Duration::from_millis(base + jitter));
 }
 
 #[cfg(test)]
