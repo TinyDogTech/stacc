@@ -348,6 +348,13 @@ impl Git {
         }
     }
 
+    /// Whether `name` resolves to no git ref. A clean not-found returns `true`;
+    /// a real git error returns `false` (the ref reads as present), so a
+    /// transient failure never reports a live ref as missing.
+    pub fn ref_missing(&self, name: &str) -> bool {
+        matches!(self.ref_commit(name), Ok(None))
+    }
+
     /// Read the blob at `<rev>:<path>`, or `None` if it is not present.
     pub fn read_blob(&self, rev: &str, path: &str) -> Result<Option<String>, GitError> {
         let spec = format!("{rev}:{path}");

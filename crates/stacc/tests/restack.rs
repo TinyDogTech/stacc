@@ -106,6 +106,32 @@ fn restack_stack_scope_repairs_whole_stack() {
 }
 
 #[test]
+fn restack_skips_a_branch_whose_git_ref_is_gone() {
+    let tmp = drifted_stack(); // main -> a -> b (drifted), on main
+    let p = tmp.path();
+    // Stack a branch on b, then delete its git ref: a ghost left in state.
+    run_git(p, &["checkout", "-q", "b"]);
+    run_git(p, &["checkout", "-q", "-b", "ghost"]);
+    write_commit(p, "g.txt", "g\n", "ghost1");
+    assert!(stacc(p, &["track", "--base", "b"]).status.success());
+    run_git(p, &["checkout", "-q", "b"]);
+    run_git(p, &["branch", "-D", "ghost"]);
+
+    // Before STA-56 this aborted with a raw "Not a valid object name" git error.
+    let out = stacc(p, &["restack", "--stack"]);
+    assert!(
+        out.status.success(),
+        "restack must not crash on a ghost branch; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("ghost") && err.contains("no git ref"), "skip warning: {err}");
+    // The live stack is still repaired.
+    assert!(git_ok(p, &["merge-base", "--is-ancestor", "main", "a"]));
+    assert!(git_ok(p, &["merge-base", "--is-ancestor", "a", "b"]));
+}
+
+#[test]
 fn restack_requires_init() {
     let tmp = repo();
     let out = stacc(tmp.path(), &["restack", "--format", "json"]);
