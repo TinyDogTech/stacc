@@ -174,13 +174,18 @@ pub fn resolve_base(
     base
 }
 
-/// What a restack pass did: the branches it rebased, and any it skipped because
+/// What a restack pass did: the branches it rebased, any it skipped because
 /// their own ref or their base's ref no longer resolves (a deleted branch still
-/// left in state). Skipping keeps a single dead branch from aborting the pass.
+/// left in state), and any it skipped because they are checked out in another
+/// worktree (rewriting them there would desync that worktree). Skipping keeps a
+/// single dead or borrowed branch from aborting the pass.
 #[derive(Debug)]
 pub struct RestackOutcome {
     pub restacked: Vec<String>,
     pub skipped: Vec<String>,
+    /// `(branch, other worktree path)` for branches skipped because they are
+    /// checked out elsewhere.
+    pub worktree_skipped: Vec<(String, String)>,
 }
 
 /// Restack `order` bottom-up, rebasing each branch onto its base's current tip
@@ -204,12 +209,21 @@ pub fn restack(
 ) -> Result<RestackOutcome, OpsError> {
     let mut restacked = Vec::new();
     let mut skipped = Vec::new();
+    let mut worktree_skipped = Vec::new();
     for (idx, branch) in order.iter().enumerate() {
         let Some(base) = state.branches.get(branch).map(|b| b.base.clone()) else {
             continue;
         };
         if git.ref_missing(branch) || git.ref_missing(&base.name) {
             skipped.push(branch.clone());
+            continue;
+        }
+        // Refuse to rewrite a branch checked out in another worktree: rebasing it
+        // would desync that worktree's HEAD/index. Skip it (and its dependents
+        // will skip in turn once their base no longer resolves), reporting where
+        // it lives so the user can act.
+        if let Some(wt) = git.branch_checked_out_elsewhere(branch)? {
+            worktree_skipped.push((branch.clone(), wt.to_string_lossy().into_owned()));
             continue;
         }
         let base_tip = git.rev_parse(&base.name)?;
@@ -247,7 +261,11 @@ pub fn restack(
         applied.push((branch.clone(), base_tip));
         restacked.push(branch.clone());
     }
-    Ok(RestackOutcome { restacked, skipped })
+    Ok(RestackOutcome {
+        restacked,
+        skipped,
+        worktree_skipped,
+    })
 }
 
 #[cfg(test)]
