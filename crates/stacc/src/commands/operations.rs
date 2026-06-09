@@ -1290,7 +1290,7 @@ fn continue_op(
 /// from the unfinished queue) plus the GitHub-enriched conflict-context file.
 /// The context writer stays in the CLI crate so `stacc-core` stays off
 /// `stacc-github`.
-fn restack_with_recovery(
+pub(crate) fn restack_with_recovery(
     git: &Git,
     store: &StateStore,
     state: &mut State,
@@ -1378,7 +1378,7 @@ fn abort_and_report(git: &Git, branch: &str, reason: &str) -> Error {
 /// `sync`) skip these per-branch in the engine and report them; focused ops
 /// (`modify`, `move`) fail fast here so the user finishes or relocates that
 /// branch first instead of getting a partial result.
-fn guard_worktree(git: &Git, branches: &[String]) -> Result<(), Error> {
+pub(crate) fn guard_worktree(git: &Git, branches: &[String]) -> Result<(), Error> {
     for branch in branches {
         if let Some(wt) = git.branch_checked_out_elsewhere(branch)? {
             return Err(Error::WorktreeConflict {
@@ -1485,7 +1485,7 @@ fn report_sync(
     }
 }
 
-fn clear_conflict_artifacts(git: &Git) {
+pub(crate) fn clear_conflict_artifacts(git: &Git) {
     if let Ok(dir) = git.git_dir() {
         recovery::clear_continuation(&dir);
         let _ = std::fs::remove_file(dir.join("stacc-conflict-context.json"));

@@ -13,11 +13,13 @@ use stacc_state::{Base, BranchState, PullRequest, RepoConfig, StateStore};
 use crate::cli::{CreateArgs, InitArgs, OutputFormat, RenameArgs, SubmitArgs, TrackArgs, UntrackArgs};
 use crate::error::Error;
 
+mod absorb;
 mod auth;
 mod log;
 mod navigation;
 mod operations;
 
+pub use absorb::absorb;
 pub use auth::auth;
 pub use log::log;
 pub use navigation::{bottom, checkout, down, top, up};
