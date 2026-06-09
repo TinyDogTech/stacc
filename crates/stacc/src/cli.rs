@@ -77,6 +77,8 @@ pub enum Command {
     Absorb(AbsorbArgs),
     /// Squash the current branch's commits into one, then restack its upstack.
     Squash(SquashArgs),
+    /// Fold the current branch into its parent, reparenting and restacking its children.
+    Fold(FoldArgs),
     /// Rename the current branch, updating local state, children, and the remote.
     Rename(RenameArgs),
     /// Squash-merge the ready PRs from the trunk up to the current branch, then sync.
@@ -316,6 +318,15 @@ pub struct SquashArgs {
     /// subjects and bodies, concatenated oldest-first).
     #[arg(long, short)]
     pub message: Option<String>,
+}
+
+/// Arguments for `stacc fold`.
+#[derive(Debug, clap::Args)]
+pub struct FoldArgs {
+    /// Close the folded branch's PR on GitHub (best-effort; a failure to close
+    /// is reported, not fatal).
+    #[arg(long)]
+    pub close: bool,
 }
 
 /// Arguments for `stacc merge`.

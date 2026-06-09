@@ -39,6 +39,26 @@ pub enum Operation {
         remaining: Vec<String>,
         pre_base: String,
     },
+    /// `fold`: fast-forwarded `parent` to `branch`'s tip, dropped `branch` from
+    /// state, and re-pointed its children onto `parent`. The folded branch's
+    /// git ref is only deleted after a clean restack, so when this record
+    /// exists the ref still names the folded tip. `abort` rolls the parent
+    /// back to `parent_pre_tip` and restores the pre-fold state: the folded
+    /// branch re-tracked on `(parent, branch_base_hash)` with its PR record
+    /// (`pr_number`/`pr_url`), and each `children_pre` entry's `(name,
+    /// base_hash)` re-pointed onto `branch`. `close` carries the `--close`
+    /// flag so `continue` can finish the PR close.
+    Fold {
+        branch: String,
+        parent: String,
+        remaining: Vec<String>,
+        parent_pre_tip: String,
+        branch_base_hash: String,
+        children_pre: Vec<(String, String)>,
+        pr_number: Option<u64>,
+        pr_url: Option<String>,
+        close: bool,
+    },
 }
 
 impl Operation {
@@ -48,7 +68,8 @@ impl Operation {
             Operation::Sync { remaining }
             | Operation::Restack { remaining }
             | Operation::Modify { remaining, .. }
-            | Operation::Move { remaining, .. } => remaining,
+            | Operation::Move { remaining, .. }
+            | Operation::Fold { remaining, .. } => remaining,
         }
     }
 
@@ -75,6 +96,27 @@ impl Operation {
                 remaining,
                 pre_base: pre_base.clone(),
             },
+            Operation::Fold {
+                branch,
+                parent,
+                parent_pre_tip,
+                branch_base_hash,
+                children_pre,
+                pr_number,
+                pr_url,
+                close,
+                ..
+            } => Operation::Fold {
+                branch: branch.clone(),
+                parent: parent.clone(),
+                remaining,
+                parent_pre_tip: parent_pre_tip.clone(),
+                branch_base_hash: branch_base_hash.clone(),
+                children_pre: children_pre.clone(),
+                pr_number: *pr_number,
+                pr_url: pr_url.clone(),
+                close: *close,
+            },
         }
     }
 
@@ -85,14 +127,15 @@ impl Operation {
     }
 
     /// The wire tag identifying the operation (matches the serde `op` value):
-    /// `sync`, `restack`, `modify`, or `move`. Surfaced in command output so an
-    /// agent knows which operation a `continue` resumed.
+    /// `sync`, `restack`, `modify`, `move`, or `fold`. Surfaced in command
+    /// output so an agent knows which operation a `continue` resumed.
     pub fn tag(&self) -> &'static str {
         match self {
             Operation::Sync { .. } => "sync",
             Operation::Restack { .. } => "restack",
             Operation::Modify { .. } => "modify",
             Operation::Move { .. } => "move",
+            Operation::Fold { .. } => "fold",
         }
     }
 }
@@ -185,6 +228,17 @@ mod tests {
                 remaining: vec!["b".into()],
                 pre_base: "cafef00d".into(),
             },
+            Operation::Fold {
+                branch: "f".into(),
+                parent: "p".into(),
+                remaining: vec!["c".into()],
+                parent_pre_tip: "feedface".into(),
+                branch_base_hash: "baseba5e".into(),
+                children_pre: vec![("c".into(), "c0ffee00".into())],
+                pr_number: Some(9),
+                pr_url: Some("https://example.com/9".into()),
+                close: true,
+            },
         ]
     }
 
@@ -204,6 +258,7 @@ mod tests {
         assert_eq!(all[1].remaining(), ["a"]); // Restack
         assert_eq!(all[2].remaining(), ["b", "c"]); // Modify
         assert_eq!(all[3].remaining(), ["b"]); // Move
+        assert_eq!(all[4].remaining(), ["c"]); // Fold
     }
 
     #[test]
@@ -249,8 +304,33 @@ mod tests {
             .with_remaining(r.clone()),
             Operation::Move {
                 branch: "m".into(),
-                remaining: r,
+                remaining: r.clone(),
                 pre_base: "p".into(),
+            }
+        );
+        let fold = Operation::Fold {
+            branch: "f".into(),
+            parent: "p".into(),
+            remaining: vec!["a".into()],
+            parent_pre_tip: "t".into(),
+            branch_base_hash: "h".into(),
+            children_pre: vec![("c".into(), "x".into())],
+            pr_number: Some(3),
+            pr_url: None,
+            close: true,
+        };
+        assert_eq!(
+            fold.with_remaining(r.clone()),
+            Operation::Fold {
+                branch: "f".into(),
+                parent: "p".into(),
+                remaining: r,
+                parent_pre_tip: "t".into(),
+                branch_base_hash: "h".into(),
+                children_pre: vec![("c".into(), "x".into())],
+                pr_number: Some(3),
+                pr_url: None,
+                close: true,
             }
         );
     }
@@ -271,6 +351,18 @@ mod tests {
             pre_base: "p".into(),
         }
         .pushes_state());
+        assert!(!Operation::Fold {
+            branch: "f".into(),
+            parent: "p".into(),
+            remaining: vec![],
+            parent_pre_tip: "t".into(),
+            branch_base_hash: "h".into(),
+            children_pre: vec![],
+            pr_number: None,
+            pr_url: None,
+            close: false,
+        }
+        .pushes_state());
     }
 
     #[test]
@@ -280,6 +372,7 @@ mod tests {
         assert_eq!(all[1].tag(), "restack");
         assert_eq!(all[2].tag(), "modify");
         assert_eq!(all[3].tag(), "move");
+        assert_eq!(all[4].tag(), "fold");
     }
 
     #[test]

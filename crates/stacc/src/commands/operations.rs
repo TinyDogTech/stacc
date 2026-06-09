@@ -7,10 +7,11 @@ use serde_json::{json, Value};
 use stacc_core::{ops, recovery};
 use stacc_git::{Git, RebaseError};
 use stacc_github::{GitHub, PrState, PullRequestUpdate};
-use stacc_state::{RepoConfig, State, StateError, StateStore};
+use stacc_state::{Base, BranchState, PullRequest, RepoConfig, State, StateError, StateStore};
 
 use crate::cli::{
-    MergeArgs, ModifyArgs, MoveArgs, OutputFormat, RestackArgs, SquashArgs, SyncArgs, UndoArgs,
+    FoldArgs, MergeArgs, ModifyArgs, MoveArgs, OutputFormat, RestackArgs, SquashArgs, SyncArgs,
+    UndoArgs,
 };
 use crate::error::Error;
 
@@ -301,6 +302,251 @@ fn report_squash(
                 for name in restacked {
                     println!("Restacked {name}");
                 }
+            }
+        }
+    }
+}
+
+/// `stacc fold`: fold the current branch into its parent by fast-forwarding the
+/// parent's ref to the branch's tip, reparenting the branch's children onto the
+/// parent, dropping the branch from state, and deleting its git ref. `--close`
+/// closes the folded branch's PR (best-effort).
+///
+/// Refuses unless the branch is already restacked onto its parent (git-spice's
+/// `VerifyRestacked`, same check as `squash`): on a drifted branch the parent's
+/// ref move would not be a fast-forward and would fold in commits that are not
+/// part of the branch's own diff. With the precondition held, the fold itself
+/// cannot conflict; only the children's restack can, and that resumes via
+/// `continue`/`abort` through `Operation::Fold`.
+// A cohesive validate -> ff -> reparent/restack -> finish sequence, like `merge`.
+#[allow(clippy::too_many_lines)]
+pub fn fold(args: &FoldArgs, format: OutputFormat) -> Result<(), Error> {
+    let git = Git::open(".");
+    let store = StateStore::new(git.clone());
+    let mut state = store.load()?;
+    let repo = state
+        .repo
+        .clone()
+        .ok_or_else(|| Error::Usage("stacc is not initialized; run `stacc init` first".into()))?;
+
+    if git.rebase_in_progress() {
+        return Err(Error::Usage(
+            "a rebase is already in progress; run `stacc continue` to resume it or `stacc abort` to undo".into(),
+        ));
+    }
+
+    let branch = git.current_branch().map_err(|_| {
+        Error::Usage("cannot fold a detached HEAD; check out a branch first".into())
+    })?;
+    if branch == repo.trunk {
+        return Err(Error::Usage(format!(
+            "cannot fold the trunk branch `{}`",
+            repo.trunk
+        )));
+    }
+    let branch_state = state.branches.get(&branch).cloned().ok_or_else(|| {
+        Error::Usage(format!(
+            "branch `{branch}` is not tracked; run `stacc track` first"
+        ))
+    })?;
+    let parent = branch_state.base.name.clone();
+
+    // Precondition (git-spice `VerifyRestacked`, mirroring `squash`): the branch
+    // must sit on its parent's live tip, so moving the parent's ref to the
+    // branch's tip is a true fast-forward that adds exactly the branch's own
+    // commits to the parent.
+    let tip = git.rev_parse(&branch)?;
+    let parent_pre_tip = git.rev_parse(&parent)?;
+    if !git.is_ancestor(&parent_pre_tip, &tip)? {
+        return Err(Error::Usage(format!(
+            "`{branch}` is not restacked onto `{parent}`; run `stacc restack` first, then fold"
+        )));
+    }
+
+    // Fail fast if any branch this fold rewrites is checked out in another
+    // worktree, BEFORE mutating anything. Unlike the other surgery commands the
+    // PARENT is guarded too: its ref moves, which would desync a worktree that
+    // has it checked out.
+    let upstack = ops::upstack_order(&state.branches, &branch);
+    let mut guarded = vec![parent.clone()];
+    guarded.extend(upstack.iter().cloned());
+    guard_worktree(&git, &guarded)?;
+
+    // Folding into the trunk rewrites trunk history locally; legal, but usually
+    // a mistake (git-spice warns here too). Non-interactive: warn, don't prompt.
+    let into_trunk = parent == repo.trunk;
+    if into_trunk {
+        eprintln!(
+            "warning: folding `{branch}` into the trunk `{parent}`; this moves the trunk's local tip. Run `stacc undo` if it was a mistake."
+        );
+    }
+
+    // The immediate children and their pre-fold base hashes (their pre-fold base
+    // name is `branch` by definition), recorded for `abort`.
+    let children = ops::children(&state.branches, &branch);
+    let children_pre: Vec<(String, String)> = children
+        .iter()
+        .filter_map(|c| state.branches.get(c).map(|b| (c.clone(), b.base.hash.clone())))
+        .collect();
+
+    // Fast-forward the parent to the branch's tip, with the parent's live tip as
+    // a lease (the CAS equivalent of git-spice's `git fetch . child:parent`).
+    git.update_ref(&format!("refs/heads/{parent}"), &tip, Some(&parent_pre_tip))
+        .map_err(|e| {
+            Error::Usage(format!(
+                "could not fast-forward `{parent}` to `{branch}`'s tip ({e}); the parent tip moved under fold, re-run it"
+            ))
+        })?;
+
+    // The state delta: drop the folded branch and reparent its children onto the
+    // parent at its new tip. Applied to the in-memory state for the restack pass
+    // and re-applied onto fresh state by the transactional save.
+    let apply_fold = |s: &mut State| {
+        s.branches.remove(&branch);
+        for child in &children {
+            if let Some(b) = s.branches.get_mut(child) {
+                b.base.name.clone_from(&parent);
+                b.base.hash.clone_from(&tip);
+            }
+        }
+    };
+    apply_fold(&mut state);
+
+    // Restack the folded branch's former upstack (its children's subtrees).
+    // They sat on the folded tip, which IS the parent's new tip, so this is
+    // normally a skip-everything no-op; a stale child rebases and can conflict,
+    // which resumes via the `Operation::Fold` continuation.
+    let order: Vec<String> = upstack.iter().skip(1).cloned().collect();
+    let restacked = restack_with_recovery(
+        &git,
+        &store,
+        &mut state,
+        &repo,
+        &order,
+        |remaining| recovery::Operation::Fold {
+            branch: branch.clone(),
+            parent: parent.clone(),
+            remaining,
+            parent_pre_tip: parent_pre_tip.clone(),
+            branch_base_hash: branch_state.base.hash.clone(),
+            children_pre: children_pre.clone(),
+            pr_number: branch_state.pr.as_ref().map(|pr| pr.number),
+            pr_url: branch_state.pr.as_ref().and_then(|pr| pr.url.clone()),
+            close: args.close,
+        },
+        &apply_fold,
+    )?;
+    clear_conflict_artifacts(&git);
+
+    // The fold is saved: switch to the parent (the folded branch is checked out
+    // here), then delete the folded ref, in that order so HEAD never names a
+    // deleted ref.
+    finish_fold_refs(&git, &branch, &parent);
+
+    let pr_closed = if args.close {
+        close_folded_pr(&git, &repo, &branch, branch_state.pr.as_ref().map(|pr| pr.number))
+    } else {
+        None
+    };
+
+    report_fold(format, &branch, &parent, &restacked, pr_closed, into_trunk);
+    Ok(())
+}
+
+/// Finish a fold's ref surgery: switch to the parent, then delete the folded
+/// branch's ref (it is fully merged: the parent's tip IS its tip, so this has
+/// `git branch -d` safety). Both steps are best-effort, the fold's state work
+/// is already saved; a failed checkout skips the deletion so HEAD never points
+/// at a deleted ref.
+fn finish_fold_refs(git: &Git, branch: &str, parent: &str) {
+    if let Err(err) = git.checkout(parent) {
+        eprintln!(
+            "warning: could not switch to `{parent}` ({err}); `{branch}` is folded but its ref was left in place, delete it with `git branch -d {branch}`"
+        );
+        return;
+    }
+    let head_ref = format!("refs/heads/{branch}");
+    match git.ref_commit(&head_ref) {
+        // Lease on the current tip so a concurrent move is never clobbered.
+        Ok(Some(tip)) => {
+            if let Err(err) = git.delete_ref(&head_ref, Some(&tip)) {
+                eprintln!(
+                    "warning: folded `{branch}` but could not delete its ref ({err}); delete it with `git branch -d {branch}`"
+                );
+            }
+        }
+        Ok(None) => {} // already gone
+        Err(err) => eprintln!(
+            "warning: folded `{branch}` but could not read its ref to delete it ({err}); delete it with `git branch -d {branch}`"
+        ),
+    }
+}
+
+/// Close the folded branch's PR on GitHub, best-effort: `Some(true)` when it
+/// closed, `Some(false)` (plus a warning) when the attempt failed, `None` when
+/// there is no recorded PR to close.
+fn close_folded_pr(
+    git: &Git,
+    repo: &RepoConfig,
+    branch: &str,
+    number: Option<u64>,
+) -> Option<bool> {
+    let Some(number) = number else {
+        eprintln!("note: `{branch}` has no recorded PR; nothing to close");
+        return None;
+    };
+    let attempt = (|| -> Result<(), Error> {
+        let (owner, repo_name) = stacc_github::parse_remote(&git.remote_url(&repo.remote)?)
+            .ok_or_else(|| Error::Usage(format!("remote `{}` is not a GitHub URL", repo.remote)))?;
+        GitHub::from_env()?.close_pull_request(&owner, &repo_name, number)?;
+        Ok(())
+    })();
+    match attempt {
+        Ok(()) => Some(true),
+        Err(err) => {
+            eprintln!(
+                "warning: folded `{branch}` but could not close its PR #{number} ({err}); close it on GitHub manually"
+            );
+            Some(false)
+        }
+    }
+}
+
+fn report_fold(
+    format: OutputFormat,
+    branch: &str,
+    parent: &str,
+    restacked: &[String],
+    pr_closed: Option<bool>,
+    into_trunk: bool,
+) {
+    match format {
+        OutputFormat::Json => {
+            let mut v = json!({
+                "op": "fold",
+                "branch": branch,
+                "into": parent,
+                "restacked": restacked,
+                "pr_closed": pr_closed,
+            });
+            if into_trunk {
+                v["folded_into_trunk"] = json!(true);
+            }
+            println!("{v}");
+        }
+        OutputFormat::Pretty => {
+            if into_trunk {
+                println!("Folded {branch} into {parent} (the trunk)");
+            } else {
+                println!("Folded {branch} into {parent}");
+            }
+            for name in restacked {
+                println!("Restacked {name}");
+            }
+            match pr_closed {
+                Some(true) => println!("Closed {branch}'s PR"),
+                Some(false) => println!("Could not close {branch}'s PR (see warning)"),
+                None => {}
             }
         }
     }
@@ -1165,6 +1411,9 @@ pub fn abort_cmd(format: OutputFormat) -> Result<(), Error> {
                 ),
             }
         }
+        if let Ok(op @ recovery::Operation::Fold { .. }) = &cont {
+            rollback_fold(&git, op);
+        }
     }
     clear_conflict_artifacts(&git);
     if let Some(err) = abort_err {
@@ -1175,6 +1424,74 @@ pub fn abort_cmd(format: OutputFormat) -> Result<(), Error> {
         OutputFormat::Pretty => println!("Aborted."),
     }
     Ok(())
+}
+
+/// Undo an aborted fold: roll the parent's ref back to its pre-fold tip,
+/// re-track the folded branch on its old base (with its PR record), and
+/// re-point its children back onto it. Unlike move's, this rollback is
+/// unconditional: the folded ref is only deleted after a CLEAN restack, so it
+/// still names the folded tip, and any child the restack already rebased sits
+/// on that tip, exactly its restored base. Nothing is orphaned by rolling back
+/// mid-pass. All steps warn rather than fail: `abort`'s job of clearing the
+/// rebase already succeeded.
+fn rollback_fold(git: &Git, op: &recovery::Operation) {
+    let recovery::Operation::Fold {
+        branch,
+        parent,
+        parent_pre_tip,
+        branch_base_hash,
+        children_pre,
+        pr_number,
+        pr_url,
+        ..
+    } = op
+    else {
+        return;
+    };
+    // The folded branch's ref still names the folded tip, which is what the
+    // parent was fast-forwarded to: use it as the lease so a parent the user
+    // has since moved is never clobbered.
+    let folded_tip = git
+        .ref_commit(&format!("refs/heads/{branch}"))
+        .ok()
+        .flatten();
+    if let Err(err) = git.update_ref(
+        &format!("refs/heads/{parent}"),
+        parent_pre_tip,
+        folded_tip.as_deref(),
+    ) {
+        eprintln!(
+            "warning: could not restore `{parent}` to its pre-fold tip {parent_pre_tip}: {err}; reset it manually"
+        );
+    }
+    let store = StateStore::new(git.clone());
+    let restored = store.update(|state| {
+        state.branches.insert(
+            branch.clone(),
+            BranchState {
+                base: Base {
+                    name: parent.clone(),
+                    hash: branch_base_hash.clone(),
+                },
+                pr: pr_number.map(|number| PullRequest {
+                    number,
+                    url: pr_url.clone(),
+                }),
+            },
+        );
+        for (child, pre_hash) in children_pre {
+            if let Some(b) = state.branches.get_mut(child) {
+                b.base.name.clone_from(branch);
+                b.base.hash.clone_from(pre_hash);
+            }
+        }
+        Ok(())
+    });
+    if let Err(err) = restored {
+        eprintln!(
+            "warning: could not restore the pre-fold state ({err}); run `stacc track --base {parent}` on `{branch}` to recover"
+        );
+    }
 }
 
 /// `stacc undo`: revert the most recent stacc mutation(s) by restoring a prior
@@ -1438,6 +1755,25 @@ fn continue_op(
                 "{}",
                 json!({ "op": "modify", "branch": branch, "sha": tip, "restacked": restacked })
             );
+        }
+        // A resumed fold still owes its ref surgery (switch to the parent,
+        // delete the folded ref) and any requested PR close; the direct path
+        // runs these only after a clean first pass. Reports the direct
+        // command's {op,branch,into,restacked,pr_closed} shape.
+        recovery::Operation::Fold {
+            branch,
+            parent,
+            close,
+            pr_number,
+            ..
+        } => {
+            finish_fold_refs(git, branch, parent);
+            let pr_closed = if *close {
+                close_folded_pr(git, repo, branch, *pr_number)
+            } else {
+                None
+            };
+            report_fold(format, branch, parent, &restacked, pr_closed, parent == &repo.trunk);
         }
         // A resumed move reports the same {op,branch,base,restacked} shape as the
         // direct command (pretty uses the shared restacked output).
