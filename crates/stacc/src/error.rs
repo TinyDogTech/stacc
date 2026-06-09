@@ -48,6 +48,13 @@ pub enum Error {
     #[error("multiple choices: {}; check out one directly", choices.join(", "))]
     #[diagnostic(code(stacc::ambiguous))]
     Ambiguous { choices: Vec<String> },
+
+    /// A focused operation would rewrite `branch`, but it is checked out in
+    /// another `worktree`; rewriting it there would desync that worktree. The
+    /// caller should finish or relocate that branch first.
+    #[error("`{branch}` is checked out in another worktree ({worktree}); finish or move it there first, or run from that worktree")]
+    #[diagnostic(code(stacc::worktree_conflict))]
+    WorktreeConflict { branch: String, worktree: String },
 }
 
 // Map the state layer's errors onto the user-facing `Error`. Contention gets its
@@ -121,6 +128,11 @@ impl Error {
                 "error": "ambiguous",
                 "message": format!("multiple choices: {}; check out one directly", choices.join(", ")),
                 "choices": choices,
+            }),
+            Error::WorktreeConflict { branch, worktree } => json!({
+                "error": "worktree_conflict",
+                "branch": branch,
+                "worktree": worktree,
             }),
         }
     }

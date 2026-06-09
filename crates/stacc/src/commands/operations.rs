@@ -50,6 +50,10 @@ pub fn modify(args: &ModifyArgs, format: OutputFormat) -> Result<(), Error> {
             ))
         })?;
 
+    // Fail fast if any branch we would restack is checked out in another
+    // worktree, rather than amending and then skipping that child mid-pass.
+    guard_worktree(&git, &ops::upstack_order(&state.branches, &branch))?;
+
     let pre_amend = git.rev_parse("HEAD")?;
 
     if args.commit {
@@ -198,6 +202,10 @@ pub fn move_cmd(args: &MoveArgs, format: OutputFormat) -> Result<(), Error> {
             "`{branch}` already descends `{onto}`; move re-parents onto a different lineage, it does not flatten the stack"
         )));
     }
+
+    // Fail fast if any branch in the subtree we would restack is checked out in
+    // another worktree.
+    guard_worktree(&git, &subtree)?;
 
     // Re-point the recorded base name. Keep base.hash: it marks where the
     // branch's own commits start, which restack replays onto the new base's tip.
@@ -1170,6 +1178,18 @@ fn restack_with_recovery(
                     outcome.skipped.join(", ")
                 );
             }
+            if !outcome.worktree_skipped.is_empty() {
+                let list = outcome
+                    .worktree_skipped
+                    .iter()
+                    .map(|(b, wt)| format!("{b} ({wt})"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                eprintln!(
+                    "warning: skipped {} branch(es) checked out in another worktree: {list}. Restack them from there, or finish and remove the worktree.",
+                    outcome.worktree_skipped.len()
+                );
+            }
             Ok(outcome.restacked)
         }
         Err(ops::OpsError::Conflict { branch, remaining }) => {
@@ -1219,6 +1239,23 @@ fn abort_and_report(git: &Git, branch: &str, reason: &str) -> Error {
             "conflict on `{branch}`, but {reason} and the rebase abort also failed ({abort_err}); run `git rebase --abort` manually"
         ),
     })
+}
+
+/// Refuse a focused operation when any branch it would rewrite is checked out in
+/// another worktree, naming the first such branch. Bulk passes (`restack`,
+/// `sync`) skip these per-branch in the engine and report them; focused ops
+/// (`modify`, `move`) fail fast here so the user finishes or relocates that
+/// branch first instead of getting a partial result.
+fn guard_worktree(git: &Git, branches: &[String]) -> Result<(), Error> {
+    for branch in branches {
+        if let Some(wt) = git.branch_checked_out_elsewhere(branch)? {
+            return Err(Error::WorktreeConflict {
+                branch: branch.clone(),
+                worktree: wt.to_string_lossy().into_owned(),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Persist a restack-driven command transactionally: apply the command's own
