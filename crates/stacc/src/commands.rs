@@ -28,9 +28,8 @@ pub fn init(args: &InitArgs, format: OutputFormat) -> Result<(), Error> {
     let git = Git::open(".");
     let store = StateStore::new(git.clone());
 
-    let mut state = store.load()?;
-    if let Some(repo) = &state.repo {
-        report(format, "already_initialized", repo);
+    if let Some(repo) = store.load()?.repo {
+        report(format, "already_initialized", &repo);
         return Ok(());
     }
 
@@ -41,14 +40,21 @@ pub fn init(args: &InitArgs, format: OutputFormat) -> Result<(), Error> {
         remote: args.remote.clone(),
     };
     let config = resolve(detected, file, flags)?;
-
-    state.repo = Some(RepoConfig {
+    let repo = RepoConfig {
         trunk: config.trunk,
         remote: config.remote,
-    });
-    store.save(&state)?;
+    };
 
-    report(format, "initialized", state.repo.as_ref().expect("just set"));
+    // A concurrent init may have won between the check above and here; only set
+    // the config if the ref is still uninitialized.
+    store.update(|state| {
+        if state.repo.is_none() {
+            state.repo = Some(repo.clone());
+        }
+        Ok(())
+    })?;
+
+    report(format, "initialized", &repo);
     Ok(())
 }
 
@@ -74,9 +80,8 @@ pub fn track(args: &TrackArgs, format: OutputFormat) -> Result<(), Error> {
     let git = Git::open(".");
     let store = StateStore::new(git.clone());
 
-    let mut state = store.load()?;
-    let trunk = match &state.repo {
-        Some(repo) => repo.trunk.clone(),
+    let trunk = match store.load()?.repo {
+        Some(repo) => repo.trunk,
         None => {
             return Err(Error::Usage(
                 "stacc is not initialized; run `stacc init` first".into(),
@@ -92,17 +97,19 @@ pub fn track(args: &TrackArgs, format: OutputFormat) -> Result<(), Error> {
     let base = args.base.clone().unwrap_or(trunk);
     let base_hash = git.rev_parse(&base)?;
 
-    state.branches.insert(
-        branch.clone(),
-        BranchState {
-            base: Base {
-                name: base.clone(),
-                hash: base_hash,
+    store.update(|state| {
+        state.branches.insert(
+            branch.clone(),
+            BranchState {
+                base: Base {
+                    name: base.clone(),
+                    hash: base_hash.clone(),
+                },
+                pr: None,
             },
-            pr: None,
-        },
-    );
-    store.save(&state)?;
+        );
+        Ok(())
+    })?;
 
     match format {
         OutputFormat::Json => println!(
@@ -120,7 +127,7 @@ pub fn track(args: &TrackArgs, format: OutputFormat) -> Result<(), Error> {
 pub fn untrack(args: &UntrackArgs, format: OutputFormat) -> Result<(), Error> {
     let git = Git::open(".");
     let store = StateStore::new(git.clone());
-    let mut state = store.load()?;
+    let state = store.load()?;
     let repo = state
         .repo
         .clone()
@@ -142,20 +149,30 @@ pub fn untrack(args: &UntrackArgs, format: OutputFormat) -> Result<(), Error> {
             repo.trunk
         )));
     }
-    let Some(removed) = state.branches.remove(&target) else {
+    if !state.branches.contains_key(&target) {
         return Err(Error::Usage(format!("branch `{target}` is not tracked")));
-    };
-
-    // Reparent the removed branch's children onto its base.
-    let base = removed.base.name;
-    let mut reparented: Vec<String> = Vec::new();
-    for (name, branch) in &mut state.branches {
-        if branch.base.name == target {
-            branch.base.name.clone_from(&base);
-            reparented.push(name.clone());
-        }
     }
-    store.save(&state)?;
+
+    // Remove the branch and reparent its children onto its base, re-evaluated
+    // against fresh state so a concurrent change to another branch survives. A
+    // `None` result means a concurrent untrack already removed it.
+    let Some((base, reparented)) = store.update(|state| {
+        let Some(removed) = state.branches.remove(&target) else {
+            return Ok(None);
+        };
+        let base = removed.base.name;
+        let mut reparented: Vec<String> = Vec::new();
+        for (name, branch) in &mut state.branches {
+            if branch.base.name == target {
+                branch.base.name.clone_from(&base);
+                reparented.push(name.clone());
+            }
+        }
+        Ok(Some((base, reparented)))
+    })?
+    else {
+        return Ok(());
+    };
 
     match format {
         OutputFormat::Json => println!(
@@ -183,7 +200,7 @@ pub fn untrack(args: &UntrackArgs, format: OutputFormat) -> Result<(), Error> {
 pub fn create(args: &CreateArgs, format: OutputFormat) -> Result<(), Error> {
     let git = Git::open(".");
     let store = StateStore::new(git.clone());
-    let mut state = store.load()?;
+    let state = store.load()?;
     let repo = state
         .repo
         .clone()
@@ -215,22 +232,26 @@ pub fn create(args: &CreateArgs, format: OutputFormat) -> Result<(), Error> {
 
     // Track the branch before committing so a failing commit (e.g. a pre-commit
     // hook) can't strand it untracked; the staged changes survive for a retry.
-    state.branches.insert(
-        args.name.clone(),
-        BranchState {
-            base: Base {
-                name: base.clone(),
-                hash: base_hash,
-            },
-            pr: None,
-        },
-    );
-    store.save(&state).map_err(|e| {
-        Error::Usage(format!(
-            "created branch `{}` but could not save state: {e}; run `stacc track` to recover",
-            args.name
-        ))
-    })?;
+    store
+        .update(|state| {
+            state.branches.insert(
+                args.name.clone(),
+                BranchState {
+                    base: Base {
+                        name: base.clone(),
+                        hash: base_hash.clone(),
+                    },
+                    pr: None,
+                },
+            );
+            Ok(())
+        })
+        .map_err(|e| {
+            Error::Usage(format!(
+                "created branch `{}` but could not save state: {e}; run `stacc track` to recover",
+                args.name
+            ))
+        })?;
 
     let (committed, sha) = if git.has_staged_changes()? {
         let message = args.message.clone().unwrap_or_else(|| args.name.clone());
@@ -416,10 +437,13 @@ fn open_in_browser(url: &str) {
 
 /// `stacc submit`: push the current branch and its ancestors up to the trunk,
 /// creating or updating each branch's PR with its parent as the base.
+// A cohesive validate -> push/PR loop -> persist -> report sequence; splitting it
+// would only trade this lint for `too_many_arguments` on a helper.
+#[allow(clippy::too_many_lines)]
 pub fn submit(args: &SubmitArgs, format: OutputFormat) -> Result<(), Error> {
     let git = Git::open(".");
     let store = StateStore::new(git.clone());
-    let mut state = store.load()?;
+    let state = store.load()?;
     let repo = state
         .repo
         .clone()
@@ -440,6 +464,9 @@ pub fn submit(args: &SubmitArgs, format: OutputFormat) -> Result<(), Error> {
 
     // (branch, created?, number, url) for each branch we acted on.
     let mut results: Vec<(String, bool, u64, String)> = Vec::new();
+    // The PR records to write back, applied together in one transactional update
+    // after the network work so a concurrent change to another branch survives.
+    let mut pr_updates: Vec<(String, PullRequest)> = Vec::new();
 
     for branch in &chain {
         let is_current = branch == &current;
@@ -493,17 +520,25 @@ pub fn submit(args: &SubmitArgs, format: OutputFormat) -> Result<(), Error> {
             )?,
         };
 
-        if let Some(branch_state) = state.branches.get_mut(branch) {
-            branch_state.pr = Some(PullRequest {
+        pr_updates.push((
+            branch.clone(),
+            PullRequest {
                 number: pr.number,
                 url: Some(pr.url.clone()),
-            });
-        }
+            },
+        ));
 
         results.push((branch.clone(), existing.is_none(), pr.number, pr.url));
     }
 
-    store.save(&state)?;
+    store.update(|state| {
+        for (branch, pr) in &pr_updates {
+            if let Some(branch_state) = state.branches.get_mut(branch) {
+                branch_state.pr = Some(pr.clone());
+            }
+        }
+        Ok(())
+    })?;
 
     match format {
         OutputFormat::Json => {
@@ -547,7 +582,7 @@ fn resolve_description(value: &str) -> Result<String, Error> {
 pub fn rename(args: &RenameArgs, format: OutputFormat) -> Result<(), Error> {
     let git = Git::open(".");
     let store = StateStore::new(git.clone());
-    let mut state = store.load()?;
+    let state = store.load()?;
     let repo = state
         .repo
         .clone()
@@ -599,21 +634,23 @@ pub fn rename(args: &RenameArgs, format: OutputFormat) -> Result<(), Error> {
     // failure leaves a consistent (renamed, PR-still-recorded) state to
     // re-`submit` from rather than a half-applied one.
     git.rename_branch(&from, to)?;
-    let moved = state
-        .branches
-        .remove(&from)
-        .expect("from was just checked as tracked");
-    state.branches.insert(to.clone(), moved);
-    for branch in state.branches.values_mut() {
-        if branch.base.name == from {
-            branch.base.name.clone_from(to);
-        }
-    }
-    store.save(&state).map_err(|e| {
-        Error::Usage(format!(
-            "renamed `{from}` locally but could not save state: {e}; run `stacc track` on `{to}` to recover"
-        ))
-    })?;
+    store
+        .update(|state| {
+            if let Some(moved) = state.branches.remove(&from) {
+                state.branches.insert(to.clone(), moved);
+                for branch in state.branches.values_mut() {
+                    if branch.base.name == from {
+                        branch.base.name.clone_from(to);
+                    }
+                }
+            }
+            Ok(())
+        })
+        .map_err(|e| {
+            Error::Usage(format!(
+                "renamed `{from}` locally but could not save state: {e}; run `stacc track` on `{to}` to recover"
+            ))
+        })?;
 
     // Remote rename only when the branch was on the remote (it had a PR). The
     // API retargets child base-PRs but closes this branch's own PR, so on
@@ -627,10 +664,12 @@ pub fn rename(args: &RenameArgs, format: OutputFormat) -> Result<(), Error> {
             Ok(()) => {
                 remote_renamed = true;
                 pr_closed.clone_from(&own_pr);
-                if let Some(branch) = state.branches.get_mut(to) {
-                    branch.pr = None;
-                }
-                if let Err(err) = store.save(&state) {
+                if let Err(err) = store.update(|state| {
+                    if let Some(branch) = state.branches.get_mut(to) {
+                        branch.pr = None;
+                    }
+                    Ok(())
+                }) {
                     eprintln!(
                         "warning: renamed `{to}` on the remote and closed its PR, but could not drop the local PR record ({err}); run `stacc submit` to reconcile"
                     );

@@ -14,7 +14,14 @@ pub enum Error {
     Config(#[from] stacc_config::ConfigError),
 
     #[error(transparent)]
-    State(#[from] stacc_state::StateError),
+    State(stacc_state::StateError),
+
+    /// The state-ref compare-and-swap lost every retry: another process kept
+    /// updating the same stack. Distinct from `State` so an agent can recognize
+    /// contention by code and retry, rather than treating it as a hard failure.
+    #[error("{0}")]
+    #[diagnostic(code(stacc::contention))]
+    Contention(String),
 
     #[error(transparent)]
     Git(#[from] stacc_git::GitError),
@@ -41,6 +48,21 @@ pub enum Error {
     #[error("multiple choices: {}; check out one directly", choices.join(", "))]
     #[diagnostic(code(stacc::ambiguous))]
     Ambiguous { choices: Vec<String> },
+}
+
+// Map the state layer's errors onto the user-facing `Error`. Contention gets its
+// own discriminator (so an agent can branch on it and retry); everything else
+// stays transparent under `State`. A manual impl is required because singling
+// out one variant rules out a blanket `#[from]`.
+impl From<stacc_state::StateError> for Error {
+    fn from(err: stacc_state::StateError) -> Self {
+        match err {
+            stacc_state::StateError::Contention { attempts } => Error::Contention(format!(
+                "state ref contention: gave up after {attempts} attempts; another agent is updating the same stack, retry"
+            )),
+            other => Error::State(other),
+        }
+    }
 }
 
 // The operations engine has its own error type so `stacc-core` stays off the
@@ -84,6 +106,7 @@ impl Error {
         match self {
             Error::Config(err) => json!({ "error": "config", "message": err.to_string() }),
             Error::State(err) => json!({ "error": "state", "message": err.to_string() }),
+            Error::Contention(msg) => json!({ "error": "contention", "message": msg }),
             Error::Git(err) => json!({ "error": "git", "message": err.to_string() }),
             Error::Github(err) => json!({ "error": "github", "message": err.to_string() }),
             Error::Conflict { branch } => json!({
@@ -100,5 +123,25 @@ impl Error {
                 "choices": choices,
             }),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn contention_maps_to_its_own_discriminator() {
+        let err: Error = stacc_state::StateError::Contention { attempts: 5 }.into();
+        assert!(matches!(err, Error::Contention(_)));
+        assert_eq!(err.as_json()["error"].as_str(), Some("contention"));
+    }
+
+    #[test]
+    fn other_state_errors_stay_transparent() {
+        let json_err = serde_json::from_str::<i32>("not a number").unwrap_err();
+        let err: Error = stacc_state::StateError::Json(json_err).into();
+        assert!(matches!(err, Error::State(_)));
+        assert_eq!(err.as_json()["error"].as_str(), Some("state"));
     }
 }
