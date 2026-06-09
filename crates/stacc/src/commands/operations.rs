@@ -1181,37 +1181,44 @@ fn restack_with_recovery(
             write_conflict_context(git, state, repo, &branch);
             let dir = git.git_dir()?;
             if let Err(err) = recovery::write_continuation(&dir, &make_op(remaining)) {
-                let aborted = git.rebase_abort();
-                clear_conflict_artifacts(git);
-                return Err(Error::Usage(match aborted {
-                    Ok(()) => format!(
-                        "conflict on `{branch}`, but the recovery state could not be saved ({err}); rebase aborted to a clean tree"
-                    ),
-                    Err(abort_err) => format!(
-                        "conflict on `{branch}`, but the recovery state could not be saved ({err}) and the rebase abort also failed ({abort_err}); run `git rebase --abort` manually"
-                    ),
-                }));
+                return Err(abort_and_report(
+                    git,
+                    &branch,
+                    &format!("the recovery state could not be saved ({err})"),
+                ));
             }
             // Persist the partial progress transactionally. On failure (e.g.
             // contention from a concurrent writer), abort the rebase and clear
             // artifacts so we never leave an in-progress rebase the user cannot
             // reconcile, mirroring the failed-marker-write guard above.
             if let Err(err) = persist_restack(store, command_deltas, &applied) {
-                let aborted = git.rebase_abort();
-                clear_conflict_artifacts(git);
-                return Err(Error::Usage(match aborted {
-                    Ok(()) => format!(
-                        "conflict on `{branch}`, but persisting recovery state failed ({err}); rebase aborted to a clean tree"
-                    ),
-                    Err(abort_err) => format!(
-                        "conflict on `{branch}`, but persisting recovery state failed ({err}) and the rebase abort also failed ({abort_err}); run `git rebase --abort` manually"
-                    ),
-                }));
+                return Err(abort_and_report(
+                    git,
+                    &branch,
+                    &format!("persisting recovery state failed ({err})"),
+                ));
             }
             Err(Error::Conflict { branch })
         }
         Err(err) => Err(err.into()),
     }
+}
+
+/// Abort the in-progress rebase and clear recovery artifacts, then build the
+/// usage error explaining that a conflict could not be made resumable (`reason`)
+/// and how the fallback went. Shared by the conflict path's two
+/// cannot-persist-recovery guards so the abort-to-clean-tree policy lives once.
+fn abort_and_report(git: &Git, branch: &str, reason: &str) -> Error {
+    let aborted = git.rebase_abort();
+    clear_conflict_artifacts(git);
+    Error::Usage(match aborted {
+        Ok(()) => {
+            format!("conflict on `{branch}`, but {reason}; rebase aborted to a clean tree")
+        }
+        Err(abort_err) => format!(
+            "conflict on `{branch}`, but {reason} and the rebase abort also failed ({abort_err}); run `git rebase --abort` manually"
+        ),
+    })
 }
 
 /// Persist a restack-driven command transactionally: apply the command's own
