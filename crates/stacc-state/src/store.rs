@@ -65,6 +65,12 @@ impl StateStore {
         self.load_at(parent.as_deref())
     }
 
+    /// Load the [`State`] recorded in a specific version (commit), used by `undo`
+    /// to read a prior version off the state-ref history.
+    pub fn load_version(&self, commit: &str) -> Result<State, StateError> {
+        self.load_at(Some(commit))
+    }
+
     /// Load the state recorded in a specific commit (its tree of JSON blobs), or
     /// an empty state when `commit` is `None`. Reading from a captured commit
     /// hash, rather than re-resolving the ref by name, is what lets [`update`]

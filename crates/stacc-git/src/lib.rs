@@ -228,6 +228,32 @@ impl Git {
         }
     }
 
+    /// Whether the working tree (tracked files, staged or unstaged) differs from
+    /// `HEAD`. `git diff --quiet HEAD` exits 0 when the tree matches HEAD and 1
+    /// when it is dirty. Untracked files do not count: a `reset --hard` keeps
+    /// them, so a caller guarding a hard reset only cares about tracked changes.
+    pub fn has_uncommitted_changes(&self) -> Result<bool, GitError> {
+        let args = ["diff", "--quiet", "HEAD"];
+        let output = self
+            .command(&args)
+            .output()
+            .map_err(|source| GitError::Spawn { source })?;
+        match output.status.code() {
+            Some(0) => Ok(false),
+            Some(1) => Ok(true),
+            _ => Err(self.command_error(&args, &output)),
+        }
+    }
+
+    /// Reset the current branch, `HEAD`, and the working tree to `target`
+    /// (`git reset --hard`). Discards tracked-file changes, so a caller that must
+    /// not lose them checks [`has_uncommitted_changes`] first.
+    ///
+    /// [`has_uncommitted_changes`]: Git::has_uncommitted_changes
+    pub fn reset_hard(&self, target: &str) -> Result<(), GitError> {
+        self.run(&["reset", "--hard", target]).map(|_| ())
+    }
+
     /// Push `refspec` to `remote`.
     pub fn push(&self, remote: &str, refspec: &str) -> Result<(), GitError> {
         self.run(&["push", remote, refspec]).map(|_| ())

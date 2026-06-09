@@ -81,6 +81,8 @@ pub enum Command {
     Continue,
     /// Abort the operation interrupted by a conflict, undoing the in-progress rebase.
     Abort,
+    /// Revert the most recent stacc mutation(s), restoring prior state and tips.
+    Undo(UndoArgs),
     /// Move up the stack toward the tip (optionally N levels).
     Up(StepsArgs),
     /// Move down the stack toward the trunk (optionally N levels).
@@ -278,6 +280,13 @@ pub struct RestackArgs {
     /// Restack the whole stack instead of just the current branch and its upstack.
     #[arg(long)]
     pub stack: bool,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct UndoArgs {
+    /// How many versions back to revert (default 1).
+    #[arg(long, default_value_t = 1)]
+    pub steps: usize,
 }
 
 /// Arguments for `stacc move`.
