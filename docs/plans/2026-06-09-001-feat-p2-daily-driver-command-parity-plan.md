@@ -142,13 +142,13 @@ exactly this split):
 - **Resumable continuation** for ops that re-point *N* branches and then rebase the
   chain, where any of the N rebases can conflict after earlier ones already
   applied: `reorder` and `split --by-file`. A single `pre_base` anchor cannot
-  describe a conflict on branch k with 1..k-1 already rewritten — `abort` must
+  describe a conflict on branch k with 1..k-1 already rewritten, `abort` must
   restore *every* re-pointed base regardless of where the conflict landed, and
   `continue` must drain the remaining queue. These record a new
   `recovery::Operation` variant carrying the full reordered queue plus the
   `{branch → pre_base}` map, reusing the engine's existing remaining-queue conflict
-  path. (The existing single-branch abort guard — "only roll back if the conflict
-  hit the first branch" — does **not** generalize and must not be reused for these.)
+  path. (The existing single-branch abort guard, "only roll back if the conflict
+  hit the first branch", does **not** generalize and must not be reused for these.)
 
 **Precondition for `squash`/`fold` (git-spice `VerifyRestacked`):** both refuse a
 branch that is not already restacked onto its base, with a structured error. A
@@ -184,7 +184,7 @@ rewrites the wrong commit.
   that no `recovery::Operation` can resume.
 - **Ambiguous and unsupported changes are left staged and reported**, never
   prompted under `--no-interactive`. The reported set distinguishes *no match*
-  from *unsupported change kind*: new files (no commit introduced them — jj
+  from *unsupported change kind*: new files (no commit introduced them, jj
   `absorb.rs:124`), binary files and symlinks (no line hunks), renames (detect via
   `-M`; map the old path or report), and a target commit that becomes empty after
   absorbing (decide drop-vs-keep, report it).
@@ -202,7 +202,7 @@ This is the hardest unit; its git plumbing is U1. References:
 `split` divides the current branch into multiple branches (origin R9). Two
 scriptable modes, no editor required:
 - **by-commit** (default): each commit on the branch becomes its own stacked
-  branch, in order. **Re-points refs at existing commits, no cherry-pick** —
+  branch, in order. **Re-points refs at existing commits, no cherry-pick** ,
   create `refs/heads/<name>` at the already-existing commit hash and record
   `(branch, base.name, base.hash)` chaining each to its predecessor, then restack
   any prior upstack onto the new tip. This is git-spice's and graphite's mechanic
@@ -212,7 +212,7 @@ scriptable modes, no editor required:
   `base..head`) **before** writing any ref (two-phase: validate → write refs →
   commit tracking state).
 - **by-file**: `--by-file` maps pathspecs to new branch names. This is **novel
-  territory** — no reference implements a non-interactive by-file split (all are
+  territory**, no reference implements a non-interactive by-file split (all are
   interactive). It necessarily **re-authors** commits, so the whole upstack
   restacks. A single commit touching files in two groups (the hard case) is
   handled by **flattening** `base..head` and re-partitioning by pathspec
@@ -235,7 +235,7 @@ by-file (a rebasing re-author) uses the resumable-continuation recovery path
 restacks descendants (origin R10). The non-interactive form is `--order
 <b1,b2,...>` listing the downstack branches in their new bottom-up order. stacc
 **strictly validates** the list is a permutation of exactly the current downstack
-set — rejecting unknown names and duplicates (git-spice's `editStackFile`
+set, rejecting unknown names and duplicates (git-spice's `editStackFile`
 validation in `internal/spice/stack_edit.go`), and erroring on a non-permutation
 rather than graphite's permissive "re-parent whatever names appear". It re-points
 each branch's recorded base to its new predecessor walking bottom-up, then restacks
@@ -259,7 +259,7 @@ planning), grounded in graphite/git-spice:
   `--force` when the branch is *merged into its base*, **or** its recorded PR is
   CLOSED/MERGED, **or** its diff is empty; otherwise refuse and name `--force`. The
   empty-branch and merged-PR escape hatches are ones users hit often.
-- An associated **open PR is left open by default** — confirmed best practice:
+- An associated **open PR is left open by default**, confirmed best practice:
   neither graphite nor git-spice closes a PR on delete. `--close` is stacc's opt-in
   addition (closing a teammate-visible PR is a remote, hard-to-undo side effect).
 - Reparent children onto the deleted branch's base (`child.base = deleted.base`),
@@ -383,11 +383,11 @@ or carve a tree by pathspec. No command behavior change.
 **Approach:** Wrap the git plumbing the surgery commands need: `diff_hunks` (the
 staged diff parsed into addressable hunks with pre-image line ranges),
 `blame`/annotate over a file's downstack range (which commit last touched each
-line — the absorb mapper per KTD-2), and the in-memory tree-rewrite primitives
+line, the absorb mapper per KTD-2), and the in-memory tree-rewrite primitives
 absorb and by-file split use (`read_blob` → patch a blob → `hash_object` →
 `write_tree` → `commit_tree`, plus a `read-tree`/`checkout-index` restricted to a
 pathspec). `stacc-git` already has `write_tree`/`commit_tree`/`hash_object`/
-`read_blob`/`update_ref`/`force_branch` — extend, don't duplicate. Note what is
+`read_blob`/`update_ref`/`force_branch`, extend, don't duplicate. Note what is
 **not** needed: no `apply --check`-as-mapper (apply-check is at most a fallback
 validity gate, not the absorb mapper), no fixup/autosquash helper (KTD-2 rejects
 autosquash), and by-commit split uses the existing `update_ref`/`force_branch` (no
@@ -432,8 +432,8 @@ staged hunk by blame to the downstack commit that introduced its lines (U1);
 ambiguous hunks (multi-commit blame, boundary insertions) and unsupported kinds
 (new file, binary/symlink, rename, would-empty-a-commit) are left staged and
 reported with a reason. **Apply** by rewriting each target commit's tree in memory
-(`commit-tree`) and replaying descendants onto the new ids — no autosquash, no
-rebase-in-progress window — then restack the upstack through `restack_with_recovery`
+(`commit-tree`) and replaying descendants onto the new ids, no autosquash, no
+rebase-in-progress window, then restack the upstack through `restack_with_recovery`
 (`Operation::Restack`). `--dry-run` emits mapping + per-target summary +
 unabsorbed-with-reasons JSON and exits without mutating.
 
@@ -557,7 +557,7 @@ with by-file runnable non-interactively.
 (no duplicate/existing names; commits resolve into `base..head`), then create each
 new branch ref **at the existing commit hash** (`update_ref`/`force_branch`, no
 cherry-pick), chaining each `(branch, base.name, base.hash)` on its predecessor, and
-restack any prior upstack onto the new tip — atomic rollback (pre-op hashes).
+restack any prior upstack onto the new tip, atomic rollback (pre-op hashes).
 **by-file**: `--by-file` maps pathspecs to names; flatten `base..head`, carve each
 group's tree by pathspec (`read-tree`/`checkout-index`), `commit-tree` a new commit
 per group onto its predecessor (U1). Re-authoring changes commit ids, so the whole
@@ -607,7 +607,7 @@ mutating. Re-point each branch's `base.name` to its new predecessor walking
 bottom-up; restack the reordered chain through the engine. Because any of the N
 rebases can conflict after earlier branches already re-pointed, reorder records a
 **resumable continuation** carrying the remaining queue plus the `{branch →
-pre_base}` map (per KTD-1) — `continue` drains the queue, `abort` restores *every*
+pre_base}` map (per KTD-1), `continue` drains the queue, `abort` restores *every*
 re-pointed base regardless of where the conflict landed. (Do **not** reuse the
 single-branch Move abort guard.) Off a TTY with no `--order` → structured error;
 editor reorder is TTY-only.
@@ -649,7 +649,7 @@ children, all transactionally. `delete` additionally deletes the git branch ref,
 applying the **safety predicate** (allow without `--force` when merged-into-base OR
 PR is CLOSED/MERGED OR diff is empty; else refuse and name `--force`), and optionally
 closes its PR with `--close` (PR left open by default). `pop` keeps the branch's
-changes via `git reset --mixed <base>` — and **orders the steps** so children are
+changes via `git reset --mixed <base>`, and **orders the steps** so children are
 reparented and restacked *before* the mixed reset (while the branch commits still
 exist), refusing `pop` on a dirty working tree so the popped diff can't collide.
 Both `guard_worktree` the branches they rewrite.
@@ -808,7 +808,7 @@ structured error, never a prompt. Each keeps the non-interactive + JSON contract
 
 **Goal:** Add the scope flags: `restack` (`--downstack`/`--upstack`/`--only`), `move`
 (`--only`), `submit` (`--stack`/`--update-only`/`--draft`), and `checkout`
-(`--stack`/`--trunk`/`--all`) — the last closes the `checkout` row the origin gap
+(`--stack`/`--trunk`/`--all`), the last closes the `checkout` row the origin gap
 table marks P2, which the current `CheckoutArgs` (only a branch positional) lacks.
 
 **Requirements:** R17, R21. **Dependencies:** none.
@@ -886,7 +886,7 @@ scope flags behave per graphite.
 - **Surgery conflict-recovery is two different shapes.** Atomic single-anchor ops
   (`squash`, `fold`, `split --by-commit`) cannot conflict once pre-restacked.
   Multi-branch rebasing ops (`reorder`, `split --by-file`) need a **resumable
-  continuation** — a one-shot anchor cannot unwind a conflict that lands mid-chain,
+  continuation**, a one-shot anchor cannot unwind a conflict that lands mid-chain,
   and the existing single-branch abort guard does not generalize. New
   `recovery::Operation` variants must be added carefully (the conflict path is where
   P1 regressions hid). Mitigation: characterization-first on the existing recovery
@@ -921,17 +921,17 @@ scope flags behave per graphite.
 
 ## Open Questions (deferred to implementation)
 
-- **`absorb` `--dry-run` JSON schema** — the exact shape of the mapping, per-target
+- **`absorb` `--dry-run` JSON schema**, the exact shape of the mapping, per-target
   summary, and unabsorbed-reason entries; settle against the real blame plumbing in
-  U1/U2. (The mapping *algorithm* — blame, not apply-check — is settled in KTD-2.)
-- **`split` by-file spec format** — inline `path=name` pairs vs. a file. (The
-  straddling-commit *policy* — flatten-and-partition, refuse-if-unpartitionable — is
+  U1/U2. (The mapping *algorithm*, blame, not apply-check, is settled in KTD-2.)
+- **`split` by-file spec format**, inline `path=name` pairs vs. a file. (The
+  straddling-commit *policy*, flatten-and-partition, refuse-if-unpartitionable, is
   settled in KTD-3.)
-- **`reorder` order-spec syntax** — comma list vs. a richer spec. (Strict
+- **`reorder` order-spec syntax**, comma list vs. a richer spec. (Strict
   permutation validation is settled in KTD-4.)
-- **`config` key namespace** — which keys are settable and the alias key form;
+- **`config` key namespace**, which keys are settable and the alias key form;
   settle in U11 against `stacc-config`'s shape, reporting source file in `list`.
-- **`recovery::Operation` variant shapes** — whether `fold` reuses `Move { pre_base }`
+- **`recovery::Operation` variant shapes**, whether `fold` reuses `Move { pre_base }`
   with a base-map snapshot vs. a named variant, and the exact `reorder`/`split
   --by-file` continuation record. The *strategy* (atomic anchor vs. resumable
   continuation, per op) is settled in KTD-1; the struct shapes settle when wiring
@@ -949,22 +949,22 @@ scope flags behave per graphite.
   (P1, the merged engine this builds on), `plans/stacc.md`, `plans/algorithms.md`.
 - Prior-art reference repos (sibling repos under `../`, read during the doc-review
   pass; these materially corrected KTD-2 and KTD-4):
-  - `../sapling` — `eden/scm/sapling/ext/absorb/__init__.py` (canonical linelog
+  - `../sapling`, `eden/scm/sapling/ext/absorb/__init__.py` (canonical linelog
     absorb; the blame-based mapping and leave-and-report ambiguity), `commands/uncommit.py`
     (pop semantics), `ext/amend/split.py`, `fold.py`.
-  - `../jj` — `lib/src/absorb.rs` + `cli/src/commands/absorb.rs` (cleanest Rust
+  - `../jj`, `lib/src/absorb.rs` + `cli/src/commands/absorb.rs` (cleanest Rust
     blame-based absorb with strict ambiguity + in-memory tree rewrite).
-  - `../git-spice` — `branch_split.go`, `internal/handler/split/handler.go` (by-commit
+  - `../git-spice`, `branch_split.go`, `internal/handler/split/handler.go` (by-commit
     = `SetRef` at existing hashes), `branch_squash.go` + `internal/handler/squash`
     (detach + soft-reset + `VerifyRestacked`), `branch_fold.go` (ff-merge via
     `fetch . child:parent`), `downstack_edit.go` + `internal/spice/stack_edit.go`
     (reorder permutation validation), `internal/spice/rebase.go` (`RebaseRescue`
     resumable continuation), `internal/git/rebase_wt.go` (git-shelling `rebase --onto`).
-  - `../graphite-cli` — `apps/cli/src/actions/delete_branch.ts` (`isSafeToDelete`
+  - `../graphite-cli`, `apps/cli/src/actions/delete_branch.ts` (`isSafeToDelete`
     predicate, leaves PR open), `lib/engine/engine.ts` (`unbranch` = `reset --mixed`
     pop), `actions/show_branch.ts` (`info` field set), `user-commands/*` (config shape).
 - Codebase (read directly): `crates/stacc/src/cli.rs` (current command/flag surface),
-  `crates/stacc-git/src/lib.rs` (existing git wrappers — has `write_tree`/`commit_tree`/
+  `crates/stacc-git/src/lib.rs` (existing git wrappers, has `write_tree`/`commit_tree`/
   `hash_object`/`read_blob`; no hunk/blame helpers yet),
   `crates/stacc-core/src/ops.rs` (engine, `parent`/`children`/`upstack_order`),
   `crates/stacc/src/commands/operations.rs` (the `modify`/`move`/`restack` shape to
