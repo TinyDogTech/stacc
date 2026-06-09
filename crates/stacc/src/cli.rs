@@ -75,6 +75,8 @@ pub enum Command {
     Move(MoveArgs),
     /// Distribute staged hunks into the downstack commits that introduced their lines.
     Absorb(AbsorbArgs),
+    /// Squash the current branch's commits into one, then restack its upstack.
+    Squash(SquashArgs),
     /// Rename the current branch, updating local state, children, and the remote.
     Rename(RenameArgs),
     /// Squash-merge the ready PRs from the trunk up to the current branch, then sync.
@@ -305,6 +307,15 @@ pub struct AbsorbArgs {
     /// Compute and print the hunk-to-commit mapping without mutating anything.
     #[arg(long)]
     pub dry_run: bool,
+}
+
+/// Arguments for `stacc squash`.
+#[derive(Debug, clap::Args)]
+pub struct SquashArgs {
+    /// Message for the squashed commit (defaults to the squashed commits'
+    /// subjects and bodies, concatenated oldest-first).
+    #[arg(long, short)]
+    pub message: Option<String>,
 }
 
 /// Arguments for `stacc merge`.
