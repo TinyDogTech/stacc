@@ -79,6 +79,8 @@ pub enum Command {
     Squash(SquashArgs),
     /// Fold the current branch into its parent, reparenting and restacking its children.
     Fold(FoldArgs),
+    /// Split the current branch into stacked branches, by commit or by file.
+    Split(SplitArgs),
     /// Rename the current branch, updating local state, children, and the remote.
     Rename(RenameArgs),
     /// Squash-merge the ready PRs from the trunk up to the current branch, then sync.
@@ -327,6 +329,22 @@ pub struct FoldArgs {
     /// is reported, not fatal).
     #[arg(long)]
     pub close: bool,
+}
+
+/// Arguments for `stacc split`.
+#[derive(Debug, clap::Args)]
+pub struct SplitArgs {
+    /// By-commit mode: names for the new branches, one per commit except the
+    /// tip, oldest commit first (the tip keeps the current branch's name). A
+    /// branch with N own commits takes exactly N-1 names.
+    pub names: Vec<String>,
+
+    /// By-file mode: a `<pathspec>=<branch-name>` group (repeatable). Every
+    /// changed path must match a group: a path matches by literal equality or
+    /// directory prefix (`src` matches `src/a.rs`), first group wins. Mutually
+    /// exclusive with positional names.
+    #[arg(long = "by-file", value_name = "PATHSPEC=NAME")]
+    pub by_file: Vec<String>,
 }
 
 /// Arguments for `stacc merge`.
