@@ -405,7 +405,7 @@ CAS with `expected_old = parent.or(ZERO_OID)`. On `update_ref` error, re-read th
 ref to classify miss-vs-error; retry on a miss up to `SAVE_ATTEMPTS`; return
 `Contention` on exhaustion. `save(&State)` may remain as a thin
 `update(|s| { *s = state.clone(); Ok(()) })` shim during migration, or be removed
-once call sites move (U3/U4) — implementer's call.
+once call sites move (U3/U4); implementer's call.
 
 **Execution note:** characterization-first. Before changing `save`, add a test that
 pins the lost-update bug (two `StateStore`s over one repo: A loads, B inserts and
