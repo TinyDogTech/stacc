@@ -12,7 +12,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use stacc_git::{Git, GitError, RebaseError};
-use stacc_state::{BranchState, State, StateError, StateStore};
+use stacc_state::{BranchState, State, StateError};
 use thiserror::Error;
 
 /// Failures from the operations engine. The CLI maps these onto its own
@@ -184,19 +184,23 @@ pub struct RestackOutcome {
 }
 
 /// Restack `order` bottom-up, rebasing each branch onto its base's current tip
-/// and updating its recorded base hash in `state`. On a conflict it saves
-/// `state` and returns [`OpsError::Conflict`] with the unfinished queue, leaving
-/// the rebase in progress. The caller MUST persist a continuation (or abort the
-/// rebase) before returning to the user, see `restack_with_recovery`.
+/// and updating its recorded base hash in `state`. Each completed branch's new
+/// `(name, base_hash)` is pushed onto `applied` so the caller can persist the
+/// change transactionally (via `StateStore::update`) rather than writing the
+/// whole state. On a conflict it returns [`OpsError::Conflict`] with the
+/// unfinished queue, leaving the rebase in progress and `applied` holding the
+/// branches finished so far; the caller MUST persist those plus a continuation
+/// (or abort the rebase) before returning to the user, see
+/// `restack_with_recovery`.
 ///
 /// A branch whose own ref or whose base's ref no longer resolves is skipped
 /// (not rebased) and collected into [`RestackOutcome::skipped`], so a deleted
 /// branch left in state does not abort the whole pass with a fatal git error.
 pub fn restack(
     git: &Git,
-    store: &StateStore,
     state: &mut State,
     order: &[String],
+    applied: &mut Vec<(String, String)>,
 ) -> Result<RestackOutcome, OpsError> {
     let mut restacked = Vec::new();
     let mut skipped = Vec::new();
@@ -228,7 +232,8 @@ pub fn restack(
         match git.rebase_onto(&base_tip, &upstream, branch) {
             Ok(()) => {}
             Err(RebaseError::Interrupt(_)) => {
-                store.save(state)?;
+                // Persisting `applied` so far is the caller's job now, through a
+                // transactional update; the engine only reports the conflict.
                 return Err(OpsError::Conflict {
                     branch: branch.clone(),
                     remaining: order[idx..].to_vec(),
@@ -239,6 +244,7 @@ pub fn restack(
         if let Some(b) = state.branches.get_mut(branch) {
             b.base.hash.clone_from(&base_tip);
         }
+        applied.push((branch.clone(), base_tip));
         restacked.push(branch.clone());
     }
     Ok(RestackOutcome { restacked, skipped })
@@ -247,7 +253,7 @@ pub fn restack(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use stacc_state::{Base, RepoConfig};
+    use stacc_state::{Base, RepoConfig, StateStore};
 
     /// Build a branch map from (branch, base) pairs.
     fn nav_stack(pairs: &[(&str, &str)]) -> BTreeMap<String, BranchState> {
@@ -450,14 +456,14 @@ mod tests {
     #[test]
     fn restack_rebases_chain_and_updates_base_hashes() {
         let (tmp, git) = init_repo();
-        let (store, mut state) = linear_stack(&tmp, &git);
+        let (_store, mut state) = linear_stack(&tmp, &git);
 
         // Advance main out from under the stack.
         run_git(tmp.path(), &["checkout", "-q", "main"]);
         write_commit(tmp.path(), "m.txt", "m\n", "main moves");
         let new_main = git.rev_parse("main").unwrap();
 
-        let restacked = restack(&git, &store, &mut state, &["a".into(), "b".into()])
+        let restacked = restack(&git, &mut state, &["a".into(), "b".into()], &mut Vec::new())
             .unwrap()
             .restacked;
         assert_eq!(restacked, vec!["a", "b"]);
@@ -470,20 +476,20 @@ mod tests {
     #[test]
     fn restack_is_idempotent() {
         let (tmp, git) = init_repo();
-        let (store, mut state) = linear_stack(&tmp, &git);
+        let (_store, mut state) = linear_stack(&tmp, &git);
         run_git(tmp.path(), &["checkout", "-q", "main"]);
         write_commit(tmp.path(), "m.txt", "m\n", "main moves");
 
-        restack(&git, &store, &mut state, &["a".into(), "b".into()]).unwrap();
+        restack(&git, &mut state, &["a".into(), "b".into()], &mut Vec::new()).unwrap();
         // Second pass: everything already sits on its base, so nothing moves.
-        let again = restack(&git, &store, &mut state, &["a".into(), "b".into()]).unwrap();
+        let again = restack(&git, &mut state, &["a".into(), "b".into()], &mut Vec::new()).unwrap();
         assert!(again.restacked.is_empty());
     }
 
     #[test]
     fn restack_recovers_via_fork_point_when_recorded_hash_is_stale() {
         let (tmp, git) = init_repo();
-        let (store, mut state) = linear_stack(&tmp, &git);
+        let (_store, mut state) = linear_stack(&tmp, &git);
         run_git(tmp.path(), &["checkout", "-q", "main"]);
         write_commit(tmp.path(), "m.txt", "m\n", "main moves");
         let new_main = git.rev_parse("main").unwrap();
@@ -492,7 +498,7 @@ mod tests {
         // the engine must fall back to `merge-base --fork-point`.
         state.branches.get_mut("a").unwrap().base.hash = "1".repeat(40);
 
-        let restacked = restack(&git, &store, &mut state, &["a".into()]).unwrap().restacked;
+        let restacked = restack(&git, &mut state, &["a".into()], &mut Vec::new()).unwrap().restacked;
         assert_eq!(restacked, vec!["a"]);
         assert!(git.is_ancestor(&new_main, "a").unwrap());
     }
@@ -500,7 +506,7 @@ mod tests {
     #[test]
     fn restack_skips_a_branch_with_no_git_ref() {
         let (tmp, git) = init_repo();
-        let (store, mut state) = linear_stack(&tmp, &git); // a on main, b on a (real)
+        let (_store, mut state) = linear_stack(&tmp, &git); // a on main, b on a (real)
         // A tracked branch whose git ref does not exist (a deleted-but-tracked ghost).
         state.branches.insert(
             "ghost".to_string(),
@@ -519,9 +525,9 @@ mod tests {
         // The ghost is skipped (not fatal); the real branches still restack.
         let outcome = restack(
             &git,
-            &store,
             &mut state,
             &["a".into(), "b".into(), "ghost".into()],
+            &mut Vec::new(),
         )
         .unwrap();
         assert_eq!(outcome.skipped, vec!["ghost"]);
@@ -532,12 +538,12 @@ mod tests {
     #[test]
     fn restack_skips_a_branch_whose_base_ref_is_gone() {
         let (tmp, git) = init_repo();
-        let (store, mut state) = linear_stack(&tmp, &git); // a on main, b on a (real)
+        let (_store, mut state) = linear_stack(&tmp, &git); // a on main, b on a (real)
         // Delete `a`'s git ref (the base of `b`); `b`'s own ref survives.
         run_git(tmp.path(), &["checkout", "-q", "main"]);
         run_git(tmp.path(), &["branch", "-D", "a"]);
 
-        let outcome = restack(&git, &store, &mut state, &["a".into(), "b".into()]).unwrap();
+        let outcome = restack(&git, &mut state, &["a".into(), "b".into()], &mut Vec::new()).unwrap();
         // `b` is skipped because its base `a` no longer resolves (the missing-base leg).
         assert!(
             outcome.skipped.contains(&"b".to_string()),
@@ -550,7 +556,7 @@ mod tests {
     #[test]
     fn restack_conflict_queue_excludes_a_preceding_skipped_ghost() {
         let (tmp, git) = init_repo();
-        let (store, mut state) = linear_stack(&tmp, &git);
+        let (_store, mut state) = linear_stack(&tmp, &git);
         // A ghost (no git ref) tracked ahead of the conflict in the queue.
         state.branches.insert(
             "ghost".to_string(),
@@ -567,7 +573,7 @@ mod tests {
         run_git(tmp.path(), &["checkout", "-q", "main"]);
         write_commit(tmp.path(), "a.txt", "main-conflict\n", "main edits shared");
 
-        let err = restack(&git, &store, &mut state, &["ghost".into(), "a".into(), "b".into()])
+        let err = restack(&git, &mut state, &["ghost".into(), "a".into(), "b".into()], &mut Vec::new())
             .unwrap_err();
         match err {
             OpsError::Conflict { branch, remaining } => {
@@ -583,14 +589,14 @@ mod tests {
     #[test]
     fn restack_conflict_returns_remaining_queue() {
         let (tmp, git) = init_repo();
-        let (store, mut state) = linear_stack(&tmp, &git);
+        let (_store, mut state) = linear_stack(&tmp, &git);
 
         // Make `a` and `main` edit the same file so rebasing `a` onto main conflicts.
         write_commit(tmp.path(), "a.txt", "a-conflict\n", "a edits shared");
         run_git(tmp.path(), &["checkout", "-q", "main"]);
         write_commit(tmp.path(), "a.txt", "main-conflict\n", "main edits shared");
 
-        let err = restack(&git, &store, &mut state, &["a".into(), "b".into()]).unwrap_err();
+        let err = restack(&git, &mut state, &["a".into(), "b".into()], &mut Vec::new()).unwrap_err();
         match err {
             OpsError::Conflict { branch, remaining } => {
                 assert_eq!(branch, "a");
@@ -599,8 +605,8 @@ mod tests {
             other => panic!("expected conflict, got {other:?}"),
         }
         assert!(git.rebase_in_progress());
-        // The conflict path saved state so `sync --continue` can resume.
-        assert_eq!(store.load().unwrap().branches.len(), 2);
+        // Persistence moved to the CLI's `restack_with_recovery`; the engine no
+        // longer saves, so there is nothing to assert on the store here.
         git.rebase_abort().unwrap();
     }
 
@@ -630,9 +636,7 @@ mod tests {
             repo: None,
             branches,
         };
-        let store = StateStore::new(git.clone());
-
-        let err = restack(&git, &store, &mut state, &["a".into()]).unwrap_err();
+        let err = restack(&git, &mut state, &["a".into()], &mut Vec::new()).unwrap_err();
         assert!(matches!(err, OpsError::ForkPointLost { ref branch, .. } if branch == "a"));
     }
 

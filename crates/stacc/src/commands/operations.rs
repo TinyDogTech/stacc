@@ -82,19 +82,21 @@ pub fn modify(args: &ModifyArgs, format: OutputFormat) -> Result<(), Error> {
     // Restack the upstack onto the amended tip. The engine checks out each child
     // it rebases, so restore the user to the modified branch afterward.
     let order = ops::upstack_order(&state.branches, &branch);
-    let restacked = restack_with_recovery(&git, &store, &mut state, &repo, &order, |remaining| {
-        recovery::Operation::Modify {
+    let restacked = restack_with_recovery(
+        &git,
+        &store,
+        &mut state,
+        &repo,
+        &order,
+        |remaining| recovery::Operation::Modify {
             branch: branch.clone(),
             remaining,
             pre_amend: pre_amend.clone(),
-        }
-    })?;
-
-    store.save(&state).map_err(|e| {
-        Error::Usage(format!(
-            "amend and restack succeeded but could not save state: {e}; run `stacc restack` to re-sync"
-        ))
-    })?;
+        },
+        // No command-specific state change: the amend is git-only, so the engine's
+        // base.hash deltas are the whole logical change.
+        &|_s| {},
+    )?;
     clear_conflict_artifacts(&git);
     // Best-effort: the work is already done and saved, so a failure to switch
     // back to the modified branch must not report the whole modify as failed.
@@ -203,20 +205,25 @@ pub fn move_cmd(args: &MoveArgs, format: OutputFormat) -> Result<(), Error> {
         b.base.name.clone_from(onto);
     }
 
-    let restacked =
-        restack_with_recovery(&git, &store, &mut state, &repo, &subtree, |remaining| {
-            recovery::Operation::Move {
-                branch: branch.clone(),
-                remaining,
-                pre_base: pre_base.clone(),
+    let restacked = restack_with_recovery(
+        &git,
+        &store,
+        &mut state,
+        &repo,
+        &subtree,
+        |remaining| recovery::Operation::Move {
+            branch: branch.clone(),
+            remaining,
+            pre_base: pre_base.clone(),
+        },
+        // Re-point the moved branch's base name onto fresh state, so a concurrent
+        // change to another branch is preserved by the re-apply.
+        &|s| {
+            if let Some(b) = s.branches.get_mut(&branch) {
+                b.base.name.clone_from(onto);
             }
-        })?;
-
-    store.save(&state).map_err(|e| {
-        Error::Usage(format!(
-            "move succeeded but could not save state: {e}; run `stacc restack` to re-sync"
-        ))
-    })?;
+        },
+    )?;
     clear_conflict_artifacts(&git);
     // Best-effort: the move is already saved, so a failure to switch back to the
     // moved branch must not report the whole move as failed.
@@ -364,11 +371,29 @@ fn reconcile_with(
         state.branches.remove(name);
     }
 
-    // Persist the dropped/re-parented branches before the fallible fetch and
-    // restack, so PRs already merged on GitHub are not stranded in local state
-    // if the fetch or restack then fails (a re-run reconciles from here).
+    // The command's own state change, re-applied onto fresh state whenever the
+    // transactional save retries: drop the merged/pruned branches and re-parent
+    // their children. Both operations are idempotent, so re-applying after a CAS
+    // miss is safe.
+    let dropped_delta = dropped.clone();
+    let reparented_delta = reparented.clone();
+    let apply_drops = move |s: &mut State| {
+        for (name, new_base) in &reparented_delta {
+            if let Some(b) = s.branches.get_mut(name) {
+                b.base.name.clone_from(new_base);
+            }
+        }
+        for name in &dropped_delta {
+            s.branches.remove(name);
+        }
+    };
+
+    // Persist the dropped/re-parented branches transactionally before the
+    // fallible fetch and restack, so PRs already merged on GitHub are not
+    // stranded in local state if the fetch or restack then fails (a re-run
+    // reconciles from here).
     if !dropped.is_empty() {
-        store.save(state)?;
+        persist_restack(store, &apply_drops, &[])?;
     }
 
     // Pull the trunk from upstream. Strict by default, a flaky network or a
@@ -383,11 +408,16 @@ fn reconcile_with(
 
     // Pull-and-restack the remaining branches bottom-up onto their bases.
     let order = ops::topo_order(&state.branches, &repo.trunk);
-    let restacked = restack_with_recovery(git, store, state, repo, &order, |remaining| {
-        recovery::Operation::Sync { remaining }
-    })?;
+    let restacked = restack_with_recovery(
+        git,
+        store,
+        state,
+        repo,
+        &order,
+        |remaining| recovery::Operation::Sync { remaining },
+        &apply_drops,
+    )?;
 
-    store.save(state)?;
     finish_sync(git, store, repo);
     Ok(SyncOutcome {
         merged: dropped,
@@ -833,11 +863,16 @@ pub fn restack(args: &RestackArgs, format: OutputFormat) -> Result<(), Error> {
         ops::upstack_order(&state.branches, &current)
     };
 
-    let restacked = restack_with_recovery(&git, &store, &mut state, &repo, &order, |remaining| {
-        recovery::Operation::Restack { remaining }
-    })?;
+    let restacked = restack_with_recovery(
+        &git,
+        &store,
+        &mut state,
+        &repo,
+        &order,
+        |remaining| recovery::Operation::Restack { remaining },
+        &|_s| {},
+    )?;
 
-    store.save(&state)?;
     // A clean restack leaves no recovery artifacts behind (a prior aborted run
     // may have). Local-only: unlike `sync`, we do not push the state ref.
     clear_conflict_artifacts(&git);
@@ -925,29 +960,29 @@ pub fn abort_cmd(format: OutputFormat) -> Result<(), Error> {
         }) = &cont
         {
             let store = StateStore::new(git.clone());
-            match store.load() {
-                Ok(mut state) => {
-                    let subtree = ops::upstack_order(&state.branches, branch).len();
-                    if remaining.len() == subtree {
-                        if let Some(b) = state.branches.get_mut(branch) {
-                            b.base.name.clone_from(pre_base);
-                        }
-                        if let Err(err) = store.save(&state) {
-                            eprintln!(
-                                "warning: could not restore `{branch}`'s base to `{pre_base}`: {err}; run `stacc move --onto {pre_base}` to roll it back"
-                            );
-                        }
-                    } else {
-                        eprintln!(
-                            "warning: `{branch}` stays moved; upstack branches were already restacked onto the new base. Run `stacc restack` to finish, or `stacc move --onto {pre_base}` to move it back."
-                        );
+            // Roll the moved branch's base back transactionally, but only when no
+            // upstack child has restacked onto the new base yet (the conflict
+            // landed on the moved branch itself). The subtree check reads fresh
+            // state inside the update so a concurrent change cannot race it.
+            let rolled_back = store.update(|state| {
+                let subtree = ops::upstack_order(&state.branches, branch).len();
+                if remaining.len() == subtree {
+                    if let Some(b) = state.branches.get_mut(branch) {
+                        b.base.name.clone_from(pre_base);
                     }
+                    Ok(true)
+                } else {
+                    Ok(false)
                 }
-                Err(err) => {
-                    eprintln!(
-                        "warning: could not load state to restore `{branch}`'s base: {err}; run `stacc move --onto {pre_base}` to roll it back"
-                    );
-                }
+            });
+            match rolled_back {
+                Ok(true) => {}
+                Ok(false) => eprintln!(
+                    "warning: `{branch}` stays moved; upstack branches were already restacked onto the new base. Run `stacc restack` to finish, or `stacc move --onto {pre_base}` to move it back."
+                ),
+                Err(err) => eprintln!(
+                    "warning: could not restore `{branch}`'s base to `{pre_base}`: {err}; run `stacc move --onto {pre_base}` to roll it back"
+                ),
             }
         }
     }
@@ -966,6 +1001,9 @@ pub fn abort_cmd(format: OutputFormat) -> Result<(), Error> {
 /// rebase, then drain the remaining queue. The recorded [`recovery::Operation`]
 /// drives the output shape and whether the state ref is pushed, so this resumes
 /// whatever was in flight (sync, restack, ...) regardless of how it was invoked.
+// A cohesive resume sequence: validate the in-progress rebase, finish it, record
+// the resumed delta, drain the queue, then report per operation kind.
+#[allow(clippy::too_many_lines)]
 fn continue_op(
     git: &Git,
     store: &StateStore,
@@ -1027,22 +1065,39 @@ fn continue_op(
 
     // The conflicting branch's rebase just completed: record its new base hash.
     let mut restacked: Vec<String> = Vec::new();
+    let mut resumed_delta: Option<(String, String)> = None;
     if let Some(first) = remaining.first() {
         if let Some(base_name) = state.branches.get(first).map(|b| b.base.name.clone()) {
             let base_tip = git.rev_parse(&base_name)?;
             if let Some(b) = state.branches.get_mut(first) {
-                b.base.hash = base_tip;
+                b.base.hash.clone_from(&base_tip);
             }
+            resumed_delta = Some((first.clone(), base_tip));
         }
         restacked.push(first.clone());
     }
 
-    let rest: Vec<String> = remaining.into_iter().skip(1).collect();
-    restacked.extend(restack_with_recovery(git, store, state, repo, &rest, |r| {
-        op.with_remaining(r)
-    })?);
+    // The resumed branch's new base.hash is this command's own state change; the
+    // helper re-applies it alongside the rest of the queue's engine deltas.
+    let apply_resumed = move |s: &mut State| {
+        if let Some((branch, hash)) = &resumed_delta {
+            if let Some(b) = s.branches.get_mut(branch) {
+                b.base.hash.clone_from(hash);
+            }
+        }
+    };
 
-    store.save(state)?;
+    let rest: Vec<String> = remaining.into_iter().skip(1).collect();
+    restacked.extend(restack_with_recovery(
+        git,
+        store,
+        state,
+        repo,
+        &rest,
+        |r| op.with_remaining(r),
+        &apply_resumed,
+    )?);
+
     clear_conflict_artifacts(git);
     if op.pushes_state() {
         if let Err(err) = store.push(&repo.remote) {
@@ -1102,9 +1157,12 @@ fn restack_with_recovery(
     repo: &RepoConfig,
     order: &[String],
     make_op: impl Fn(Vec<String>) -> recovery::Operation,
+    command_deltas: &dyn Fn(&mut State),
 ) -> Result<Vec<String>, Error> {
-    match ops::restack(git, store, state, order) {
+    let mut applied: Vec<(String, String)> = Vec::new();
+    match ops::restack(git, state, order, &mut applied) {
         Ok(outcome) => {
+            persist_restack(store, command_deltas, &applied)?;
             if !outcome.skipped.is_empty() {
                 eprintln!(
                     "warning: skipped {} branch(es) with no git ref: {}. Remove them with `stacc untrack <branch>`.",
@@ -1115,10 +1173,11 @@ fn restack_with_recovery(
             Ok(outcome.restacked)
         }
         Err(ops::OpsError::Conflict { branch, remaining }) => {
-            // `ops::restack` already saved state before returning. Write the
-            // agent-readable context first (best-effort), then the resume
-            // marker; if the marker write fails we would strand the user
-            // mid-rebase with no `stacc continue`, so abort back to a clean tree.
+            // The engine no longer saves; the CLI owns persistence. Write the
+            // agent-readable context and the resume marker BEFORE the
+            // transactional save, so a contention failure on the save can abort
+            // to a clean tree rather than strand the user mid-rebase with no
+            // `stacc continue`.
             write_conflict_context(git, state, repo, &branch);
             let dir = git.git_dir()?;
             if let Err(err) = recovery::write_continuation(&dir, &make_op(remaining)) {
@@ -1133,10 +1192,47 @@ fn restack_with_recovery(
                     ),
                 }));
             }
+            // Persist the partial progress transactionally. On failure (e.g.
+            // contention from a concurrent writer), abort the rebase and clear
+            // artifacts so we never leave an in-progress rebase the user cannot
+            // reconcile, mirroring the failed-marker-write guard above.
+            if let Err(err) = persist_restack(store, command_deltas, &applied) {
+                let aborted = git.rebase_abort();
+                clear_conflict_artifacts(git);
+                return Err(Error::Usage(match aborted {
+                    Ok(()) => format!(
+                        "conflict on `{branch}`, but persisting recovery state failed ({err}); rebase aborted to a clean tree"
+                    ),
+                    Err(abort_err) => format!(
+                        "conflict on `{branch}`, but persisting recovery state failed ({err}) and the rebase abort also failed ({abort_err}); run `git rebase --abort` manually"
+                    ),
+                }));
+            }
             Err(Error::Conflict { branch })
         }
         Err(err) => Err(err.into()),
     }
+}
+
+/// Persist a restack-driven command transactionally: apply the command's own
+/// state change (`command_deltas`) plus the engine's `(branch, base_hash)`
+/// updates to fresh state under compare-and-swap, so a concurrent writer on a
+/// different branch is re-applied onto rather than clobbered.
+fn persist_restack(
+    store: &StateStore,
+    command_deltas: &dyn Fn(&mut State),
+    applied: &[(String, String)],
+) -> Result<(), Error> {
+    store.update(|s| {
+        command_deltas(s);
+        for (branch, hash) in applied {
+            if let Some(b) = s.branches.get_mut(branch) {
+                b.base.hash.clone_from(hash);
+            }
+        }
+        Ok(())
+    })?;
+    Ok(())
 }
 
 /// Push the state ref (best-effort) and clear any conflict artifacts.
