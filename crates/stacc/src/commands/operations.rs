@@ -7,9 +7,9 @@ use serde_json::{json, Value};
 use stacc_core::{ops, recovery};
 use stacc_git::{Git, RebaseError};
 use stacc_github::{GitHub, PrState, PullRequestUpdate};
-use stacc_state::{RepoConfig, State, StateStore};
+use stacc_state::{RepoConfig, State, StateError, StateStore};
 
-use crate::cli::{MergeArgs, ModifyArgs, MoveArgs, OutputFormat, RestackArgs, SyncArgs};
+use crate::cli::{MergeArgs, ModifyArgs, MoveArgs, OutputFormat, RestackArgs, SyncArgs, UndoArgs};
 use crate::error::Error;
 
 /// `stacc modify`: fold staged changes into the current branch (amend its tip by
@@ -1003,6 +1003,138 @@ pub fn abort_cmd(format: OutputFormat) -> Result<(), Error> {
         OutputFormat::Pretty => println!("Aborted."),
     }
     Ok(())
+}
+
+/// `stacc undo`: revert the most recent stacc mutation(s) by restoring a prior
+/// version of the stack state and the affected branch tips. `--steps N` walks N
+/// versions back (default 1). The restore is appended as a new version, so undo
+/// is itself undoable. Non-interactive and JSON-complete.
+pub fn undo(args: &UndoArgs, format: OutputFormat) -> Result<(), Error> {
+    let git = Git::open(".");
+    let store = StateStore::new(git.clone());
+
+    // Resolve the target version up front (by hash), so a concurrent write cannot
+    // retarget us mid-undo.
+    let target = match store.version_back(args.steps) {
+        Ok(Some(commit)) => commit,
+        Ok(None) => {
+            return Err(Error::Usage(format!(
+                "nothing to undo {} version(s) back; the recorded history does not reach that far",
+                args.steps
+            )))
+        }
+        Err(StateError::BeyondRetention { bound }) => {
+            return Err(Error::Usage(format!(
+                "cannot undo {} versions back; stacc retains only the last {bound} versions",
+                args.steps
+            )))
+        }
+        Err(err) => return Err(err.into()),
+    };
+
+    let target_state = store.load_version(&target)?;
+    let target_tips = store.tips_at(&target)?;
+    let here = git.current_branch().ok();
+
+    let mut restored: Vec<String> = Vec::new();
+    let mut worktree_skipped: Vec<(String, String)> = Vec::new();
+    let mut dirty_skipped: Vec<String> = Vec::new();
+    let mut moved_skipped: Vec<String> = Vec::new();
+
+    // Restore each branch's tip to the target version before writing the restored
+    // state, so the new version's tip snapshot reflects what was actually restored.
+    for (branch, target_tip) in &target_tips {
+        let head_ref = format!("refs/heads/{branch}");
+        let live = git.ref_commit(&head_ref)?;
+        if live.as_deref() == Some(target_tip.as_str()) {
+            continue; // already at the target tip
+        }
+        if let Some(wt) = git.branch_checked_out_elsewhere(branch)? {
+            worktree_skipped.push((branch.clone(), wt.to_string_lossy().into_owned()));
+            continue;
+        }
+        if here.as_deref() == Some(branch.as_str()) {
+            // Checked out here: sync the working tree too, unless it is dirty (a
+            // hard reset would discard those changes).
+            if git.has_uncommitted_changes()? {
+                dirty_skipped.push(branch.clone());
+                continue;
+            }
+            git.reset_hard(target_tip)?;
+            restored.push(branch.clone());
+        } else {
+            // Not checked out anywhere: a leased ref move; skip if it moved under
+            // us since we read its tip.
+            match git.update_ref(&head_ref, target_tip, live.as_deref()) {
+                Ok(()) => restored.push(branch.clone()),
+                Err(_) => moved_skipped.push(branch.clone()),
+            }
+        }
+    }
+
+    // Append the restored state as a new forward version (undo is itself undoable).
+    store.save(&target_state)?;
+
+    report_undo(
+        format,
+        args.steps,
+        &restored,
+        &worktree_skipped,
+        &dirty_skipped,
+        &moved_skipped,
+    );
+    Ok(())
+}
+
+fn report_undo(
+    format: OutputFormat,
+    steps: usize,
+    restored: &[String],
+    worktree_skipped: &[(String, String)],
+    dirty_skipped: &[String],
+    moved_skipped: &[String],
+) {
+    match format {
+        OutputFormat::Json => {
+            let worktree: Vec<Value> = worktree_skipped
+                .iter()
+                .map(|(b, wt)| json!({ "branch": b, "worktree": wt }))
+                .collect();
+            println!(
+                "{}",
+                json!({
+                    "op": "undo",
+                    "steps": steps,
+                    "restored": restored,
+                    "worktree_skipped": worktree,
+                    "dirty_skipped": dirty_skipped,
+                    "moved_skipped": moved_skipped,
+                })
+            );
+        }
+        OutputFormat::Pretty => {
+            if restored.is_empty()
+                && worktree_skipped.is_empty()
+                && dirty_skipped.is_empty()
+                && moved_skipped.is_empty()
+            {
+                println!("Undid {steps} version(s); no branch tips needed restoring.");
+                return;
+            }
+            for b in restored {
+                println!("Restored {b}");
+            }
+            for (b, wt) in worktree_skipped {
+                println!("Skipped {b} (checked out in {wt})");
+            }
+            for b in dirty_skipped {
+                println!("Skipped {b} (uncommitted changes; commit or stash, then re-run)");
+            }
+            for b in moved_skipped {
+                println!("Skipped {b} (tip moved since)");
+            }
+        }
+    }
 }
 
 /// Resume the operation recorded in the continuation: finish the conflicting
