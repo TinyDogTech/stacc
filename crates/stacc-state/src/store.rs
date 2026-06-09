@@ -13,6 +13,10 @@ const ZERO_OID: &str = "0000000000000000000000000000000000000000";
 // backoff (see `backoff`) so a burst of concurrent writers de-synchronizes
 // instead of exhausting the budget in lockstep.
 const SAVE_ATTEMPTS: usize = 10;
+/// How far back `undo` may walk the state-ref commit chain. The bound is
+/// enforced at read time by [`StateStore::version_back`] (a shallow walk), not
+/// by rewriting history, so the chain is never compacted and nothing is lost.
+pub const UNDO_RETENTION: usize = 50;
 
 #[derive(Debug, Error)]
 pub enum StateError {
@@ -27,6 +31,11 @@ pub enum StateError {
     /// Surfaced rather than silently clobbering the winner.
     #[error("state ref contention: gave up after {attempts} attempts")]
     Contention { attempts: usize },
+
+    /// A walk back through the state-ref history asked to go further than the
+    /// retention bound allows. Carries the bound so the caller can explain it.
+    #[error("beyond the {bound}-version undo retention window")]
+    BeyondRetention { bound: usize },
 }
 
 /// The whole stack state, held in memory.
@@ -165,6 +174,17 @@ impl StateStore {
             ));
         }
 
+        // Snapshot each tracked branch's tip so `undo` can restore it. A branch
+        // with no git ref is recorded absent (omitted from the map).
+        let mut tips: BTreeMap<String, String> = BTreeMap::new();
+        for name in state.branches.keys() {
+            if let Some(tip) = self.git.ref_commit(&format!("refs/heads/{name}"))? {
+                tips.insert(name.clone(), tip);
+            }
+        }
+        let tips_json = serde_json::to_string_pretty(&tips)?;
+        blobs.push(("tips".to_string(), self.git.hash_object(tips_json.as_bytes())?));
+
         let entries: Vec<(&str, &str)> = blobs
             .iter()
             .map(|(path, hash)| (path.as_str(), hash.as_str()))
@@ -172,6 +192,30 @@ impl StateStore {
         let tree = self.git.write_tree(&entries)?;
         let commit = self.git.commit_tree(&tree, parent, "stacc: update state")?;
         Ok(commit)
+    }
+
+    /// The branch-tip snapshot recorded in `commit` (its `tips` blob): a map of
+    /// tracked branch name to the tip it had when that version was written.
+    /// Branches with no ref at write time are absent. A version written before
+    /// tips were captured yields an empty map.
+    pub fn tips_at(&self, commit: &str) -> Result<BTreeMap<String, String>, StateError> {
+        match self.git.read_blob(commit, "tips")? {
+            Some(json) => Ok(serde_json::from_str(&json)?),
+            None => Ok(BTreeMap::new()),
+        }
+    }
+
+    /// The commit `steps` versions back from the current state-ref tip, or `None`
+    /// if the recorded history does not reach that far. Refuses to look past the
+    /// retention bound ([`UNDO_RETENTION`]) with [`StateError::BeyondRetention`],
+    /// a shallow walk that never rewrites the chain.
+    pub fn version_back(&self, steps: usize) -> Result<Option<String>, StateError> {
+        if steps > UNDO_RETENTION {
+            return Err(StateError::BeyondRetention {
+                bound: UNDO_RETENTION,
+            });
+        }
+        Ok(self.git.ref_commit(&format!("{}~{steps}", self.git_ref))?)
     }
 
     /// Push the state ref to `remote`.
@@ -436,5 +480,97 @@ mod tests {
 
         // The failed closure left the ref untouched.
         assert_eq!(store.load().unwrap(), before);
+    }
+
+    fn rev(dir: &std::path::Path, r: &str) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["rev-parse", r])
+            .output()
+            .expect("spawn git");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn update_captures_branch_tips() {
+        let (tmp, store) = init_repo();
+        // A real branch with a tip.
+        run_git(tmp.path(), &["checkout", "-q", "-b", "feature"]);
+        run_git(tmp.path(), &["commit", "-q", "--allow-empty", "-m", "f1"]);
+        let feature_tip = rev(tmp.path(), "feature");
+
+        store
+            .update(|s| {
+                s.branches.insert("feature".into(), branch_on_main());
+                Ok(())
+            })
+            .unwrap();
+
+        let tip_commit = store.version_back(0).unwrap().expect("a version exists");
+        let tips = store.tips_at(&tip_commit).unwrap();
+        assert_eq!(tips.get("feature"), Some(&feature_tip));
+    }
+
+    #[test]
+    fn tips_omit_a_branch_with_no_ref() {
+        let (_tmp, store) = init_repo();
+        store
+            .update(|s| {
+                s.branches.insert("ghost".into(), branch_on_main());
+                Ok(())
+            })
+            .unwrap();
+        let tip = store.version_back(0).unwrap().unwrap();
+        assert!(
+            !store.tips_at(&tip).unwrap().contains_key("ghost"),
+            "a branch with no git ref is omitted from the tips snapshot"
+        );
+    }
+
+    #[test]
+    fn tips_at_is_empty_when_there_is_no_tips_blob() {
+        let (tmp, store) = init_repo();
+        // A plain git commit (no `tips` path in its tree) reads back empty.
+        let head = rev(tmp.path(), "HEAD");
+        assert!(store.tips_at(&head).unwrap().is_empty());
+    }
+
+    #[test]
+    fn version_back_walks_the_chain_and_stops_at_the_root() {
+        let (_tmp, store) = init_repo();
+        for i in 0..3 {
+            store
+                .update(|s| {
+                    s.branches.insert(format!("b{i}"), branch_on_main());
+                    Ok(())
+                })
+                .unwrap();
+        }
+        let (v0, v1, v2) = (
+            store.version_back(0).unwrap(),
+            store.version_back(1).unwrap(),
+            store.version_back(2).unwrap(),
+        );
+        assert!(v0.is_some() && v1.is_some() && v2.is_some());
+        assert_ne!(v0, v1);
+        assert_ne!(v1, v2);
+        // Only three versions exist; walking past the root yields nothing.
+        assert_eq!(store.version_back(3).unwrap(), None);
+    }
+
+    #[test]
+    fn version_back_beyond_retention_is_a_structured_error() {
+        let (_tmp, store) = init_repo();
+        store
+            .update(|s| {
+                s.branches.insert("a".into(), branch_on_main());
+                Ok(())
+            })
+            .unwrap();
+        assert!(matches!(
+            store.version_back(UNDO_RETENTION + 1),
+            Err(StateError::BeyondRetention { bound }) if bound == UNDO_RETENTION
+        ));
     }
 }
