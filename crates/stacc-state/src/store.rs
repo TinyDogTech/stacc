@@ -131,27 +131,19 @@ impl StateStore {
         })
     }
 
-    /// Serialize `state` to blobs, assemble a tree, and atomically move the ref
-    /// to a new commit. Retries on a compare-and-swap miss.
-    ///
-    /// Unlike [`update`], `save` rewrites the *whole* state, so a concurrent
-    /// writer's change is overwritten rather than merged. Callers applying a
-    /// logical change should prefer [`update`]; `save` remains for the not yet
-    /// migrated call sites.
+    /// Overwrite the whole stored state in one transactional write: a thin
+    /// wrapper over [`update`] whose closure ignores the reloaded state and
+    /// replaces it wholesale, so a concurrent writer's change is overwritten
+    /// rather than merged. Callers applying a *logical* change should prefer
+    /// [`update`] directly; `save` is whole-state replacement, used by the
+    /// store's roundtrip tests.
     ///
     /// [`update`]: StateStore::update
     pub fn save(&self, state: &State) -> Result<(), StateError> {
-        let mut last_err = None;
-        for _ in 0..SAVE_ATTEMPTS {
-            let parent = self.git.ref_commit(&self.git_ref)?;
-            let commit = self.commit_state(state, parent.as_deref())?;
-            let expected_old = parent.as_deref().or(Some(ZERO_OID));
-            match self.git.update_ref(&self.git_ref, &commit, expected_old) {
-                Ok(()) => return Ok(()),
-                Err(err) => last_err = Some(err),
-            }
-        }
-        Err(last_err.expect("loop runs at least once").into())
+        self.update(|s| {
+            *s = state.clone();
+            Ok(())
+        })
     }
 
     /// Write `state` as a tree of JSON blobs in a new commit parented on
