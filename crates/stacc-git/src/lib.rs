@@ -33,6 +33,97 @@ pub struct Worktree {
     pub branch: Option<String>,
 }
 
+/// A contiguous range of lines in a diff side, `1`-indexed. `count` is the
+/// number of lines on that side of the hunk; an insertion has `count == 0` on
+/// the pre-image (old) side, a deletion `count == 0` on the post-image (new)
+/// side. For a `0`-count range git reports the line *before* which the change
+/// applies, so `start` is that anchor line and the range is empty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LineRange {
+    /// First line of the range (1-indexed). For an empty range this is the
+    /// line the change is anchored after.
+    pub start: u32,
+    /// Number of lines in the range. `0` for a pure insertion (old side) or a
+    /// pure deletion (new side).
+    pub count: u32,
+}
+
+/// How a file changed in a diff, so a hunk consumer can skip what it cannot
+/// handle. Absorb needs a pre-image line range to blame, so only [`Modified`]
+/// is absorbable; the rest are reported as unsupported, never silently dropped.
+///
+/// [`Modified`]: HunkKind::Modified
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HunkKind {
+    /// An edit to an existing text file: it has a pre-image to blame.
+    Modified,
+    /// A newly added file: no pre-image, so its lines blame to nothing.
+    Added,
+    /// A deleted file: the post-image is empty.
+    Deleted,
+    /// A binary file change (`Binary files ... differ`): no line hunks.
+    Binary,
+    /// A rename (detected with `-M`), possibly with content edits. The old path
+    /// is in [`Hunk::old_path`]; absorb maps or reports it rather than blaming
+    /// the new path, whose lines have no history yet.
+    ///
+    /// [`Hunk::old_path`]: Hunk::old_path
+    Renamed,
+}
+
+/// One addressable hunk of a staged diff. A hunk belongs to a single file and
+/// carries enough to blame its pre-image (for absorb) or to report why it is
+/// unsupported. A binary or pure-rename file with no `@@` body still yields one
+/// hunk so the change is reported, never dropped: such a hunk has empty
+/// [`old_range`]/[`new_range`] and an empty [`body`].
+///
+/// [`old_range`]: Hunk::old_range
+/// [`new_range`]: Hunk::new_range
+/// [`body`]: Hunk::body
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hunk {
+    /// The post-image path (the file as it is now). For a rename this is the
+    /// new name; [`old_path`] holds the source.
+    ///
+    /// [`old_path`]: Hunk::old_path
+    pub path: String,
+    /// The pre-image path. Equals [`path`] except for a rename, where it is the
+    /// source name. `None` for an added file (no pre-image path).
+    ///
+    /// [`path`]: Hunk::path
+    pub old_path: Option<String>,
+    /// What kind of change the owning file is, so callers skip the unsupported.
+    pub kind: HunkKind,
+    /// The pre-image (old) line range this hunk edits, the input the absorb
+    /// mapper blames. Empty (`count == 0`) for a pure insertion or a file with
+    /// no line body (binary, pure rename).
+    pub old_range: LineRange,
+    /// The post-image (new) line range this hunk produces.
+    pub new_range: LineRange,
+    /// The raw hunk body: the lines after the `@@` header (` `/`+`/`-`
+    /// prefixed), verbatim and newline-joined. Empty for a file with no `@@`
+    /// body. Does not include the `@@` header line itself.
+    pub body: String,
+}
+
+/// One entry of a commit's tree: a leaf blob with its full path, file mode, and
+/// blob hash, as produced by `git ls-tree -r`. The `(path, mode, sha)` shape
+/// feeds a tree rebuild; [`write_tree`] currently hard-codes mode `100644`, so a
+/// caller preserving an executable or symlink mode needs [`mktree`] instead.
+///
+/// [`write_tree`]: Git::write_tree
+/// [`mktree`]: Git::mktree
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TreeEntry {
+    /// Full path from the tree root, e.g. `src/lib.rs`.
+    pub path: String,
+    /// Git file mode, e.g. `100644` (file), `100755` (executable), `120000`
+    /// (symlink).
+    pub mode: String,
+    /// The blob object hash.
+    pub sha: String,
+}
+
 impl Git {
     pub fn open(dir: impl Into<PathBuf>) -> Self {
         Self { dir: dir.into() }
@@ -595,6 +686,338 @@ impl Git {
     }
 }
 
+/// Hunk-level plumbing the surgery commands (`absorb`, `split --by-file`) build
+/// on: split the staged diff into addressable hunks, blame a file's lines, and
+/// enumerate or carve a commit's tree so a caller can rebuild it through the
+/// existing [`write_tree`]/[`commit_tree`] primitives. This stays a thin typed
+/// shell over `git`; the mapping logic (which commit a hunk belongs to) lives in
+/// the absorb command, not here.
+///
+/// [`write_tree`]: Git::write_tree
+/// [`commit_tree`]: Git::commit_tree
+impl Git {
+    /// Split the staged diff (`git diff --cached`) into addressable hunks.
+    ///
+    /// Uses `-U0` so each contiguous change is its own hunk (an absorb consumer
+    /// blames each independently) and `-M` so a rename is detected and reported
+    /// rather than appearing as a delete + add pair. Each hunk carries its file
+    /// path, a [`HunkKind`] classification, the pre-image and post-image line
+    /// ranges, and the raw body. A binary or pure-rename file with no `@@` body
+    /// still yields one hunk (empty ranges and body) so the change is reported,
+    /// never silently dropped. An empty staged diff yields an empty vector.
+    pub fn diff_hunks(&self) -> Result<Vec<Hunk>, GitError> {
+        // `--no-color` and `LC_ALL=C` (set in `command`) keep the output a
+        // stable machine format; `-U0` separates adjacent changes into distinct
+        // hunks; `-M` enables rename detection.
+        let raw = self.run(&[
+            "diff",
+            "--cached",
+            "--no-color",
+            "-M",
+            "-U0",
+        ])?;
+        Ok(parse_diff_hunks(&raw))
+    }
+
+    /// Blame `path` at `rev`, returning the commit SHA that last touched each
+    /// line, `1`-indexed: element `i` is the SHA introducing line `i + 1`.
+    ///
+    /// This is the absorb mapper primitive: a caller maps a hunk's pre-image
+    /// line range onto this vector to find the commit that introduced those
+    /// lines (KTD-2). Uses `git blame --porcelain`, whose every line group opens
+    /// with a `<40-hex sha> <orig> <final> <count>` header; the full 40-char SHA
+    /// is returned (not abbreviated). An empty or missing file yields an empty
+    /// vector.
+    pub fn blame(&self, rev: &str, path: &str) -> Result<Vec<String>, GitError> {
+        let out = self.run(&["blame", "--porcelain", rev, "--", path])?;
+        Ok(parse_blame_porcelain(&out))
+    }
+
+    /// Enumerate `rev`'s tree as `(path, mode, sha)` leaf entries, recursively,
+    /// via `git ls-tree -r -z`. NUL-separated so a path with spaces or other
+    /// special bytes round-trips literally (no C-quoting). The companion of
+    /// [`write_tree`]: a caller filters this set and rebuilds a subtree from the
+    /// kept `(path, sha)` pairs. For modes other than `100644`, rebuild with
+    /// [`mktree`] instead, which preserves each entry's mode.
+    ///
+    /// [`write_tree`]: Git::write_tree
+    /// [`mktree`]: Git::mktree
+    pub fn tree_entries(&self, rev: &str) -> Result<Vec<TreeEntry>, GitError> {
+        let spec = format!("{rev}^{{tree}}");
+        let output = self
+            .command(&["ls-tree", "-r", "-z", spec.as_str()])
+            .output()
+            .map_err(|source| GitError::Spawn { source })?;
+        if !output.status.success() {
+            return Err(self.command_error(&["ls-tree", "-r", "-z", spec.as_str()], &output));
+        }
+        Ok(parse_ls_tree_z(&output.stdout))
+    }
+
+    /// Build a tree from full `(path, mode, sha)` entries and return its hash,
+    /// preserving each entry's mode (unlike [`write_tree`], which assumes
+    /// `100644`). Feeds `git mktree --missing` lines of the form
+    /// `<mode> blob <sha>\t<path>` through a scratch index built with
+    /// `read-tree`-free `update-index --cacheinfo`, so nested paths and
+    /// executable/symlink modes both survive a carve-and-rebuild.
+    ///
+    /// [`write_tree`]: Git::write_tree
+    pub fn mktree(&self, entries: &[TreeEntry]) -> Result<String, GitError> {
+        let index = self
+            .git_dir()?
+            .join(format!("stacc-mktree-index-{}", std::process::id()));
+
+        let build = || -> Result<String, GitError> {
+            for entry in entries {
+                let cacheinfo = format!("{},{},{}", entry.mode, entry.sha, entry.path);
+                let args = ["update-index", "--add", "--cacheinfo", cacheinfo.as_str()];
+                let output = self
+                    .command(&args)
+                    .env("GIT_INDEX_FILE", &index)
+                    .output()
+                    .map_err(|source| GitError::Spawn { source })?;
+                if !output.status.success() {
+                    return Err(self.command_error(&args, &output));
+                }
+            }
+            let args = ["write-tree"];
+            let output = self
+                .command(&args)
+                .env("GIT_INDEX_FILE", &index)
+                .output()
+                .map_err(|source| GitError::Spawn { source })?;
+            if !output.status.success() {
+                return Err(self.command_error(&args, &output));
+            }
+            Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        };
+
+        let result = build();
+        let _ = std::fs::remove_file(&index);
+        result
+    }
+}
+
+/// Parse `git diff --cached -M -U0 --no-color` output into hunks. Each
+/// `diff --git` block opens a new file whose [`HunkKind`] is read from the
+/// header lines that follow (`Binary files`, `rename`, `new`/`deleted file
+/// mode`); each `@@` line opens a hunk whose body is the following `+`/`-`/` `
+/// lines. A binary or bodyless rename file still emits one hunk so the change is
+/// reported.
+fn parse_diff_hunks(raw: &str) -> Vec<Hunk> {
+    let mut hunks = Vec::new();
+    // Per-file state, reset at each `diff --git` line.
+    let mut new_path: Option<String> = None;
+    let mut old_path: Option<String> = None;
+    let mut kind = HunkKind::Modified;
+    let mut saw_hunk = false;
+    // The hunk currently accumulating a body.
+    let mut pending: Option<Hunk> = None;
+
+    for line in raw.lines() {
+        if let Some(rest) = line.strip_prefix("diff --git ") {
+            // A new file block. Flush the previous file first.
+            flush_diff_file(
+                &mut hunks,
+                &mut pending,
+                saw_hunk,
+                new_path.as_deref(),
+                old_path.as_deref(),
+                kind,
+            );
+            let (a, b) = split_diff_git_paths(rest);
+            old_path = a;
+            new_path = b;
+            kind = HunkKind::Modified;
+            saw_hunk = false;
+        } else if line.starts_with("new file mode") {
+            kind = HunkKind::Added;
+            // An added file has no meaningful pre-image path.
+            old_path = None;
+        } else if line.starts_with("deleted file mode") {
+            kind = HunkKind::Deleted;
+        } else if line.starts_with("Binary files") {
+            kind = HunkKind::Binary;
+        } else if let Some(from) = line.strip_prefix("rename from ") {
+            kind = HunkKind::Renamed;
+            old_path = Some(from.to_string());
+        } else if let Some(to) = line.strip_prefix("rename to ") {
+            if kind == HunkKind::Renamed {
+                new_path = Some(to.to_string());
+            }
+        } else if line.starts_with("@@") {
+            // Open a new hunk; flush the previous one.
+            if let Some(h) = pending.take() {
+                hunks.push(h);
+            }
+            saw_hunk = true;
+            if let (Some(np), Some((old_range, new_range))) =
+                (new_path.clone(), parse_hunk_header(line))
+            {
+                pending = Some(Hunk {
+                    path: np,
+                    old_path: old_path.clone(),
+                    kind,
+                    old_range,
+                    new_range,
+                    body: String::new(),
+                });
+            }
+        } else if let Some(h) = pending.as_mut() {
+            // A body line belongs to the open hunk. Context/added/removed lines
+            // begin with ` `/`+`/`-`; the `\ No newline at end of file` marker is
+            // kept verbatim too.
+            if line.starts_with([' ', '+', '-', '\\']) {
+                if !h.body.is_empty() {
+                    h.body.push('\n');
+                }
+                h.body.push_str(line);
+            }
+        }
+    }
+    flush_diff_file(
+        &mut hunks,
+        &mut pending,
+        saw_hunk,
+        new_path.as_deref(),
+        old_path.as_deref(),
+        kind,
+    );
+    hunks
+}
+
+/// Close out the file [`parse_diff_hunks`] was parsing: flush any open hunk,
+/// then if the file had no `@@` body at all (binary / pure rename) emit a
+/// placeholder hunk so the change is still reported, never dropped.
+fn flush_diff_file(
+    hunks: &mut Vec<Hunk>,
+    pending: &mut Option<Hunk>,
+    saw_hunk: bool,
+    new_path: Option<&str>,
+    old_path: Option<&str>,
+    kind: HunkKind,
+) {
+    if let Some(h) = pending.take() {
+        hunks.push(h);
+    }
+    if !saw_hunk {
+        if let Some(path) = new_path {
+            hunks.push(Hunk {
+                path: path.to_string(),
+                old_path: old_path.map(ToString::to_string),
+                kind,
+                old_range: LineRange { start: 0, count: 0 },
+                new_range: LineRange { start: 0, count: 0 },
+                body: String::new(),
+            });
+        }
+    }
+}
+
+/// Split a `diff --git a/<x> b/<y>` suffix into `(old, new)` paths. git prefixes
+/// the two sides with `a/` and `b/`; this strips them. A path containing a space
+/// is the ambiguous case git itself C-quotes (handled by the rename lines, which
+/// are authoritative for renames), so this best-effort split serves the common
+/// unquoted case and the rename lines override it when present.
+fn split_diff_git_paths(rest: &str) -> (Option<String>, Option<String>) {
+    // Find the " b/" separating the two sides. Use the last occurrence so a
+    // path that itself contains " b/" does not split early.
+    if let Some(idx) = rest.rfind(" b/") {
+        let a = rest[..idx].strip_prefix("a/").unwrap_or(&rest[..idx]);
+        let b = &rest[idx + 3..];
+        (Some(a.to_string()), Some(b.to_string()))
+    } else {
+        (None, None)
+    }
+}
+
+/// Parse an `@@ -<os>[,<oc>] +<ns>[,<nc>] @@` header into `(old_range,
+/// new_range)`. A missing count defaults to `1` per the unified-diff format.
+fn parse_hunk_header(line: &str) -> Option<(LineRange, LineRange)> {
+    // Strip the leading `@@ ` and take up to the closing ` @@`.
+    let inner = line.strip_prefix("@@ ")?;
+    let end = inner.find(" @@")?;
+    let spec = &inner[..end];
+    let mut sides = spec.split(' ');
+    let old = sides.next()?.strip_prefix('-')?;
+    let new = sides.next()?.strip_prefix('+')?;
+    Some((parse_range(old)?, parse_range(new)?))
+}
+
+/// Parse a `<start>[,<count>]` diff range. A bare `<start>` means `count == 1`.
+fn parse_range(spec: &str) -> Option<LineRange> {
+    let mut parts = spec.splitn(2, ',');
+    let start = parts.next()?.parse().ok()?;
+    let count = match parts.next() {
+        Some(c) => c.parse().ok()?,
+        None => 1,
+    };
+    Some(LineRange { start, count })
+}
+
+/// Parse `git blame --porcelain` output into a per-line SHA vector. Every line
+/// group opens with a `<40-hex sha> <orig> <final> <count>` header; the
+/// `<final>` field (1-indexed) is the position the SHA is recorded at. Metadata
+/// lines and the tab-prefixed source line are skipped. The vector is dense over
+/// `1..=N`; a gap (which `git blame` does not produce for a contiguous file)
+/// would leave an empty slot, so we index by the reported final line.
+fn parse_blame_porcelain(out: &str) -> Vec<String> {
+    let mut by_line: std::collections::BTreeMap<u32, String> = std::collections::BTreeMap::new();
+    for line in out.lines() {
+        // A header line is `<sha> <orig> <final> <count>`: a 40-hex first token
+        // followed by numeric fields. Metadata lines ("author ...") and the
+        // source line (tab-prefixed) never match.
+        let mut fields = line.split(' ');
+        let Some(sha) = fields.next() else { continue };
+        if sha.len() != 40 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+            continue;
+        }
+        // Need orig, final[, count]; we read the final line number.
+        let _orig = fields.next();
+        let Some(final_line) = fields.next().and_then(|n| n.parse::<u32>().ok()) else {
+            continue;
+        };
+        by_line.insert(final_line, sha.to_string());
+    }
+    // Materialize dense 1..=max. A contiguous blame fills every slot; any gap
+    // (not expected) is filled with an empty string rather than panicking.
+    let max = by_line.keys().copied().max().unwrap_or(0);
+    (1..=max)
+        .map(|i| by_line.get(&i).cloned().unwrap_or_default())
+        .collect()
+}
+
+/// Parse `git ls-tree -r -z` output (NUL-separated `<mode> <type> <sha>\t<path>`
+/// records) into [`TreeEntry`] values, keeping only blob entries.
+fn parse_ls_tree_z(bytes: &[u8]) -> Vec<TreeEntry> {
+    let text = String::from_utf8_lossy(bytes);
+    let mut entries = Vec::new();
+    for record in text.split('\0') {
+        if record.is_empty() {
+            continue;
+        }
+        // `<mode> <type> <sha>\t<path>`
+        let Some((meta, path)) = record.split_once('\t') else {
+            continue;
+        };
+        let mut meta_fields = meta.split(' ');
+        let Some(mode) = meta_fields.next() else { continue };
+        let Some(kind) = meta_fields.next() else { continue };
+        let Some(sha) = meta_fields.next() else { continue };
+        // `-r` still surfaces submodule commits and (without `-t`) no subtrees,
+        // but guard on the type so only blobs feed a tree rebuild.
+        if kind != "blob" {
+            continue;
+        }
+        entries.push(TreeEntry {
+            path: path.to_string(),
+            mode: mode.to_string(),
+            sha: sha.to_string(),
+        });
+    }
+    entries
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -993,5 +1416,199 @@ mod tests {
         assert_eq!(repo.worktrees().unwrap().len(), 1);
         assert_eq!(repo.branch_checked_out_elsewhere("main").unwrap(), None);
         assert_eq!(repo.branch_checked_out_elsewhere("feat").unwrap(), None);
+    }
+
+    // --- U1: hunk / blame / tree-carve plumbing ---
+
+    /// Write `contents` to `file` and stage it, without committing.
+    fn stage(dir: &std::path::Path, file: &str, contents: &str) {
+        std::fs::write(dir.join(file), contents).expect("write file");
+        run_git(dir, &["add", file]);
+    }
+
+    #[test]
+    fn diff_hunks_empty_index_is_empty() {
+        let (_tmp, repo) = init_repo();
+        assert!(repo.diff_hunks().unwrap().is_empty());
+    }
+
+    #[test]
+    fn diff_hunks_splits_a_multi_hunk_edit_with_pre_image_ranges() {
+        let (tmp, repo) = init_repo();
+        let path = tmp.path();
+        write_commit(path, "f.txt", "a\nb\nc\nd\n", "seed");
+        // Edit line 2 and line 4. With -U0 these are two separate hunks.
+        stage(path, "f.txt", "a\nB\nc\nD\n");
+
+        let hunks = repo.diff_hunks().unwrap();
+        assert_eq!(hunks.len(), 2, "two disjoint edits, two hunks: {hunks:?}");
+        for h in &hunks {
+            assert_eq!(h.kind, HunkKind::Modified);
+            assert_eq!(h.path, "f.txt");
+            assert_eq!(h.old_path.as_deref(), Some("f.txt"));
+        }
+        // Pre-image ranges are the edited lines: line 2 and line 4.
+        assert_eq!(hunks[0].old_range, LineRange { start: 2, count: 1 });
+        assert_eq!(hunks[0].new_range, LineRange { start: 2, count: 1 });
+        assert_eq!(hunks[1].old_range, LineRange { start: 4, count: 1 });
+        assert_eq!(hunks[1].new_range, LineRange { start: 4, count: 1 });
+        // The body carries the removed and added lines verbatim.
+        assert!(hunks[0].body.contains("-b") && hunks[0].body.contains("+B"));
+        assert!(hunks[1].body.contains("-d") && hunks[1].body.contains("+D"));
+    }
+
+    #[test]
+    fn diff_hunks_classifies_added_file_with_no_pre_image() {
+        let (tmp, repo) = init_repo();
+        stage(tmp.path(), "new.txt", "x\ny\n");
+        let hunks = repo.diff_hunks().unwrap();
+        assert_eq!(hunks.len(), 1, "{hunks:?}");
+        let h = &hunks[0];
+        assert_eq!(h.kind, HunkKind::Added);
+        assert_eq!(h.path, "new.txt");
+        // No pre-image to blame: old side is an empty range anchored at 0.
+        assert_eq!(h.old_range, LineRange { start: 0, count: 0 });
+        assert_eq!(h.new_range, LineRange { start: 1, count: 2 });
+    }
+
+    #[test]
+    fn diff_hunks_classifies_a_binary_change() {
+        let (tmp, repo) = init_repo();
+        // A NUL byte makes git treat the file as binary.
+        std::fs::write(tmp.path().join("b.dat"), [0u8, 1, 2, 0, 3]).unwrap();
+        run_git(tmp.path(), &["add", "b.dat"]);
+        let hunks = repo.diff_hunks().unwrap();
+        assert_eq!(hunks.len(), 1, "binary change is reported, not dropped: {hunks:?}");
+        assert_eq!(hunks[0].kind, HunkKind::Binary);
+        assert_eq!(hunks[0].path, "b.dat");
+        // No line body for a binary file.
+        assert!(hunks[0].body.is_empty());
+        assert_eq!(hunks[0].old_range.count, 0);
+    }
+
+    #[test]
+    fn diff_hunks_classifies_a_deletion() {
+        let (tmp, repo) = init_repo();
+        write_commit(tmp.path(), "gone.txt", "x\n", "add");
+        run_git(tmp.path(), &["rm", "gone.txt"]);
+        let hunks = repo.diff_hunks().unwrap();
+        assert!(
+            hunks.iter().any(|h| h.kind == HunkKind::Deleted && h.path == "gone.txt"),
+            "deletion is classified: {hunks:?}"
+        );
+    }
+
+    #[test]
+    fn diff_hunks_detects_a_rename_with_the_old_path() {
+        let (tmp, repo) = init_repo();
+        let path = tmp.path();
+        write_commit(path, "orig.txt", "alpha\nbeta\ngamma\n", "add");
+        // Rename with no content change so -M reports it as a pure rename.
+        run_git(path, &["mv", "orig.txt", "renamed.txt"]);
+        let hunks = repo.diff_hunks().unwrap();
+        let rename = hunks
+            .iter()
+            .find(|h| h.kind == HunkKind::Renamed)
+            .expect("a rename hunk");
+        assert_eq!(rename.path, "renamed.txt");
+        assert_eq!(rename.old_path.as_deref(), Some("orig.txt"));
+    }
+
+    #[test]
+    fn blame_attributes_each_line_to_its_introducing_commit() {
+        let (tmp, repo) = init_repo();
+        let path = tmp.path();
+        // Commit one line, then add a second in a separate commit.
+        write_commit(path, "f.txt", "first\n", "c1");
+        let c1 = repo.rev_parse("HEAD").unwrap();
+        std::fs::write(path.join("f.txt"), "first\nsecond\n").unwrap();
+        run_git(path, &["add", "f.txt"]);
+        run_git(path, &["commit", "-q", "-m", "c2"]);
+        let c2 = repo.rev_parse("HEAD").unwrap();
+
+        let blame = repo.blame("HEAD", "f.txt").unwrap();
+        assert_eq!(blame.len(), 2, "one sha per line: {blame:?}");
+        // Line 1 came from c1, line 2 from c2 (matches `git blame`).
+        assert_eq!(blame[0], c1);
+        assert_eq!(blame[1], c2);
+    }
+
+    #[test]
+    fn tree_entries_enumerates_nested_blobs_with_mode_and_sha() {
+        let (tmp, repo) = init_repo();
+        let path = tmp.path();
+        std::fs::create_dir_all(path.join("src/inner")).unwrap();
+        std::fs::write(path.join("top.txt"), "t\n").unwrap();
+        std::fs::write(path.join("src/a.rs"), "a\n").unwrap();
+        std::fs::write(path.join("src/inner/b.rs"), "b\n").unwrap();
+        run_git(path, &["add", "."]);
+        run_git(path, &["commit", "-q", "-m", "tree"]);
+
+        let entries = repo.tree_entries("HEAD").unwrap();
+        let paths: std::collections::BTreeSet<&str> =
+            entries.iter().map(|e| e.path.as_str()).collect();
+        // Recursive: nested paths come back as full paths.
+        assert!(paths.contains("top.txt"));
+        assert!(paths.contains("src/a.rs"));
+        assert!(paths.contains("src/inner/b.rs"));
+        // Every entry carries a real mode and a 40-hex blob sha.
+        for e in &entries {
+            assert_eq!(e.mode, "100644", "{e:?}");
+            assert_eq!(e.sha.len(), 40, "{e:?}");
+        }
+    }
+
+    #[test]
+    fn tree_entries_then_carve_rebuilds_a_subset_via_mktree() {
+        let (tmp, repo) = init_repo();
+        let path = tmp.path();
+        std::fs::write(path.join("keep.txt"), "k\n").unwrap();
+        std::fs::write(path.join("drop.txt"), "d\n").unwrap();
+        std::fs::create_dir_all(path.join("dir")).unwrap();
+        std::fs::write(path.join("dir/nested.txt"), "n\n").unwrap();
+        run_git(path, &["add", "."]);
+        run_git(path, &["commit", "-q", "-m", "tree"]);
+
+        // Carve: keep everything except drop.txt, rebuild the tree, commit it.
+        let kept: Vec<TreeEntry> = repo
+            .tree_entries("HEAD")
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.path != "drop.txt")
+            .collect();
+        let tree = repo.mktree(&kept).unwrap();
+        let commit = repo.commit_tree(&tree, None, "carved").unwrap();
+
+        let carved_paths = repo.list_tree(&commit, "").unwrap();
+        assert!(carved_paths.contains(&"keep.txt".to_string()));
+        assert!(carved_paths.contains(&"dir/nested.txt".to_string()));
+        assert!(
+            !carved_paths.contains(&"drop.txt".to_string()),
+            "carved tree excludes the dropped path: {carved_paths:?}"
+        );
+        // The kept blob content is preserved byte-for-byte.
+        assert_eq!(
+            repo.read_blob(&commit, "keep.txt").unwrap().as_deref(),
+            Some("k\n")
+        );
+    }
+
+    #[test]
+    fn mktree_preserves_an_executable_mode() {
+        let (tmp, repo) = init_repo();
+        let path = tmp.path();
+        std::fs::write(path.join("run.sh"), "#!/bin/sh\n").unwrap();
+        run_git(path, &["add", "run.sh"]);
+        run_git(path, &["update-index", "--chmod=+x", "run.sh"]);
+        run_git(path, &["commit", "-q", "-m", "exec"]);
+
+        let entries = repo.tree_entries("HEAD").unwrap();
+        let run = entries.iter().find(|e| e.path == "run.sh").unwrap();
+        assert_eq!(run.mode, "100755", "executable mode read back");
+        // Rebuild through mktree and confirm the mode survives the round-trip.
+        let tree = repo.mktree(&entries).unwrap();
+        let rebuilt = repo.tree_entries(&tree).unwrap();
+        let run2 = rebuilt.iter().find(|e| e.path == "run.sh").unwrap();
+        assert_eq!(run2.mode, "100755");
     }
 }
