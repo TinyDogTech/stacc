@@ -9,7 +9,9 @@ use stacc_git::{Git, RebaseError};
 use stacc_github::{GitHub, PrState, PullRequestUpdate};
 use stacc_state::{RepoConfig, State, StateError, StateStore};
 
-use crate::cli::{MergeArgs, ModifyArgs, MoveArgs, OutputFormat, RestackArgs, SyncArgs, UndoArgs};
+use crate::cli::{
+    MergeArgs, ModifyArgs, MoveArgs, OutputFormat, RestackArgs, SquashArgs, SyncArgs, UndoArgs,
+};
 use crate::error::Error;
 
 /// `stacc modify`: fold staged changes into the current branch (amend its tip by
@@ -132,6 +134,176 @@ pub fn modify(args: &ModifyArgs, format: OutputFormat) -> Result<(), Error> {
         }
     }
     Ok(())
+}
+
+/// `stacc squash`: collapse the current branch's own commits into a single
+/// commit, then restack its upstack onto the squashed tip.
+///
+/// Refuses unless the branch is already restacked onto its base (git-spice's
+/// `VerifyRestacked`): on a drifted branch, `base..tip` includes commits that
+/// are not part of the branch's own diff, and the squash would fold them in.
+/// The squash itself is pure object surgery: the tip's tree IS the squashed
+/// content, so it is committed directly onto the base tip (`commit-tree`), with
+/// no rebase, no working-tree side effects, and no possible conflict. Only the
+/// upstack restack can conflict, and that is a plain resumable `Restack`.
+pub fn squash(args: &SquashArgs, format: OutputFormat) -> Result<(), Error> {
+    let git = Git::open(".");
+    let store = StateStore::new(git.clone());
+    let mut state = store.load()?;
+    let repo = state
+        .repo
+        .clone()
+        .ok_or_else(|| Error::Usage("stacc is not initialized; run `stacc init` first".into()))?;
+
+    if git.rebase_in_progress() {
+        return Err(Error::Usage(
+            "a rebase is already in progress; run `stacc continue` to resume it or `stacc abort` to undo".into(),
+        ));
+    }
+
+    let branch = git.current_branch().map_err(|_| {
+        Error::Usage("cannot squash a detached HEAD; check out a branch first".into())
+    })?;
+    if branch == repo.trunk {
+        return Err(Error::Usage(format!(
+            "cannot squash the trunk branch `{}`",
+            repo.trunk
+        )));
+    }
+    let base = state
+        .branches
+        .get(&branch)
+        .map(|b| b.base.clone())
+        .ok_or_else(|| {
+            Error::Usage(format!(
+                "branch `{branch}` is not tracked; run `stacc track` first"
+            ))
+        })?;
+
+    let tip = git.rev_parse(&branch)?;
+
+    // Precondition (git-spice `VerifyRestacked`): the branch must sit on its
+    // base's live tip, the same "already on top of its base" condition the
+    // restack engine uses to skip a branch. When it holds, `base_tip..tip` is
+    // exactly the branch's own commits and `base_tip` is exactly where they
+    // fork, so committing the tip's tree onto `base_tip` is sound.
+    let base_tip = git.rev_parse(&base.name)?;
+    if !git.is_ancestor(&base_tip, &tip)? {
+        return Err(Error::Usage(format!(
+            "`{branch}` is not restacked onto `{}`; run `stacc restack` first, then squash",
+            base.name
+        )));
+    }
+
+    // Fail fast if the branch or any upstack child is checked out in another
+    // worktree, BEFORE mutating anything (mirrors `modify`/`absorb`).
+    let upstack = ops::upstack_order(&state.branches, &branch);
+    guard_worktree(&git, &upstack)?;
+
+    // The branch's own commits, oldest-first. Zero or one: nothing to collapse,
+    // a clear no-op report rather than an error.
+    let own_commits = git.rev_list(&base_tip, &tip)?;
+    if own_commits.len() < 2 {
+        report_squash(format, &branch, 0, &tip, &[]);
+        return Ok(());
+    }
+
+    // The combined message: `--message` verbatim, or the oldest-first
+    // concatenation of the squashed commits' subjects and bodies.
+    let message = match &args.message {
+        Some(m) => m.clone(),
+        None => squash_message(&git, &own_commits)?,
+    };
+
+    // The tip's tree is already the squashed content; commit it onto the base
+    // tip and move the branch ref there with the old tip as a lease.
+    // (`commit_tree` stamps stacc's identity; the original subjects and bodies
+    // survive in the concatenated message.)
+    let tree = git.rev_parse(&format!("{tip}^{{tree}}"))?;
+    let new_tip = git.commit_tree(&tree, Some(&base_tip), &message)?;
+    git.update_ref(&format!("refs/heads/{branch}"), &new_tip, Some(&tip))
+        .map_err(|e| {
+            Error::Usage(format!(
+                "could not move `{branch}` to the squashed tip ({e}); the branch tip moved under squash, re-run it"
+            ))
+        })?;
+    // No reset: HEAD follows the moved ref, and the new tip's tree is identical
+    // to the old one, so the index and working tree (including anything the
+    // user has staged) already match it exactly.
+
+    // Restack the upstack onto the squashed tip. The base pointer did not move,
+    // so the only command-specific delta is refreshing the recorded base hash,
+    // a no-op unless it had drifted while the branch still descended the live
+    // base tip (e.g. a hand-run rebase).
+    let restacked = restack_with_recovery(
+        &git,
+        &store,
+        &mut state,
+        &repo,
+        &upstack,
+        |remaining| recovery::Operation::Restack { remaining },
+        &|s| {
+            if let Some(b) = s.branches.get_mut(&branch) {
+                b.base.hash.clone_from(&base_tip);
+            }
+        },
+    )?;
+    clear_conflict_artifacts(&git);
+    // Best-effort: the engine leaves HEAD on the last child it rebased, so
+    // restore the user to the squashed branch.
+    if let Err(err) = git.checkout(&branch) {
+        eprintln!("warning: could not switch back to `{branch}`: {err}");
+    }
+
+    report_squash(format, &branch, own_commits.len(), &new_tip, &restacked);
+    Ok(())
+}
+
+/// The default squash message: the squashed commits' subjects and bodies,
+/// oldest-first, blank-line separated.
+fn squash_message(git: &Git, commits: &[String]) -> Result<String, Error> {
+    let mut parts = Vec::with_capacity(commits.len());
+    for commit in commits {
+        let subject = git.commit_subject(commit)?;
+        let body = git.commit_body(commit)?;
+        if body.is_empty() {
+            parts.push(subject);
+        } else {
+            parts.push(format!("{subject}\n\n{body}"));
+        }
+    }
+    Ok(parts.join("\n\n"))
+}
+
+fn report_squash(
+    format: OutputFormat,
+    branch: &str,
+    squashed: usize,
+    sha: &str,
+    restacked: &[String],
+) {
+    match format {
+        OutputFormat::Json => println!(
+            "{}",
+            json!({
+                "op": "squash",
+                "branch": branch,
+                "squashed": squashed,
+                "sha": sha,
+                "restacked": restacked,
+            })
+        ),
+        OutputFormat::Pretty => {
+            if squashed == 0 {
+                println!("Nothing to squash.");
+            } else {
+                println!("Squashed {squashed} commits on {branch}");
+                for name in restacked {
+                    println!("Restacked {name}");
+                }
+            }
+        }
+    }
 }
 
 /// `stacc move`: re-parent the current branch (and its upstack) onto `--onto`.
