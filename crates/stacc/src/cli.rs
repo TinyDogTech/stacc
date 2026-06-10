@@ -73,6 +73,8 @@ pub enum Command {
     Restack(RestackArgs),
     /// Re-parent the current branch (and its upstack) onto a new base.
     Move(MoveArgs),
+    /// Distribute staged hunks into the downstack commits that introduced their lines.
+    Absorb(AbsorbArgs),
     /// Rename the current branch, updating local state, children, and the remote.
     Rename(RenameArgs),
     /// Squash-merge the ready PRs from the trunk up to the current branch, then sync.
@@ -295,6 +297,14 @@ pub struct MoveArgs {
     /// Branch (or the trunk) to re-parent the current branch onto.
     #[arg(long)]
     pub onto: String,
+}
+
+/// Arguments for `stacc absorb`.
+#[derive(Debug, clap::Args)]
+pub struct AbsorbArgs {
+    /// Compute and print the hunk-to-commit mapping without mutating anything.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 /// Arguments for `stacc merge`.

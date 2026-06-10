@@ -345,6 +345,16 @@ impl Git {
         self.run(&["reset", "--hard", target]).map(|_| ())
     }
 
+    /// Move the current branch and `HEAD` to `target` while leaving the working
+    /// tree untouched (`git reset --mixed`). The index is reset to `target`, so
+    /// the difference between `target` and the on-disk files reads back as
+    /// unstaged modifications. This is the absorb / pop mechanic: after the ref
+    /// moves to a rewritten tip, a mixed reset leaves only the not-yet-absorbed
+    /// edits as unstaged changes.
+    pub fn reset_mixed(&self, target: &str) -> Result<(), GitError> {
+        self.run(&["reset", "--mixed", target]).map(|_| ())
+    }
+
     /// Push `refspec` to `remote`.
     pub fn push(&self, remote: &str, refspec: &str) -> Result<(), GitError> {
         self.run(&["push", remote, refspec]).map(|_| ())
@@ -488,6 +498,92 @@ impl Git {
             return Err(self.command_error(&args, &output));
         }
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
+    /// Create a commit object for `tree` parented on `parent`, reusing the full
+    /// author identity, author date, committer identity, and commit message of
+    /// an existing commit `like`. This is the absorb / rewrite primitive: a
+    /// commit's tree changes (the absorbed hunks land in it) but its identity
+    /// and message must survive the rewrite, unlike [`commit_tree`] which stamps
+    /// a fresh stacc identity and a one-line message.
+    ///
+    /// The author date is preserved verbatim; the committer date is left to
+    /// git's default (now), matching how `git rebase` and `git commit --amend`
+    /// behave when only the tree changes.
+    ///
+    /// [`commit_tree`]: Git::commit_tree
+    pub fn commit_tree_like(
+        &self,
+        tree: &str,
+        parent: Option<&str>,
+        like: &str,
+    ) -> Result<String, GitError> {
+        // Pull the source commit's identity and full message in one read,
+        // NUL-delimited so a message containing any other byte round-trips.
+        let meta = self.run(&[
+            "log",
+            "-1",
+            "--format=%an%x00%ae%x00%ad%x00%cn%x00%ce%x00%B",
+            like,
+        ])?;
+        let mut parts = meta.splitn(6, '\0');
+        let author_name = parts.next().unwrap_or_default().to_string();
+        let author_email = parts.next().unwrap_or_default().to_string();
+        let author_date = parts.next().unwrap_or_default().to_string();
+        let committer_name = parts.next().unwrap_or_default().to_string();
+        let committer_email = parts.next().unwrap_or_default().to_string();
+        // `%B` is the raw body (subject + body); `run` trims the trailing
+        // newline, which `commit-tree` re-adds, so the message is preserved.
+        let message = parts.next().unwrap_or_default().to_string();
+
+        let mut args = vec!["commit-tree", tree];
+        if let Some(parent) = parent {
+            args.push("-p");
+            args.push(parent);
+        }
+        let mut child = self
+            .command(&args)
+            .env("GIT_AUTHOR_NAME", &author_name)
+            .env("GIT_AUTHOR_EMAIL", &author_email)
+            .env("GIT_AUTHOR_DATE", &author_date)
+            .env("GIT_COMMITTER_NAME", &committer_name)
+            .env("GIT_COMMITTER_EMAIL", &committer_email)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|source| GitError::Spawn { source })?;
+        {
+            use std::io::Write;
+            child
+                .stdin
+                .take()
+                .expect("stdin is piped")
+                .write_all(message.as_bytes())
+                .map_err(|source| GitError::Spawn { source })?;
+        }
+        let output = child
+            .wait_with_output()
+            .map_err(|source| GitError::Spawn { source })?;
+        if !output.status.success() {
+            return Err(self.command_error(&args, &output));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
+    /// The commits in `base..tip` (i.e. reachable from `tip` but not from
+    /// `base`), **oldest-first** (`--reverse`). For a stacked branch with
+    /// `base` its recorded base hash and `tip` its own tip, this is exactly the
+    /// branch's own commits in apply order, the candidate set absorb may
+    /// rewrite. An empty range (tip == base) yields an empty vector.
+    pub fn rev_list(&self, base: &str, tip: &str) -> Result<Vec<String>, GitError> {
+        let range = format!("{base}..{tip}");
+        let out = self.run(&["rev-list", "--reverse", &range])?;
+        Ok(out
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(ToString::to_string)
+            .collect())
     }
 
     /// Point `name` at `new`. When `old` is given, the move only succeeds if
@@ -1610,5 +1706,66 @@ mod tests {
         let rebuilt = repo.tree_entries(&tree).unwrap();
         let run2 = rebuilt.iter().find(|e| e.path == "run.sh").unwrap();
         assert_eq!(run2.mode, "100755");
+    }
+
+    #[test]
+    fn rev_list_returns_own_commits_oldest_first() {
+        let (tmp, repo) = init_repo();
+        let path = tmp.path();
+        let base = repo.rev_parse("HEAD").unwrap();
+        write_commit(path, "a.txt", "a\n", "c1");
+        let c1 = repo.rev_parse("HEAD").unwrap();
+        write_commit(path, "b.txt", "b\n", "c2");
+        let c2 = repo.rev_parse("HEAD").unwrap();
+
+        // base..tip is the two own commits, oldest-first.
+        assert_eq!(repo.rev_list(&base, &c2).unwrap(), vec![c1, c2]);
+        // An empty range yields nothing.
+        assert!(repo.rev_list(&base, &base).unwrap().is_empty());
+    }
+
+    #[test]
+    fn commit_tree_like_preserves_author_and_message() {
+        let (tmp, repo) = init_repo();
+        let path = tmp.path();
+        // Author a commit with a distinct identity and a multi-line message.
+        std::fs::write(path.join("f.txt"), "v1\n").unwrap();
+        run_git(path, &["add", "f.txt"]);
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args(["commit", "-q", "-m", "subject line\n\nbody line"])
+            .env("GIT_AUTHOR_NAME", "Original Author")
+            .env("GIT_AUTHOR_EMAIL", "orig@example.com")
+            .status()
+            .expect("commit");
+        let orig = repo.rev_parse("HEAD").unwrap();
+        let parent = repo.rev_parse("HEAD~1").unwrap();
+
+        // Rewrite its tree (a different blob) but reuse its identity + message.
+        let blob = repo.hash_object(b"v2\n").unwrap();
+        let mut entries = repo.tree_entries(&orig).unwrap();
+        for e in &mut entries {
+            if e.path == "f.txt" {
+                e.sha = blob.clone();
+            }
+        }
+        let tree = repo.mktree(&entries).unwrap();
+        let rewritten = repo
+            .commit_tree_like(&tree, Some(&parent), &orig)
+            .unwrap();
+
+        // Same author and message, different tree content.
+        let author = repo
+            .run(&["log", "-1", "--format=%an <%ae>", &rewritten])
+            .unwrap();
+        assert_eq!(author, "Original Author <orig@example.com>");
+        let subject = repo.commit_subject(&rewritten).unwrap();
+        assert_eq!(subject, "subject line");
+        assert_eq!(repo.commit_body(&rewritten).unwrap(), "body line");
+        assert_eq!(
+            repo.read_blob(&rewritten, "f.txt").unwrap().as_deref(),
+            Some("v2\n")
+        );
     }
 }
