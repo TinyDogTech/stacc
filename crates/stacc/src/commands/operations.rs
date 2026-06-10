@@ -1045,6 +1045,12 @@ pub fn sync(args: &SyncArgs, format: OutputFormat) -> Result<(), Error> {
     }
 
     let merged = detect_merged(&git, &state, &repo)?;
+    // Snapshot the merged branches' tips NOW, the leases for the ref cleanup
+    // after the reconcile: a branch that moves mid-sync is kept, not destroyed.
+    let leases: Vec<(String, String)> = merged
+        .iter()
+        .filter_map(|name| ref_lease(&git, name))
+        .collect();
     // Prune tracked branches whose git ref is gone and which carry no PR. (A
     // branch with a PR is governed by merge-detection above: a merged PR drops
     // it, an open/closed one keeps it, so an in-flight branch is never silently
@@ -1056,6 +1062,14 @@ pub fn sync(args: &SyncArgs, format: OutputFormat) -> Result<(), Error> {
     };
     let drop: BTreeSet<String> = merged.union(&pruned).cloned().collect();
     let outcome = reconcile_with(&git, &store, &mut state, &repo, drop, args.offline)?;
+    // The merged branches landed and their children are restacked off them:
+    // delete their local refs, unless the user asked to keep merged branches.
+    // (The pruned set's refs are already gone, nothing to clean there.)
+    let (cleaned, cleanup_skipped) = if args.keep_branches {
+        (Vec::new(), Vec::new())
+    } else {
+        cleanup_merged_refs(&git, &repo.trunk, &leases)
+    };
     report_sync(
         format,
         "sync",
@@ -1063,6 +1077,8 @@ pub fn sync(args: &SyncArgs, format: OutputFormat) -> Result<(), Error> {
         &pruned,
         &outcome.reparented,
         &outcome.restacked,
+        &cleaned,
+        &cleanup_skipped,
     );
     Ok(())
 }
@@ -1211,12 +1227,15 @@ struct MergedPr {
 }
 
 /// The result of walking the downstack chain: what merged, the children it
-/// re-parented and restacked onto the trunk between merges, where it stopped
+/// re-parented and restacked onto the trunk between merges, the merged local
+/// refs it deleted (and the ones it kept, with reasons), where it stopped
 /// short (structured), and any deferred hard error.
 struct MergeWalk {
     merged: Vec<MergedPr>,
     reparented: Vec<(String, String)>,
     restacked: Vec<String>,
+    cleaned: Vec<String>,
+    cleanup_skipped: Vec<CleanupSkip>,
     stopped: Option<Value>,
     error: Option<Error>,
 }
@@ -1224,6 +1243,10 @@ struct MergeWalk {
 /// `stacc merge`: squash-merge the ready PRs from the trunk up to the current
 /// branch, bottom-up, then reconcile via the `sync` logic. Stops at the first PR
 /// that is not cleanly mergeable. No-op (with a message) when nothing is ready.
+// A cohesive validate -> protection-check -> retarget -> walk -> report ->
+// restore sequence; splitting it would only trade this lint for
+// too_many_arguments on a helper (same as modify).
+#[allow(clippy::too_many_lines)]
 pub fn merge(args: &MergeArgs, format: OutputFormat) -> Result<(), Error> {
     let git = Git::open(".");
     let store = StateStore::new(git.clone());
@@ -1305,10 +1328,21 @@ pub fn merge(args: &MergeArgs, format: OutputFormat) -> Result<(), Error> {
         merged: merged_prs,
         reparented,
         restacked,
+        cleaned,
+        cleanup_skipped,
         stopped,
         error: loop_err,
     } = merge_stack(
-        &git, &store, &mut state, &repo, &github, &owner, &repo_name, &chain, args.offline,
+        &git,
+        &store,
+        &mut state,
+        &repo,
+        &github,
+        &owner,
+        &repo_name,
+        &chain,
+        args.offline,
+        args.keep_branches,
     );
 
     if args.offline && !merged_prs.is_empty() {
@@ -1323,7 +1357,15 @@ pub fn merge(args: &MergeArgs, format: OutputFormat) -> Result<(), Error> {
         restacked,
     });
 
-    report_merge(format, &merged_prs, stopped.as_ref(), protected, outcome.as_ref());
+    report_merge(
+        format,
+        &merged_prs,
+        stopped.as_ref(),
+        protected,
+        outcome.as_ref(),
+        &cleaned,
+        &cleanup_skipped,
+    );
 
     // Restore the user's branch. Each restack leaves HEAD on whichever branch it
     // rebased last, so without this `merge` silently strands you on a different
@@ -1399,7 +1441,9 @@ fn retarget_children_to_trunk(
 /// restacked onto the new trunk, so the PR is `trunk + its own commits` and
 /// merges without a squash-cascade conflict. Stops at the first PR that is not
 /// cleanly mergeable; defers a hard error so the caller still reports the merged
-/// prefix. Mutates `state` (the reconcile drops/restacks as it goes).
+/// prefix. Mutates `state` (the reconcile drops/restacks as it goes). After each
+/// merged PR's reconcile, deletes its local branch ref (leased on the tip it
+/// had when it merged; `keep_branches` opts out).
 #[allow(clippy::too_many_arguments)]
 fn merge_stack(
     git: &Git,
@@ -1411,10 +1455,13 @@ fn merge_stack(
     repo_name: &str,
     chain: &[String],
     offline: bool,
+    keep_branches: bool,
 ) -> MergeWalk {
     let mut merged_prs: Vec<MergedPr> = Vec::new();
     let mut reparented_all: Vec<(String, String)> = Vec::new();
     let mut restacked_all: Vec<String> = Vec::new();
+    let mut cleaned: Vec<String> = Vec::new();
+    let mut cleanup_skipped: Vec<CleanupSkip> = Vec::new();
     let mut stopped: Option<Value> = None;
     // A hard error is deferred, not returned immediately, so the caller can still
     // report whatever already merged before surfacing it.
@@ -1491,10 +1538,15 @@ fn merge_stack(
         }
 
         // Reaching here means `branch` merged (out of band or just now): every
-        // non-merging arm above breaks. Drop it and restack the remaining stack
-        // onto the merged trunk, so the next branch becomes `trunk + its own
-        // commits` (force-pushed at the top of the next iteration). Online fetches
-        // the trunk; offline restacks against the local trunk.
+        // non-merging arm above breaks. Snapshot its tip NOW, the lease for the
+        // ref cleanup below: a branch the user moves after this point is kept,
+        // not destroyed.
+        let lease = ref_lease(git, branch);
+
+        // Drop it and restack the remaining stack onto the merged trunk, so the
+        // next branch becomes `trunk + its own commits` (force-pushed at the top
+        // of the next iteration). Online fetches the trunk; offline restacks
+        // against the local trunk.
         let drop: BTreeSet<String> = std::iter::once(branch.clone()).collect();
         match reconcile_with(git, store, state, repo, drop, offline) {
             Ok(outcome) => {
@@ -1504,6 +1556,16 @@ fn merge_stack(
             Err(err) => {
                 loop_err = Some(err);
                 break;
+            }
+        }
+
+        // The branch is merged and its children are restacked off it: delete
+        // its local ref, unless the user asked to keep merged branches.
+        if !keep_branches {
+            if let Some(lease) = lease {
+                let (c, s) = cleanup_merged_refs(git, &repo.trunk, &[lease]);
+                cleaned.extend(c);
+                cleanup_skipped.extend(s);
             }
         }
     }
@@ -1519,6 +1581,8 @@ fn merge_stack(
         merged: merged_prs,
         reparented: reparented_all,
         restacked: restacked_all,
+        cleaned,
+        cleanup_skipped,
         stopped,
         error: loop_err,
     }
@@ -1552,6 +1616,8 @@ fn report_merge(
     stopped: Option<&Value>,
     protected: bool,
     outcome: Option<&SyncOutcome>,
+    cleaned: &[String],
+    cleanup_skipped: &[CleanupSkip],
 ) {
     match format {
         OutputFormat::Json => {
@@ -1580,6 +1646,8 @@ fn report_merge(
                     "stopped_at": stopped,
                     "trunk_protected": protected,
                     "synced": synced,
+                    "cleaned": cleaned,
+                    "cleanup_skipped": cleanup_skipped_json(cleanup_skipped),
                 })
             );
         }
@@ -1600,7 +1668,27 @@ fn report_merge(
                     println!("Restacked {name}");
                 }
             }
+            report_cleanup_pretty(cleaned, cleanup_skipped);
         }
+    }
+}
+
+/// The JSON shape of the kept-branch reports: `[{branch, reason}, ...]`.
+fn cleanup_skipped_json(skipped: &[CleanupSkip]) -> Vec<Value> {
+    skipped
+        .iter()
+        .map(|s| json!({ "branch": s.branch, "reason": s.reason }))
+        .collect()
+}
+
+/// Pretty lines for the ref cleanup: one per deleted branch, one per kept
+/// branch with its reason.
+fn report_cleanup_pretty(cleaned: &[String], skipped: &[CleanupSkip]) {
+    for name in cleaned {
+        println!("Deleted branch {name}");
+    }
+    for skip in skipped {
+        println!("Kept branch {} ({})", skip.branch, skip.reason);
     }
 }
 
@@ -2173,6 +2261,8 @@ fn continue_op(
                 &BTreeSet::new(),
                 &[],
                 &restacked,
+                &[],
+                &[],
             );
         }
         // A resumed modify carries its branch, so JSON gets the same
@@ -2365,6 +2455,90 @@ pub(crate) fn guard_worktree(git: &Git, branches: &[String]) -> Result<(), Error
     Ok(())
 }
 
+/// A merged branch whose local ref was kept during cleanup, and why.
+struct CleanupSkip {
+    branch: String,
+    reason: String,
+}
+
+/// What deleting one merged branch's local ref did.
+enum RefCleanup {
+    /// The ref was deleted.
+    Cleaned,
+    /// The ref was already gone; nothing to clean, nothing to report.
+    AlreadyGone,
+    /// The ref was kept, with the reason to report.
+    Skipped(String),
+}
+
+/// Delete the local ref of a branch whose PR merged, leased on `tip` (the tip
+/// the branch had when the merge happened or was detected): the delete is a
+/// compare-and-swap on that tip, so a ref that moved since is kept and
+/// reported rather than destroyed. A branch checked out in another worktree is
+/// kept (deleting it would desync that worktree); a branch checked out HERE is
+/// released by switching to the trunk first, so HEAD never names a deleted ref.
+fn cleanup_merged_ref(git: &Git, trunk: &str, branch: &str, tip: &str) -> RefCleanup {
+    match git.branch_checked_out_elsewhere(branch) {
+        Ok(Some(wt)) => {
+            return RefCleanup::Skipped(format!("checked out in {}", wt.display()));
+        }
+        Ok(None) => {}
+        Err(err) => return RefCleanup::Skipped(format!("could not list worktrees ({err})")),
+    }
+    let head_ref = format!("refs/heads/{branch}");
+    match git.ref_commit(&head_ref) {
+        Ok(None) => return RefCleanup::AlreadyGone,
+        Ok(Some(now)) if now != tip => {
+            return RefCleanup::Skipped("moved since its PR merged".into());
+        }
+        Ok(Some(_)) => {}
+        Err(err) => return RefCleanup::Skipped(format!("could not read its ref ({err})")),
+    }
+    if git.current_branch().ok().as_deref() == Some(branch) {
+        if let Err(err) = git.checkout(trunk) {
+            return RefCleanup::Skipped(format!(
+                "checked out here and switching to `{trunk}` failed ({err})"
+            ));
+        }
+    }
+    match git.delete_ref(&head_ref, Some(tip)) {
+        Ok(()) => RefCleanup::Cleaned,
+        // The CAS catches a move between the read above and the delete.
+        Err(_) => RefCleanup::Skipped("moved since its PR merged".into()),
+    }
+}
+
+/// Run [`cleanup_merged_ref`] over `(branch, tip)` leases, splitting the
+/// results into the deleted branches and the kept-with-reason ones.
+fn cleanup_merged_refs(
+    git: &Git,
+    trunk: &str,
+    leases: &[(String, String)],
+) -> (Vec<String>, Vec<CleanupSkip>) {
+    let mut cleaned = Vec::new();
+    let mut skipped = Vec::new();
+    for (branch, tip) in leases {
+        match cleanup_merged_ref(git, trunk, branch, tip) {
+            RefCleanup::Cleaned => cleaned.push(branch.clone()),
+            RefCleanup::AlreadyGone => {}
+            RefCleanup::Skipped(reason) => skipped.push(CleanupSkip {
+                branch: branch.clone(),
+                reason,
+            }),
+        }
+    }
+    (cleaned, skipped)
+}
+
+/// The lease for [`cleanup_merged_ref`]: `branch`'s live local tip, or `None`
+/// when the ref is already gone (nothing to clean).
+fn ref_lease(git: &Git, branch: &str) -> Option<(String, String)> {
+    git.ref_commit(&format!("refs/heads/{branch}"))
+        .ok()
+        .flatten()
+        .map(|tip| (branch.to_string(), tip))
+}
+
 /// Persist a restack-driven command transactionally: apply the command's own
 /// state change (`command_deltas`) plus the engine's `(branch, base_hash)`
 /// updates to fresh state under compare-and-swap, so a concurrent writer on a
@@ -2411,6 +2585,7 @@ fn report_restacked(format: OutputFormat, op: &str, restacked: &[String]) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn report_sync(
     format: OutputFormat,
     op: &str,
@@ -2418,6 +2593,8 @@ fn report_sync(
     pruned: &BTreeSet<String>,
     reparented: &[(String, String)],
     restacked: &[String],
+    cleaned: &[String],
+    cleanup_skipped: &[CleanupSkip],
 ) {
     match format {
         OutputFormat::Json => {
@@ -2435,6 +2612,8 @@ fn report_sync(
                     "pruned": pruned_list,
                     "reparented": reparented_list,
                     "restacked": restacked,
+                    "cleaned": cleaned,
+                    "cleanup_skipped": cleanup_skipped_json(cleanup_skipped),
                 })
             );
         }
@@ -2456,6 +2635,7 @@ fn report_sync(
                     println!("Restacked {name}");
                 }
             }
+            report_cleanup_pretty(cleaned, cleanup_skipped);
         }
     }
 }
@@ -2512,4 +2692,102 @@ fn fast_forward_trunk(git: &Git, remote: &str, trunk: &str) -> Result<(), Error>
         )?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::process::Command;
+
+    use super::*;
+
+    fn run_git(dir: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .status()
+            .expect("spawn git");
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    fn repo() -> (tempfile::TempDir, Git) {
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        run_git(tmp.path(), &["init", "-q", "-b", "main"]);
+        run_git(tmp.path(), &["config", "user.name", "Test"]);
+        run_git(tmp.path(), &["config", "user.email", "test@example.com"]);
+        run_git(tmp.path(), &["commit", "-q", "--allow-empty", "-m", "first"]);
+        let git = Git::open(tmp.path());
+        (tmp, git)
+    }
+
+    #[test]
+    fn cleanup_deletes_a_ref_at_its_leased_tip() {
+        let (tmp, git) = repo();
+        run_git(tmp.path(), &["branch", "feat"]);
+        let tip = git.rev_parse("feat").unwrap();
+        assert!(matches!(
+            cleanup_merged_ref(&git, "main", "feat", &tip),
+            RefCleanup::Cleaned
+        ));
+        assert!(git.ref_missing("feat"));
+    }
+
+    #[test]
+    fn cleanup_skips_a_ref_that_moved_off_the_lease() {
+        let (tmp, git) = repo();
+        run_git(tmp.path(), &["branch", "feat"]);
+        let lease = git.rev_parse("feat").unwrap();
+        // The branch moves after the lease was taken (the user committed to it
+        // mid-command): the cleanup must keep it.
+        run_git(tmp.path(), &["checkout", "-q", "feat"]);
+        run_git(tmp.path(), &["commit", "-q", "--allow-empty", "-m", "moved"]);
+        run_git(tmp.path(), &["checkout", "-q", "main"]);
+        match cleanup_merged_ref(&git, "main", "feat", &lease) {
+            RefCleanup::Skipped(reason) => assert!(reason.contains("moved"), "got: {reason}"),
+            _ => panic!("expected a lease-miss skip"),
+        }
+        assert!(!git.ref_missing("feat"), "the moved ref must survive");
+    }
+
+    #[test]
+    fn cleanup_releases_the_current_branch_via_the_trunk() {
+        let (tmp, git) = repo();
+        run_git(tmp.path(), &["checkout", "-q", "-b", "feat"]);
+        let tip = git.rev_parse("feat").unwrap();
+        assert!(matches!(
+            cleanup_merged_ref(&git, "main", "feat", &tip),
+            RefCleanup::Cleaned
+        ));
+        assert_eq!(git.current_branch().unwrap(), "main");
+        assert!(git.ref_missing("feat"));
+    }
+
+    #[test]
+    fn cleanup_skips_a_branch_checked_out_in_another_worktree() {
+        let (tmp, git) = repo();
+        run_git(tmp.path(), &["branch", "feat"]);
+        let tip = git.rev_parse("feat").unwrap();
+        let wt = tmp.path().join("wt");
+        run_git(
+            tmp.path(),
+            &["worktree", "add", "-q", wt.to_str().unwrap(), "feat"],
+        );
+        match cleanup_merged_ref(&git, "main", "feat", &tip) {
+            RefCleanup::Skipped(reason) => {
+                assert!(reason.contains("checked out in"), "got: {reason}");
+            }
+            _ => panic!("expected a worktree skip"),
+        }
+        assert!(!git.ref_missing("feat"), "the checked-out ref must survive");
+    }
+
+    #[test]
+    fn cleanup_is_silent_for_an_already_gone_ref() {
+        let (_tmp, git) = repo();
+        assert!(matches!(
+            cleanup_merged_ref(&git, "main", "ghost", "0000000000000000000000000000000000000000"),
+            RefCleanup::AlreadyGone
+        ));
+    }
 }

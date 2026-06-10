@@ -416,6 +416,9 @@ pub struct SubmitArgs {
 }
 
 /// Arguments for `stacc sync`.
+// Independent CLI flags are naturally booleans; the count is a surface, not a
+// data-modeling smell (same as RestackArgs and LogArgs).
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, clap::Args)]
 pub struct SyncArgs {
     /// Resume a sync that stopped on a conflict, after resolving it.
@@ -427,6 +430,9 @@ pub struct SyncArgs {
     /// Keep tracked branches whose git ref is gone instead of pruning them.
     #[arg(long)]
     pub no_prune: bool,
+    /// Keep the local branches of merged PRs instead of deleting them.
+    #[arg(long)]
+    pub keep_branches: bool,
 }
 
 /// Arguments for `stacc restack`. The scope flags are mutually exclusive; with
@@ -551,6 +557,9 @@ pub struct MergeArgs {
     /// Refuse to merge unless the trunk has branch protection enabled.
     #[arg(long)]
     pub require_protected: bool,
+    /// Keep the local branches of merged PRs instead of deleting them.
+    #[arg(long)]
+    pub keep_branches: bool,
 }
 
 /// Arguments for `stacc rename`.

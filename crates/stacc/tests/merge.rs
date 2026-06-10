@@ -43,6 +43,16 @@ fn stacc(dir: &Path, args: &[&str]) -> Output {
     stacc_env(dir, args, &[])
 }
 
+fn ref_exists(dir: &Path, branch: &str) -> bool {
+    // Capture the output: `--verify` prints the hash on success, which would
+    // otherwise leak into the test output via the inherited stdout.
+    !git_out(
+        dir,
+        &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")],
+    )
+    .is_empty()
+}
+
 fn repo() -> TempDir {
     let tmp = TempDir::new().expect("temp dir");
     let p = tmp.path();
@@ -604,8 +614,9 @@ fn merge_online_restacks_and_force_pushes_each_child() {
     patch2.assert();
 
     // b was restacked onto main (drop a's commit) and force-pushed: the branch on
-    // the remote is `main + b1`, with no `a1`.
-    let bare_b = git_out(bare.path(), &["log", "--oneline", "b"]);
+    // the remote is `main + b1`, with no `a1`. Match subjects only (`%s`): an
+    // abbreviated hash can contain `a1` by luck, which `--oneline` would trip on.
+    let bare_b = git_out(bare.path(), &["log", "--format=%s", "b"]);
     assert!(bare_b.contains("b1"), "b kept its own commit: {bare_b}");
     assert!(!bare_b.contains("a1"), "b dropped a's commit via the restack: {bare_b}");
 
@@ -686,9 +697,10 @@ fn merge_online_force_pushes_the_correct_branch_at_each_level() {
 
     // Each child was force-pushed restacked onto the merged trunk, with a1
     // dropped. If a level force-pushed the wrong branch, a1 would survive here.
-    let bare_b = git_out(bare.path(), &["log", "--oneline", "b"]);
+    // Match subjects only (`%s`): an abbreviated hash can contain `a1` by luck.
+    let bare_b = git_out(bare.path(), &["log", "--format=%s", "b"]);
     assert!(bare_b.contains("b1") && !bare_b.contains("a1"), "b: {bare_b}");
-    let bare_c = git_out(bare.path(), &["log", "--oneline", "c"]);
+    let bare_c = git_out(bare.path(), &["log", "--format=%s", "c"]);
     assert!(bare_c.contains("c1") && !bare_c.contains("a1"), "c: {bare_c}");
 
     let log = String::from_utf8_lossy(&stacc(p, &["log", "--format", "json"]).stdout).into_owned();
@@ -742,13 +754,206 @@ fn merge_restores_the_starting_branch() {
     });
 
     run_git(p, &["checkout", "-q", "b"]);
+    // --keep-branches so the merged starting branch's ref survives; the default
+    // cleanup would delete it and land on the trunk instead (covered by
+    // merge_of_the_whole_stack_ends_on_the_trunk_with_refs_gone).
     let out = stacc_env(
         p,
-        &["merge", "--offline", "--format", "json"],
+        &["merge", "--offline", "--keep-branches", "--format", "json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
     // merge ran from `b` and merged a + b; HEAD is restored to `b`, not left on
     // `c` (which the upstack restack would otherwise leave it on).
     assert_eq!(git_out(p, &["rev-parse", "--abbrev-ref", "HEAD"]), "b");
+}
+
+#[test]
+fn merge_deletes_merged_refs_and_keeps_the_stopped_branch() {
+    let tmp = repo();
+    let p = tmp.path();
+    // main -> bottom -> middle -> top; bottom + middle merge, top is blocked.
+    run_git(p, &["checkout", "-q", "-b", "bottom"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "b"]);
+    run_git(p, &["checkout", "-q", "-b", "middle"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "m"]);
+    run_git(p, &["checkout", "-q", "-b", "top"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "t"]);
+    track_pr(p, "bottom", "main", 1);
+    track_pr(p, "middle", "bottom", 2);
+    track_pr(p, "top", "middle", 3);
+
+    let server = MockServer::start();
+    let base = "/repos/stacc-sandbox/example";
+    server.mock(|w, t| {
+        w.method(Method::GET).path(format!("{base}/branches/main/protection"));
+        t.status(404).json_body(serde_json::json!({ "message": "x" }));
+    });
+    server.mock(|w, t| {
+        w.method(Method::GET).path(format!("{base}/pulls/1"));
+        t.status(200).json_body(pr_open(1, "clean"));
+    });
+    server.mock(|w, t| {
+        w.method(Method::GET).path(format!("{base}/pulls/2"));
+        t.status(200).json_body(pr_open(2, "clean"));
+    });
+    server.mock(|w, t| {
+        w.method(Method::GET).path(format!("{base}/pulls/3"));
+        t.status(200).json_body(pr_open(3, "blocked"));
+    });
+    server.mock(|w, t| {
+        w.method(Method::PATCH).path(format!("{base}/pulls/2"));
+        t.status(200).json_body(pr_open(2, "clean"));
+    });
+    server.mock(|w, t| {
+        w.method(Method::PATCH).path(format!("{base}/pulls/3"));
+        t.status(200).json_body(pr_open(3, "blocked"));
+    });
+    server.mock(|w, t| {
+        w.method(Method::PUT).path(format!("{base}/pulls/1/merge"));
+        t.status(200).json_body(serde_json::json!({ "merged": true }));
+    });
+    server.mock(|w, t| {
+        w.method(Method::PUT).path(format!("{base}/pulls/2/merge"));
+        t.status(200).json_body(serde_json::json!({ "merged": true }));
+    });
+
+    run_git(p, &["checkout", "-q", "top"]);
+    let out = stacc_env(
+        p,
+        &["merge", "--offline", "--format", "json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    // The merged refs were deleted, in walk order; nothing was skipped.
+    assert!(s.contains(r#""cleaned":["bottom","middle"]"#), "got: {s}");
+    assert!(s.contains(r#""cleanup_skipped":[]"#), "got: {s}");
+    assert!(!ref_exists(p, "bottom"), "bottom's ref must be deleted");
+    assert!(!ref_exists(p, "middle"), "middle's ref must be deleted");
+    assert!(ref_exists(p, "top"), "the stopped-at branch's ref must survive");
+}
+
+#[test]
+fn merge_keep_branches_keeps_the_merged_refs() {
+    let tmp = repo();
+    let p = tmp.path();
+    run_git(p, &["checkout", "-q", "-b", "bottom"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "b"]);
+    run_git(p, &["checkout", "-q", "-b", "top"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "t"]);
+    track_pr(p, "bottom", "main", 1);
+    track_pr(p, "top", "bottom", 2);
+
+    let server = MockServer::start();
+    let base = "/repos/stacc-sandbox/example";
+    server.mock(|w, t| {
+        w.method(Method::GET).path(format!("{base}/branches/main/protection"));
+        t.status(404).json_body(serde_json::json!({ "message": "x" }));
+    });
+    server.mock(|w, t| {
+        w.method(Method::GET).path(format!("{base}/pulls/1"));
+        t.status(200).json_body(pr_open(1, "clean"));
+    });
+    server.mock(|w, t| {
+        w.method(Method::GET).path(format!("{base}/pulls/2"));
+        t.status(200).json_body(pr_open(2, "clean"));
+    });
+    server.mock(|w, t| {
+        w.method(Method::PATCH).path(format!("{base}/pulls/2"));
+        t.status(200).json_body(pr_open(2, "clean"));
+    });
+    server.mock(|w, t| {
+        w.method(Method::PUT).path(format!("{base}/pulls/1/merge"));
+        t.status(200).json_body(serde_json::json!({ "merged": true }));
+    });
+    server.mock(|w, t| {
+        w.method(Method::PUT).path(format!("{base}/pulls/2/merge"));
+        t.status(200).json_body(serde_json::json!({ "merged": true }));
+    });
+
+    run_git(p, &["checkout", "-q", "top"]);
+    let out = stacc_env(
+        p,
+        &["merge", "--offline", "--keep-branches", "--format", "json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains(r#""cleaned":[]"#), "nothing deleted: {s}");
+    assert!(s.contains(r#""cleanup_skipped":[]"#), "nothing to report: {s}");
+    // Both merged and dropped from state, but the local refs survive.
+    assert!(ref_exists(p, "bottom"), "bottom's ref must survive --keep-branches");
+    assert!(ref_exists(p, "top"), "top's ref must survive --keep-branches");
+    let log = String::from_utf8_lossy(&stacc(p, &["log", "--format", "json"]).stdout).into_owned();
+    assert!(
+        !log.contains(r#""name":"bottom""#) && !log.contains(r#""name":"top""#),
+        "state still drops merged branches: {log}"
+    );
+}
+
+#[test]
+fn merge_of_the_whole_stack_ends_on_the_trunk_with_refs_gone() {
+    let tmp = repo();
+    let p = tmp.path();
+    // main -> a -> b, merged from `b`: the starting branch itself merges, so
+    // its ref is deleted and merge ends on the trunk.
+    run_git(p, &["checkout", "-q", "-b", "a"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "a1"]);
+    run_git(p, &["checkout", "-q", "-b", "b"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "b1"]);
+    track_pr(p, "a", "main", 1);
+    track_pr(p, "b", "a", 2);
+
+    let server = MockServer::start();
+    let base = "/repos/stacc-sandbox/example";
+    server.mock(|w, t| {
+        w.method(Method::GET).path(format!("{base}/branches/main/protection"));
+        t.status(404).json_body(serde_json::json!({ "message": "x" }));
+    });
+    server.mock(|w, t| {
+        w.method(Method::GET).path(format!("{base}/pulls/1"));
+        t.status(200).json_body(pr_open(1, "clean"));
+    });
+    server.mock(|w, t| {
+        w.method(Method::GET).path(format!("{base}/pulls/2"));
+        t.status(200).json_body(pr_open(2, "clean"));
+    });
+    server.mock(|w, t| {
+        w.method(Method::PATCH).path(format!("{base}/pulls/2"));
+        t.status(200).json_body(pr_open(2, "clean"));
+    });
+    server.mock(|w, t| {
+        w.method(Method::PUT).path(format!("{base}/pulls/1/merge"));
+        t.status(200).json_body(serde_json::json!({ "merged": true }));
+    });
+    server.mock(|w, t| {
+        w.method(Method::PUT).path(format!("{base}/pulls/2/merge"));
+        t.status(200).json_body(serde_json::json!({ "merged": true }));
+    });
+
+    run_git(p, &["checkout", "-q", "b"]);
+    let out = stacc_env(
+        p,
+        &["merge", "--offline", "--format", "json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains(r#""cleaned":["a","b"]"#), "got: {s}");
+    assert!(!ref_exists(p, "a") && !ref_exists(p, "b"), "merged refs must be gone");
+    // The starting branch merged and its ref is gone: merge ends on the trunk.
+    assert_eq!(git_out(p, &["rev-parse", "--abbrev-ref", "HEAD"]), "main");
 }
