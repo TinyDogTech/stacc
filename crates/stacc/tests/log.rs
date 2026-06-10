@@ -522,6 +522,10 @@ fn log_no_status_makes_no_api_call() {
             "number": 7, "html_url": "u", "state": "open", "merged": false,
         }));
     });
+    let graphql = server.mock(|when, then| {
+        when.method(httpmock::Method::POST).path("/graphql");
+        then.status(200).json_body(serde_json::json!({ "data": { "repository": {} } }));
+    });
     let base = server.base_url();
     let envs: &[(&str, &str)] = &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", base.as_str())];
 
@@ -529,6 +533,7 @@ fn log_no_status_makes_no_api_call() {
     assert!(s.contains("#7"), "PR number still shown: {s}");
     assert!(!s.contains("#7 Open"), "no live status under --no-status: {s}");
     mock.assert_hits(0); // --no-status must not hit the API at all
+    graphql.assert_hits(0); // ...including the batched rollup query
 }
 
 #[test]
@@ -665,6 +670,181 @@ fn log_no_status_skips_the_by_head_lookup() {
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
     by_head.assert_hits(0); // --no-status does no lookups at all
     assert_eq!(state_ref(p), before, "--no-status writes no state");
+}
+
+#[test]
+fn log_full_shows_title_draft_and_mergeable_hint() {
+    let tmp = github_repo();
+    let p = tmp.path();
+    assert!(stacc(p, &["init"]).status.success());
+    run_git(p, &["checkout", "-q", "-b", "feature"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "feat: x"]);
+    assert!(stacc(p, &["track"]).status.success());
+    seed_pr(p, "feature", 7);
+
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(httpmock::Method::GET)
+            .path("/repos/TinyDogTech/stacc/pulls/7");
+        then.status(200).json_body(serde_json::json!({
+            "number": 7, "html_url": "u", "state": "open", "merged": false,
+            "title": "feat: add the foo widget", "draft": true,
+            "mergeable_state": "blocked",
+        }));
+    });
+    let base = server.base_url();
+    let envs: &[(&str, &str)] = &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", base.as_str())];
+
+    let out = stacc_env(p, &["log"], envs);
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let s = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        s.contains("#7 Draft (blocked) - feat: add the foo widget"),
+        "draft + hint + title expected: {s}"
+    );
+
+    let j = String::from_utf8_lossy(&stacc_env(p, &["log", "--format", "json"], envs).stdout)
+        .into_owned();
+    assert!(j.contains(r#""status":"open""#), "draft stays open in JSON: {j}");
+    assert!(j.contains(r#""title":"feat: add the foo widget""#), "got: {j}");
+    assert!(j.contains(r#""draft":true"#), "got: {j}");
+    assert!(j.contains(r#""mergeable_state":"blocked""#), "got: {j}");
+}
+
+#[test]
+fn log_full_shows_review_and_ci_rollup_from_one_batched_call() {
+    let tmp = github_repo();
+    let p = tmp.path();
+    assert!(stacc(p, &["init"]).status.success());
+    run_git(p, &["checkout", "-q", "-b", "a"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "a1"]);
+    assert!(stacc(p, &["track"]).status.success());
+    run_git(p, &["checkout", "-q", "-b", "b"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "b1"]);
+    assert!(stacc(p, &["track", "--base", "a"]).status.success());
+    seed_pr(p, "a", 7);
+    seed_pr(p, "b", 8);
+
+    let server = MockServer::start();
+    for (number, title) in [(7, "t7"), (8, "t8")] {
+        server.mock(|when, then| {
+            when.method(httpmock::Method::GET)
+                .path(format!("/repos/TinyDogTech/stacc/pulls/{number}"));
+            then.status(200).json_body(serde_json::json!({
+                "number": number, "html_url": "u", "state": "open", "merged": false,
+                "title": title,
+            }));
+        });
+    }
+    // ONE GraphQL call must cover both PRs (aliased fields), not 2 per branch.
+    let graphql = server.mock(|when, then| {
+        when.method(httpmock::Method::POST)
+            .path("/graphql")
+            .body_contains("pr7: pullRequest(number: 7)")
+            .body_contains("pr8: pullRequest(number: 8)");
+        then.status(200).json_body(serde_json::json!({
+            "data": { "repository": {
+                "pr7": {
+                    "reviewDecision": "APPROVED",
+                    "commits": { "nodes": [ { "commit": {
+                        "statusCheckRollup": { "state": "SUCCESS" }
+                    } } ] }
+                },
+                "pr8": {
+                    "reviewDecision": "CHANGES_REQUESTED",
+                    "commits": { "nodes": [ { "commit": {
+                        "statusCheckRollup": { "state": "PENDING" }
+                    } } ] }
+                },
+            } }
+        }));
+    });
+    let base = server.base_url();
+    let envs: &[(&str, &str)] = &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", base.as_str())];
+
+    let out = stacc_env(p, &["log"], envs);
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let s = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(s.contains("#7 Open - t7"), "got: {s}");
+    assert!(s.contains("approved, CI pass"), "rollup line for a: {s}");
+    assert!(s.contains("#8 Open - t8"), "got: {s}");
+    assert!(s.contains("changes requested, CI pending"), "rollup line for b: {s}");
+    graphql.assert_hits(1);
+
+    let j = String::from_utf8_lossy(&stacc_env(p, &["log", "--format", "json"], envs).stdout)
+        .into_owned();
+    assert!(j.contains(r#""review":"approved""#), "got: {j}");
+    assert!(j.contains(r#""checks":"pass""#), "got: {j}");
+    assert!(j.contains(r#""review":"changes_requested""#), "got: {j}");
+    assert!(j.contains(r#""checks":"pending""#), "got: {j}");
+    graphql.assert_hits(2); // still one batched call per run
+}
+
+#[test]
+fn log_rollup_failure_is_silent_and_keeps_tier_one_detail() {
+    let tmp = github_repo();
+    let p = tmp.path();
+    assert!(stacc(p, &["init"]).status.success());
+    run_git(p, &["checkout", "-q", "-b", "feature"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "feat: x"]);
+    assert!(stacc(p, &["track"]).status.success());
+    seed_pr(p, "feature", 7);
+
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(httpmock::Method::GET)
+            .path("/repos/TinyDogTech/stacc/pulls/7");
+        then.status(200).json_body(serde_json::json!({
+            "number": 7, "html_url": "u", "state": "open", "merged": false,
+            "title": "t7",
+        }));
+    });
+    server.mock(|when, then| {
+        when.method(httpmock::Method::POST).path("/graphql");
+        then.status(500).json_body(serde_json::json!({ "message": "boom" }));
+    });
+    let base = server.base_url();
+    let envs: &[(&str, &str)] = &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", base.as_str())];
+
+    let out = stacc_env(p, &["log"], envs);
+    assert!(out.status.success(), "must not be fatal: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(out.stderr.is_empty(), "a failed rollup adds no noise: {}", String::from_utf8_lossy(&out.stderr));
+    let s = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(s.contains("#7 Open - t7"), "tier-1 detail survives: {s}");
+    assert!(!s.contains("CI") && !s.contains("approved"), "no rollup text on failure: {s}");
+}
+
+#[test]
+fn log_skips_the_rollup_for_non_open_prs() {
+    let tmp = github_repo();
+    let p = tmp.path();
+    assert!(stacc(p, &["init"]).status.success());
+    run_git(p, &["checkout", "-q", "-b", "feature"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "feat: x"]);
+    assert!(stacc(p, &["track"]).status.success());
+    seed_pr(p, "feature", 7);
+
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(httpmock::Method::GET)
+            .path("/repos/TinyDogTech/stacc/pulls/7");
+        then.status(200).json_body(serde_json::json!({
+            "number": 7, "html_url": "u", "state": "closed", "merged": true,
+            "title": "t7",
+        }));
+    });
+    let graphql = server.mock(|when, then| {
+        when.method(httpmock::Method::POST).path("/graphql");
+        then.status(200).json_body(serde_json::json!({ "data": { "repository": {} } }));
+    });
+    let base = server.base_url();
+    let envs: &[(&str, &str)] = &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", base.as_str())];
+
+    let out = stacc_env(p, &["log"], envs);
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let s = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(s.contains("#7 Merged - t7"), "got: {s}");
+    graphql.assert_hits(0); // a merged PR has no actionable rollup to fetch
 }
 
 #[test]

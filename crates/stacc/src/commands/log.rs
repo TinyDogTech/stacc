@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 use stacc_core::ops;
 use stacc_git::Git;
-use stacc_github::{GitHub, PrState};
+use stacc_github::{CheckRollup, GitHub, PrChecks, PrState, ReviewDecision};
 use stacc_state::{BranchState, PullRequest, RepoConfig, StateStore};
 
 use crate::cli::{ColorChoice, LogArgs, LogForm, OutputFormat};
@@ -317,7 +317,7 @@ struct RenderCtx<'a> {
     current: &'a str,
     git: &'a Git,
     full: bool,
-    pr_status: &'a BTreeMap<String, Option<PrState>>,
+    pr_status: &'a PrStatusMap,
     palette: &'a Palette,
     deleted: &'a BTreeSet<String>,
 }
@@ -615,7 +615,7 @@ fn meta_lines(
     is_trunk: bool,
     is_deleted: bool,
     branches: &BTreeMap<String, BranchState>,
-    pr_status: &BTreeMap<String, Option<PrState>>,
+    pr_status: &PrStatusMap,
 ) -> Vec<String> {
     let mut lines = Vec::new();
     // A branch whose git ref is gone has no resolvable commits; show the bare
@@ -648,11 +648,15 @@ fn meta_lines(
     }
 
     if let Some(pr) = branches.get(node).and_then(|b| b.pr.as_ref()) {
-        let line = match pr_status.get(node).copied().flatten() {
-            Some(state) => format!("#{} {}", pr.number, pr_status_label(state)),
-            None => format!("#{}", pr.number),
-        };
-        lines.push(line);
+        match pr_status.get(node).and_then(Option::as_ref) {
+            Some(live) => {
+                lines.push(pr_line(pr.number, live));
+                if let Some(rollup) = rollup_line(live.checks) {
+                    lines.push(rollup);
+                }
+            }
+            None => lines.push(format!("#{}", pr.number)),
+        }
     }
 
     // `behind > 0`: the base has commits this branch lacks, i.e. it drifted.
@@ -667,6 +671,77 @@ fn pr_status_label(state: PrState) -> &'static str {
         PrState::Open => "Open",
         PrState::Closed => "Closed",
         PrState::Merged => "Merged",
+    }
+}
+
+/// The PR metadata line: `#NN <state>` plus a mergeable-state hint when GitHub
+/// reports the PR stuck, then the truncated title. An open draft renders as
+/// `Draft` (GitHub's draft flag is a sub-state of open).
+fn pr_line(number: u64, detail: &PrLive) -> String {
+    let state = if detail.pr.draft && detail.pr.state == PrState::Open {
+        "Draft"
+    } else {
+        pr_status_label(detail.pr.state)
+    };
+    let mut line = format!("#{number} {state}");
+    if detail.pr.state == PrState::Open {
+        if let Some(hint) = super::mergeable_hint(detail.pr.mergeable_state.as_deref()) {
+            line.push_str(" (");
+            line.push_str(hint);
+            line.push(')');
+        }
+    }
+    if !detail.pr.title.is_empty() {
+        line.push_str(" - ");
+        line.push_str(&truncate_subject(&detail.pr.title));
+    }
+    line
+}
+
+/// The review/CI rollup line (e.g. `approved, CI pass`), or `None` when the
+/// batched fetch had nothing for this PR.
+fn rollup_line(checks: PrChecks) -> Option<String> {
+    let parts: Vec<&str> = [checks.review.map(review_label), checks.checks.map(check_label)]
+        .into_iter()
+        .flatten()
+        .collect();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(", "))
+    }
+}
+
+fn review_label(review: ReviewDecision) -> &'static str {
+    match review {
+        ReviewDecision::Approved => "approved",
+        ReviewDecision::ChangesRequested => "changes requested",
+        ReviewDecision::ReviewRequired => "review required",
+    }
+}
+
+fn check_label(checks: CheckRollup) -> &'static str {
+    match checks {
+        CheckRollup::Pass => "CI pass",
+        CheckRollup::Fail => "CI fail",
+        CheckRollup::Pending => "CI pending",
+    }
+}
+
+/// JSON spellings of the rollup values (snake_case, like `pr_state_str`).
+fn review_str(review: ReviewDecision) -> &'static str {
+    match review {
+        ReviewDecision::Approved => "approved",
+        ReviewDecision::ChangesRequested => "changes_requested",
+        ReviewDecision::ReviewRequired => "review_required",
+    }
+}
+
+fn check_str(checks: CheckRollup) -> &'static str {
+    match checks {
+        CheckRollup::Pass => "pass",
+        CheckRollup::Fail => "fail",
+        CheckRollup::Pending => "pending",
     }
 }
 
@@ -693,8 +768,15 @@ fn term_width() -> usize {
 
 // --- Live PR status --------------------------------------------------------
 
-/// branch name -> its live PR status (`None` when unavailable).
-type PrStatusMap = BTreeMap<String, Option<PrState>>;
+/// A branch's live PR detail: the REST fetch (state, title, draft, mergeable
+/// state) plus its slice of the batched review/CI rollup.
+struct PrLive {
+    pr: stacc_github::PullRequest,
+    checks: PrChecks,
+}
+
+/// branch name -> its live PR detail (`None` when unavailable).
+type PrStatusMap = BTreeMap<String, Option<PrLive>>;
 /// PRs discovered by head branch this run, for the caller to record in state.
 type Adoptions = Vec<(String, PullRequest)>;
 
@@ -713,7 +795,7 @@ fn fetch_pr_status(
     visible: &BTreeSet<String>,
     deleted: &BTreeSet<String>,
 ) -> (PrStatusMap, Adoptions) {
-    let mut map = BTreeMap::new();
+    let mut live: BTreeMap<String, Option<stacc_github::PullRequest>> = BTreeMap::new();
     let mut adopted = Vec::new();
     let recorded: Vec<(String, u64)> = visible
         .iter()
@@ -732,13 +814,11 @@ fn fetch_pr_status(
         .cloned()
         .collect();
     if recorded.is_empty() && unrecorded.is_empty() {
-        return (map, adopted);
+        return (BTreeMap::new(), adopted);
     }
 
     let Some((github, owner, repo_name)) = build_client(git, repo) else {
-        for (name, _) in recorded {
-            map.insert(name, None);
-        }
+        let map = recorded.into_iter().map(|(name, _)| (name, None)).collect();
         return (map, adopted);
     };
 
@@ -752,11 +832,10 @@ fn fetch_pr_status(
             github
                 .get_pull_request_within(&owner, &repo_name, number, remaining)
                 .ok()
-                .map(|pr| pr.state)
         } else {
             None
         };
-        map.insert(name, status);
+        live.insert(name, status);
     }
     // By-head adoption lookups, after the recorded fetches so they only spend
     // leftover budget. Any failure (or no match) leaves the branch status-less,
@@ -769,16 +848,46 @@ fn fetch_pr_status(
         if let Ok(Some(pr)) =
             github.pull_request_for_branch_within(&owner, &repo_name, &name, remaining)
         {
-            map.insert(name.clone(), Some(pr.state));
             adopted.push((
-                name,
+                name.clone(),
                 PullRequest {
                     number: pr.number,
-                    url: Some(pr.url),
+                    url: Some(pr.url.clone()),
                 },
             ));
+            live.insert(name, Some(pr));
         }
     }
+
+    // Review decision + CI rollup for every open PR found above, in ONE
+    // batched GraphQL call spending only leftover budget. Closed/merged PRs
+    // have no actionable rollup and are skipped; any failure (or an exhausted
+    // budget) just leaves every rollup empty, silently.
+    let open: Vec<u64> = live
+        .values()
+        .flatten()
+        .filter(|pr| pr.state == PrState::Open)
+        .map(|pr| pr.number)
+        .collect();
+    let remaining = STATUS_BUDGET.saturating_sub(start.elapsed());
+    let rollups = if !open.is_empty() && remaining > Duration::from_millis(50) {
+        github
+            .pull_request_checks_within(&owner, &repo_name, &open, remaining)
+            .unwrap_or_default()
+    } else {
+        BTreeMap::new()
+    };
+
+    let map = live
+        .into_iter()
+        .map(|(name, pr)| {
+            let detail = pr.map(|pr| PrLive {
+                checks: rollups.get(&pr.number).copied().unwrap_or_default(),
+                pr,
+            });
+            (name, detail)
+        })
+        .collect();
     (map, adopted)
 }
 
@@ -793,16 +902,17 @@ fn build_client(git: &Git, repo: &RepoConfig) -> Option<(GitHub, String, String)
 
 // --- JSON ------------------------------------------------------------------
 
-/// The stack tree for `--format json`. `pr` is an object
-/// `{number, url, status}` (status null when unavailable) and each branch with
-/// its own commits carries a `commit {sha, subject, age}`. A branch whose git
-/// ref is gone carries `"deleted": true` and no `commit`.
+/// The stack tree for `--format json`. `pr` is an object `{number, url,
+/// status, title, draft, mergeable_state, review, checks}` (everything past
+/// `url` is live data, null when unavailable) and each branch with its own
+/// commits carries a `commit {sha, subject, age}`. A branch whose git ref is
+/// gone carries `"deleted": true` and no `commit`.
 fn stack_json(
     node: &str,
     children: &BTreeMap<String, Vec<String>>,
     branches: &BTreeMap<String, BranchState>,
     git: &Git,
-    pr_status: &BTreeMap<String, Option<PrState>>,
+    pr_status: &PrStatusMap,
     deleted: &BTreeSet<String>,
 ) -> Vec<Value> {
     let Some(kids) = children.get(node) else {
@@ -811,11 +921,17 @@ fn stack_json(
     kids.iter()
         .map(|kid| {
             let is_deleted = deleted.contains(kid);
+            let live = pr_status.get(kid).and_then(Option::as_ref);
             let pr = branches.get(kid).and_then(|b| b.pr.as_ref()).map(|p| {
                 json!({
                     "number": p.number,
                     "url": p.url,
-                    "status": pr_status.get(kid).copied().flatten().map(super::pr_state_str),
+                    "status": live.map(|l| super::pr_state_str(l.pr.state)),
+                    "title": live.map(|l| l.pr.title.clone()),
+                    "draft": live.map(|l| l.pr.draft),
+                    "mergeable_state": live.and_then(|l| l.pr.mergeable_state.clone()),
+                    "review": live.and_then(|l| l.checks.review).map(review_str),
+                    "checks": live.and_then(|l| l.checks.checks).map(check_str),
                 })
             });
             let commit = if is_deleted { None } else { commit_json(git, kid, node) };
@@ -995,6 +1111,62 @@ mod tests {
         assert_eq!(pr_status_label(PrState::Open), "Open");
         assert_eq!(pr_status_label(PrState::Merged), "Merged");
         assert_eq!(pr_status_label(PrState::Closed), "Closed");
+    }
+
+    /// A PrLive with the given live fields and no rollup.
+    fn pr_live(state: PrState, draft: bool, ms: Option<&str>, title: &str) -> PrLive {
+        PrLive {
+            pr: stacc_github::PullRequest {
+                number: 7,
+                url: "u".into(),
+                state,
+                title: title.into(),
+                body: String::new(),
+                draft,
+                mergeable_state: ms.map(String::from),
+            },
+            checks: PrChecks::default(),
+        }
+    }
+
+    #[test]
+    fn pr_line_shows_draft_hint_and_title() {
+        assert_eq!(pr_line(7, &pr_live(PrState::Open, false, None, "")), "#7 Open");
+        assert_eq!(pr_line(7, &pr_live(PrState::Open, true, None, "")), "#7 Draft");
+        assert_eq!(
+            pr_line(7, &pr_live(PrState::Open, false, Some("blocked"), "Add foo")),
+            "#7 Open (blocked) - Add foo"
+        );
+        // `clean`/`unknown` are not actionable: no hint.
+        assert_eq!(pr_line(7, &pr_live(PrState::Open, false, Some("clean"), "")), "#7 Open");
+        assert_eq!(pr_line(7, &pr_live(PrState::Open, false, Some("unknown"), "")), "#7 Open");
+        // A merged PR never reads as draft and carries no stale hint.
+        assert_eq!(
+            pr_line(7, &pr_live(PrState::Merged, true, Some("dirty"), "t")),
+            "#7 Merged - t"
+        );
+    }
+
+    #[test]
+    fn rollup_line_joins_review_and_ci() {
+        let mk = |review, checks| PrChecks { review, checks };
+        assert_eq!(rollup_line(mk(None, None)), None);
+        assert_eq!(
+            rollup_line(mk(Some(ReviewDecision::Approved), Some(CheckRollup::Pass))),
+            Some("approved, CI pass".into())
+        );
+        assert_eq!(
+            rollup_line(mk(Some(ReviewDecision::ChangesRequested), None)),
+            Some("changes requested".into())
+        );
+        assert_eq!(
+            rollup_line(mk(Some(ReviewDecision::ReviewRequired), Some(CheckRollup::Fail))),
+            Some("review required, CI fail".into())
+        );
+        assert_eq!(
+            rollup_line(mk(None, Some(CheckRollup::Pending))),
+            Some("CI pending".into())
+        );
     }
 
     #[test]

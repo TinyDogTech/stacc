@@ -232,6 +232,7 @@ fn info_body_fetches_the_pr_title_state_and_body() {
         then.status(200).json_body(serde_json::json!({
             "number": 5, "html_url": "u", "state": "open", "merged": false,
             "title": "feat: add f", "body": "the body",
+            "draft": true, "mergeable_state": "behind",
         }));
     });
 
@@ -250,6 +251,8 @@ fn info_body_fetches_the_pr_title_state_and_body() {
     assert_eq!(v["pr"]["title"], "feat: add f");
     assert_eq!(v["pr"]["state"], "open");
     assert_eq!(v["pr"]["body"], "the body");
+    assert_eq!(v["pr"]["draft"], true);
+    assert_eq!(v["pr"]["mergeable_state"], "behind");
     assert_eq!(v["pr_fetch"], "ok");
 }
 
