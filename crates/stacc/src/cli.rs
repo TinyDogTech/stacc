@@ -53,82 +53,85 @@ pub enum ColorChoice {
 }
 
 /// The top-level commands.
+///
+/// Variants stay alphabetized (clap's derive API lists `--help` commands in
+/// declaration order); `External` stays last as the catch-all.
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Detect trunk and remote, and initialize the state ref.
-    Init(InitArgs),
-    /// Track the current branch as part of a stack.
-    Track(TrackArgs),
-    /// Stop tracking a branch, reparenting its children onto its base.
-    Untrack(UntrackArgs),
-    /// Create a new branch stacked on the current one and track it.
-    Create(CreateArgs),
-    /// Fold staged changes into the current branch, then restack its upstack.
-    Modify(ModifyArgs),
-    /// Push branches and create or update PRs.
-    Submit(SubmitArgs),
-    /// Pull upstream changes, detect merges, and restack.
-    Sync(SyncArgs),
-    /// Rebase tracked branches back onto their bases (current + upstack by default).
-    Restack(RestackArgs),
-    /// Re-parent the current branch (and its upstack) onto a new base.
-    Move(MoveArgs),
-    /// Distribute staged hunks into the downstack commits that introduced their lines.
-    Absorb(AbsorbArgs),
-    /// Squash the current branch's commits into one, then restack its upstack.
-    Squash(SquashArgs),
-    /// Fold the current branch into its parent, reparenting and restacking its children.
-    Fold(FoldArgs),
-    /// Split the current branch into stacked branches, by commit or by file.
-    Split(SplitArgs),
-    /// Reorder the branches between the trunk and the current branch, restacking descendants.
-    Reorder(ReorderArgs),
-    /// Delete a branch and its metadata, reparenting and restacking its children onto its base.
-    Delete(DeleteArgs),
-    /// Remove the current branch, keeping its changes in the working tree as unstaged modifications.
-    Pop,
-    /// Rename the current branch, updating local state, children, and the remote.
-    Rename(RenameArgs),
-    /// Squash-merge the ready PRs from the trunk up to the current branch, then sync.
-    Merge(MergeArgs),
-    /// Resume the operation interrupted by a conflict, after resolving it.
-    Continue,
     /// Abort the operation interrupted by a conflict, undoing the in-progress rebase.
     Abort,
-    /// Revert the most recent stacc mutation(s), restoring prior state and tips.
-    Undo(UndoArgs),
-    /// Move up the stack toward the tip (optionally N levels).
-    Up(StepsArgs),
-    /// Move down the stack toward the trunk (optionally N levels).
-    Down(StepsArgs),
-    /// Jump to the top of the current stack.
-    Top,
+    /// Distribute staged hunks into the downstack commits that introduced their lines.
+    Absorb(AbsorbArgs),
+    /// Manage the GitHub access token.
+    Auth(AuthArgs),
     /// Jump to the bottom of the current stack (the trunk's child).
     Bottom,
     /// Switch to a branch (pick interactively when run bare on a terminal).
     Checkout(CheckoutArgs),
-    /// Print the current branch's recorded parent (base); nothing on the trunk.
-    Parent,
     /// Print the branches stacked directly on the current branch, name-ordered.
     Children,
-    /// Print the stack.
-    Log(LogArgs),
-    /// Show the current branch's position and PR status.
-    Status,
-    /// Show a branch's stack detail: base, head, children, diffstat, and PR.
-    Info(InfoArgs),
-    /// Print the current branch's PR URL (and open it in a browser on a terminal).
-    Pr,
-    /// Manage the GitHub access token.
-    Auth(AuthArgs),
-    /// Get and set stacc configuration (repo-local `.stacc.toml`, or the
-    /// user-global file with `--global`).
-    Config(ConfigArgs),
     /// Print a tab-completion script for a shell to stdout.
     ///
     /// The script completes the `stacc` name. `st` users can reuse it, e.g.
     /// `complete -F _stacc st` (bash) or `compdef _stacc st` (zsh).
     Completion(CompletionArgs),
+    /// Get and set stacc configuration (repo-local `.stacc.toml`, or the
+    /// user-global file with `--global`).
+    Config(ConfigArgs),
+    /// Resume the operation interrupted by a conflict, after resolving it.
+    Continue,
+    /// Create a new branch stacked on the current one and track it.
+    Create(CreateArgs),
+    /// Delete a branch and its metadata, reparenting and restacking its children onto its base.
+    Delete(DeleteArgs),
+    /// Move down the stack toward the trunk (optionally N levels).
+    Down(StepsArgs),
+    /// Fold the current branch into its parent, reparenting and restacking its children.
+    Fold(FoldArgs),
+    /// Show a branch's stack detail: base, head, children, diffstat, and PR.
+    Info(InfoArgs),
+    /// Detect trunk and remote, and initialize the state ref.
+    Init(InitArgs),
+    /// Print the stack.
+    Log(LogArgs),
+    /// Squash-merge the ready PRs from the trunk up to the current branch, then sync.
+    Merge(MergeArgs),
+    /// Fold staged changes into the current branch, then restack its upstack.
+    Modify(ModifyArgs),
+    /// Re-parent the current branch (and its upstack) onto a new base.
+    Move(MoveArgs),
+    /// Print the current branch's recorded parent (base); nothing on the trunk.
+    Parent,
+    /// Remove the current branch, keeping its changes in the working tree as unstaged modifications.
+    Pop,
+    /// Print the current branch's PR URL (and open it in a browser on a terminal).
+    Pr,
+    /// Rename the current branch, updating local state, children, and the remote.
+    Rename(RenameArgs),
+    /// Reorder the branches between the trunk and the current branch, restacking descendants.
+    Reorder(ReorderArgs),
+    /// Rebase tracked branches back onto their bases (current + upstack by default).
+    Restack(RestackArgs),
+    /// Split the current branch into stacked branches, by commit or by file.
+    Split(SplitArgs),
+    /// Squash the current branch's commits into one, then restack its upstack.
+    Squash(SquashArgs),
+    /// Show the current branch's position and PR status.
+    Status,
+    /// Push branches and create or update PRs.
+    Submit(SubmitArgs),
+    /// Pull upstream changes, detect merges, and restack.
+    Sync(SyncArgs),
+    /// Jump to the top of the current stack.
+    Top,
+    /// Track the current branch as part of a stack.
+    Track(TrackArgs),
+    /// Revert the most recent stacc mutation(s), restoring prior state and tips.
+    Undo(UndoArgs),
+    /// Stop tracking a branch, reparenting its children onto its base.
+    Untrack(UntrackArgs),
+    /// Move up the stack toward the tip (optionally N levels).
+    Up(StepsArgs),
 
     /// Any other subcommand is proxied to `git` (e.g. `commit`, `rebase`, `push`).
     #[command(external_subcommand)]
@@ -558,5 +561,26 @@ pub struct RenameArgs {
     /// Rename even when it will close the branch's own open PR on the remote.
     #[arg(long)]
     pub force: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory;
+
+    use super::Cli;
+
+    #[test]
+    fn help_lists_commands_alphabetically() {
+        let names: Vec<String> = Cli::command()
+            .get_subcommands()
+            .map(|c| c.get_name().to_string())
+            .collect();
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            names, sorted,
+            "`--help` shows declaration order; keep Command variants alphabetized"
+        );
+    }
 }
 
