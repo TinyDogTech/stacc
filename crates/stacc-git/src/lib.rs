@@ -596,6 +596,16 @@ impl Git {
         self.run(&args).map(|_| ())
     }
 
+    /// Delete `name`. When `old` is given, the deletion only succeeds if the
+    /// ref currently equals it, a compare-and-swap.
+    pub fn delete_ref(&self, name: &str, old: Option<&str>) -> Result<(), GitError> {
+        let mut args = vec!["update-ref", "-d", name];
+        if let Some(old) = old {
+            args.push(old);
+        }
+        self.run(&args).map(|_| ())
+    }
+
     /// The commit a ref points at, or `None` if the ref does not exist.
     pub fn ref_commit(&self, name: &str) -> Result<Option<String>, GitError> {
         let args = ["rev-parse", "--verify", "--quiet", name];
@@ -1366,6 +1376,24 @@ mod tests {
         repo.update_ref("refs/stacc/data", &c2, Some(c1.as_str()))
             .unwrap();
         assert_eq!(repo.ref_commit("refs/stacc/data").unwrap(), Some(c2));
+    }
+
+    #[test]
+    fn delete_ref_cas_rejects_stale_old_then_deletes() {
+        let (tmp, repo) = init_repo();
+        run_git(tmp.path(), &["branch", "victim"]);
+        let tip = repo.rev_parse("victim").unwrap();
+
+        // A real commit that is not the victim's tip; the all-zero id would not
+        // do here, git reads it as "skip the old-value check".
+        run_git(tmp.path(), &["commit", "-q", "--allow-empty", "-m", "second"]);
+        let stale = repo.rev_parse("HEAD").unwrap();
+        assert_ne!(stale, tip);
+        assert!(repo.delete_ref("refs/heads/victim", Some(&stale)).is_err());
+        assert_eq!(repo.ref_commit("refs/heads/victim").unwrap(), Some(tip.clone()));
+
+        repo.delete_ref("refs/heads/victim", Some(tip.as_str())).unwrap();
+        assert_eq!(repo.ref_commit("refs/heads/victim").unwrap(), None);
     }
 
     #[test]

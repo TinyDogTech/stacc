@@ -211,6 +211,20 @@ impl GitHub {
         Ok(())
     }
 
+    /// Close a pull request without merging it
+    /// (`PATCH /repos/{owner}/{repo}/pulls/{number}` with `state: closed`).
+    pub fn close_pull_request(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<PullRequest, GitHubError> {
+        let url = format!("{}/repos/{owner}/{repo}/pulls/{number}", self.base_url);
+        let body = serde_json::json!({ "state": "closed" });
+        let raw: RawPullRequest = self.send("PATCH", &url, &body)?;
+        Ok(raw.into())
+    }
+
     /// Fetch a pull request, including whether it was merged.
     pub fn get_pull_request(
         &self,
@@ -467,6 +481,24 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(gh.update_pull_request("o", "r", 7, &update).unwrap().number, 7);
+        mock.assert();
+    }
+
+    #[test]
+    fn close_pull_request_patches_state_closed() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(httpmock::Method::PATCH)
+                .path("/repos/o/r/pulls/7")
+                .json_body(json!({ "state": "closed" }));
+            then.status(200).json_body(json!({
+                "number": 7, "html_url": "u", "state": "closed", "merged": false,
+            }));
+        });
+
+        let gh = GitHub::with_base_url("t", server.base_url());
+        let pr = gh.close_pull_request("o", "r", 7).unwrap();
+        assert_eq!(pr.state, PrState::Closed);
         mock.assert();
     }
 
