@@ -207,6 +207,23 @@ pub fn restack(
     order: &[String],
     applied: &mut Vec<(String, String)>,
 ) -> Result<RestackOutcome, OpsError> {
+    restack_forced(git, state, order, applied, &BTreeSet::new())
+}
+
+/// Like [`restack`], but rebases the branches named in `force` even when they
+/// already descend their base's tip. `reorder` needs this: a reordered branch
+/// whose new base is an ancestor of its old lineage looks "already on top of
+/// its base" to the skip check, yet still has to drop the commits the reorder
+/// moved out from under it. The forced rebase replays exactly the branch's own
+/// commits (`base.hash..branch`) onto the base's live tip; when nothing
+/// actually changed, git's own up-to-date check makes it a no-op.
+pub fn restack_forced(
+    git: &Git,
+    state: &mut State,
+    order: &[String],
+    applied: &mut Vec<(String, String)>,
+    force: &BTreeSet<String>,
+) -> Result<RestackOutcome, OpsError> {
     let mut restacked = Vec::new();
     let mut skipped = Vec::new();
     let mut worktree_skipped = Vec::new();
@@ -227,7 +244,7 @@ pub fn restack(
             continue;
         }
         let base_tip = git.rev_parse(&base.name)?;
-        if git.is_ancestor(&base_tip, branch)? {
+        if !force.contains(branch) && git.is_ancestor(&base_tip, branch)? {
             continue; // already on top of its base
         }
         // Prefer the recorded base hash if it's still reachable from the branch;

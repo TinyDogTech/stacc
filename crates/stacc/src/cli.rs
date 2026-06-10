@@ -81,6 +81,8 @@ pub enum Command {
     Fold(FoldArgs),
     /// Split the current branch into stacked branches, by commit or by file.
     Split(SplitArgs),
+    /// Reorder the branches between the trunk and the current branch, restacking descendants.
+    Reorder(ReorderArgs),
     /// Rename the current branch, updating local state, children, and the remote.
     Rename(RenameArgs),
     /// Squash-merge the ready PRs from the trunk up to the current branch, then sync.
@@ -345,6 +347,16 @@ pub struct SplitArgs {
     /// exclusive with positional names.
     #[arg(long = "by-file", value_name = "PATHSPEC=NAME")]
     pub by_file: Vec<String>,
+}
+
+/// Arguments for `stacc reorder`.
+#[derive(Debug, clap::Args)]
+pub struct ReorderArgs {
+    /// The downstack branches in their new bottom-up order, comma-separated
+    /// (the first name sits on the trunk). Must name exactly the branches
+    /// between the trunk and the current branch, each once.
+    #[arg(long, value_name = "B1,B2,...")]
+    pub order: Option<String>,
 }
 
 /// Arguments for `stacc merge`.

@@ -59,6 +59,31 @@ pub enum Operation {
         pr_url: Option<String>,
         close: bool,
     },
+    /// `reorder`: re-pointed the downstack chain's recorded bases into `order`
+    /// (bottom-up, the first name on the trunk) and began restacking the chain
+    /// plus its descendants. Any of the N rebases can conflict after earlier
+    /// ones already landed, so a single rollback anchor cannot unwind it:
+    /// `pre_state` snapshots every chain branch's pre-reorder base and tip, and
+    /// `abort` restores all of them regardless of where the conflict hit.
+    /// `continue` drains `remaining`, force-rebasing the chain members still in
+    /// the queue (a reordered branch can already descend its new base's tip and
+    /// still need to drop the commits moved out from under it).
+    Reorder {
+        order: Vec<String>,
+        remaining: Vec<String>,
+        pre_state: Vec<ReorderPre>,
+    },
+}
+
+/// A reordered chain branch's pre-reorder identity: its recorded base (name
+/// and hash) and its git tip, captured before any re-point, so `abort` can
+/// restore the branch completely no matter how far the restack got.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReorderPre {
+    pub branch: String,
+    pub base_name: String,
+    pub base_hash: String,
+    pub tip: String,
 }
 
 impl Operation {
@@ -69,7 +94,8 @@ impl Operation {
             | Operation::Restack { remaining }
             | Operation::Modify { remaining, .. }
             | Operation::Move { remaining, .. }
-            | Operation::Fold { remaining, .. } => remaining,
+            | Operation::Fold { remaining, .. }
+            | Operation::Reorder { remaining, .. } => remaining,
         }
     }
 
@@ -117,6 +143,13 @@ impl Operation {
                 pr_url: pr_url.clone(),
                 close: *close,
             },
+            Operation::Reorder {
+                order, pre_state, ..
+            } => Operation::Reorder {
+                order: order.clone(),
+                remaining,
+                pre_state: pre_state.clone(),
+            },
         }
     }
 
@@ -127,8 +160,8 @@ impl Operation {
     }
 
     /// The wire tag identifying the operation (matches the serde `op` value):
-    /// `sync`, `restack`, `modify`, `move`, or `fold`. Surfaced in command
-    /// output so an agent knows which operation a `continue` resumed.
+    /// `sync`, `restack`, `modify`, `move`, `fold`, or `reorder`. Surfaced in
+    /// command output so an agent knows which operation a `continue` resumed.
     pub fn tag(&self) -> &'static str {
         match self {
             Operation::Sync { .. } => "sync",
@@ -136,6 +169,7 @@ impl Operation {
             Operation::Modify { .. } => "modify",
             Operation::Move { .. } => "move",
             Operation::Fold { .. } => "fold",
+            Operation::Reorder { .. } => "reorder",
         }
     }
 }
@@ -239,6 +273,16 @@ mod tests {
                 pr_url: Some("https://example.com/9".into()),
                 close: true,
             },
+            Operation::Reorder {
+                order: vec!["b".into(), "a".into()],
+                remaining: vec!["a".into()],
+                pre_state: vec![ReorderPre {
+                    branch: "a".into(),
+                    base_name: "main".into(),
+                    base_hash: "ab1e0000".into(),
+                    tip: "f005ba11".into(),
+                }],
+            },
         ]
     }
 
@@ -259,6 +303,7 @@ mod tests {
         assert_eq!(all[2].remaining(), ["b", "c"]); // Modify
         assert_eq!(all[3].remaining(), ["b"]); // Move
         assert_eq!(all[4].remaining(), ["c"]); // Fold
+        assert_eq!(all[5].remaining(), ["a"]); // Reorder
     }
 
     #[test]
@@ -324,13 +369,32 @@ mod tests {
             Operation::Fold {
                 branch: "f".into(),
                 parent: "p".into(),
-                remaining: r,
+                remaining: r.clone(),
                 parent_pre_tip: "t".into(),
                 branch_base_hash: "h".into(),
                 children_pre: vec![("c".into(), "x".into())],
                 pr_number: Some(3),
                 pr_url: None,
                 close: true,
+            }
+        );
+        let pre = vec![ReorderPre {
+            branch: "a".into(),
+            base_name: "main".into(),
+            base_hash: "h".into(),
+            tip: "t".into(),
+        }];
+        assert_eq!(
+            Operation::Reorder {
+                order: vec!["b".into(), "a".into()],
+                remaining: vec!["a".into()],
+                pre_state: pre.clone(),
+            }
+            .with_remaining(r.clone()),
+            Operation::Reorder {
+                order: vec!["b".into(), "a".into()],
+                remaining: r,
+                pre_state: pre,
             }
         );
     }
@@ -363,6 +427,12 @@ mod tests {
             close: false,
         }
         .pushes_state());
+        assert!(!Operation::Reorder {
+            order: vec![],
+            remaining: vec![],
+            pre_state: vec![],
+        }
+        .pushes_state());
     }
 
     #[test]
@@ -373,6 +443,7 @@ mod tests {
         assert_eq!(all[2].tag(), "modify");
         assert_eq!(all[3].tag(), "move");
         assert_eq!(all[4].tag(), "fold");
+        assert_eq!(all[5].tag(), "reorder");
     }
 
     #[test]

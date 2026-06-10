@@ -1414,6 +1414,9 @@ pub fn abort_cmd(format: OutputFormat) -> Result<(), Error> {
         if let Ok(op @ recovery::Operation::Fold { .. }) = &cont {
             rollback_fold(&git, op);
         }
+        if let Ok(op @ recovery::Operation::Reorder { .. }) = &cont {
+            rollback_reorder(&git, op);
+        }
     }
     clear_conflict_artifacts(&git);
     if let Some(err) = abort_err {
@@ -1490,6 +1493,67 @@ fn rollback_fold(git: &Git, op: &recovery::Operation) {
     if let Err(err) = restored {
         eprintln!(
             "warning: could not restore the pre-fold state ({err}); run `stacc track --base {parent}` on `{branch}` to recover"
+        );
+    }
+}
+
+/// Undo an aborted reorder completely: every chain branch's git ref back to
+/// its pre-reorder tip, then every recorded base (name and hash) restored in
+/// one transactional write. Unlike move's single-branch guard, this rollback
+/// is unconditional: the `pre_state` snapshot describes the entire chain, so
+/// it restores correctly no matter which rebase the conflict landed on, even
+/// when earlier chain members already rebased (their refs are force-moved
+/// back; the pre-mutation worktree guard ensured none lives in another
+/// worktree). All steps warn rather than fail: `abort`'s job of clearing the
+/// rebase already succeeded.
+fn rollback_reorder(git: &Git, op: &recovery::Operation) {
+    let recovery::Operation::Reorder { pre_state, .. } = op else {
+        return;
+    };
+    let here = git.current_branch().ok();
+    for pre in pre_state {
+        let head_ref = format!("refs/heads/{}", pre.branch);
+        let live = match git.ref_commit(&head_ref) {
+            Ok(live) => live,
+            Err(err) => {
+                eprintln!(
+                    "warning: could not read `{}` to restore it ({err}); reset it to {} manually",
+                    pre.branch, pre.tip
+                );
+                continue;
+            }
+        };
+        if live.as_deref() == Some(pre.tip.as_str()) {
+            continue; // never moved (or the aborted rebase already restored it)
+        }
+        // The checked-out branch needs the index and working tree re-synced
+        // too; the aborted rebase left a clean tree, so a hard reset is safe.
+        // Everything else is a plain ref move, leased on the tip we just read.
+        let restored = if here.as_deref() == Some(pre.branch.as_str()) {
+            git.reset_hard(&pre.tip)
+        } else {
+            git.update_ref(&head_ref, &pre.tip, live.as_deref())
+        };
+        if let Err(err) = restored {
+            eprintln!(
+                "warning: could not restore `{}` to its pre-reorder tip {} ({err}); reset it manually",
+                pre.branch, pre.tip
+            );
+        }
+    }
+    let store = StateStore::new(git.clone());
+    let restored = store.update(|state| {
+        for pre in pre_state {
+            if let Some(b) = state.branches.get_mut(&pre.branch) {
+                b.base.name.clone_from(&pre.base_name);
+                b.base.hash.clone_from(&pre.base_hash);
+            }
+        }
+        Ok(())
+    });
+    if let Err(err) = restored {
+        eprintln!(
+            "warning: could not restore the pre-reorder bases ({err}); run `stacc undo` to recover"
         );
     }
 }
@@ -1716,8 +1780,16 @@ fn continue_op(
         }
     };
 
+    // A resumed reorder must keep force-rebasing the chain members still in the
+    // queue: a reordered branch can already descend its new base's tip (the
+    // flatten case) and the plain skip check would wrongly leave it unmoved.
+    let force: BTreeSet<String> = match &op {
+        recovery::Operation::Reorder { order, .. } => order.iter().cloned().collect(),
+        _ => BTreeSet::new(),
+    };
+
     let rest: Vec<String> = remaining.into_iter().skip(1).collect();
-    restacked.extend(restack_with_recovery(
+    restacked.extend(restack_with_recovery_forced(
         git,
         store,
         state,
@@ -1725,6 +1797,7 @@ fn continue_op(
         &rest,
         |r| op.with_remaining(r),
         &apply_resumed,
+        &force,
     )?);
 
     clear_conflict_artifacts(git);
@@ -1775,6 +1848,14 @@ fn continue_op(
             };
             report_fold(format, branch, parent, &restacked, pr_closed, parent == &repo.trunk);
         }
+        // A resumed reorder reports the direct command's {op,order,restacked}
+        // shape (pretty uses the shared restacked output).
+        recovery::Operation::Reorder { order, .. } if matches!(format, OutputFormat::Json) => {
+            println!(
+                "{}",
+                json!({ "op": "reorder", "order": order, "restacked": restacked })
+            );
+        }
         // A resumed move reports the same {op,branch,base,restacked} shape as the
         // direct command (pretty uses the shared restacked output).
         recovery::Operation::Move { branch, .. } if matches!(format, OutputFormat::Json) => {
@@ -1807,8 +1888,37 @@ pub(crate) fn restack_with_recovery(
     make_op: impl Fn(Vec<String>) -> recovery::Operation,
     command_deltas: &dyn Fn(&mut State),
 ) -> Result<Vec<String>, Error> {
+    restack_with_recovery_forced(
+        git,
+        store,
+        state,
+        repo,
+        order,
+        make_op,
+        command_deltas,
+        &BTreeSet::new(),
+    )
+}
+
+/// [`restack_with_recovery`] with a `force` set of branches that must rebase
+/// even when they already descend their base's tip (the engine's
+/// [`ops::restack_forced`]). `reorder` passes its chain here; everything else
+/// goes through the plain wrapper.
+// One extra argument over the shared recovery path; a params struct for a
+// single forced caller would only add indirection.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn restack_with_recovery_forced(
+    git: &Git,
+    store: &StateStore,
+    state: &mut State,
+    repo: &RepoConfig,
+    order: &[String],
+    make_op: impl Fn(Vec<String>) -> recovery::Operation,
+    command_deltas: &dyn Fn(&mut State),
+    force: &BTreeSet<String>,
+) -> Result<Vec<String>, Error> {
     let mut applied: Vec<(String, String)> = Vec::new();
-    match ops::restack(git, state, order, &mut applied) {
+    match ops::restack_forced(git, state, order, &mut applied, force) {
         Ok(outcome) => {
             persist_restack(store, command_deltas, &applied)?;
             if !outcome.skipped.is_empty() {
