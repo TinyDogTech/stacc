@@ -546,7 +546,11 @@ fn open_in_browser(url: &str) {
 }
 
 /// `stacc submit`: push the current branch and its ancestors up to the trunk,
-/// creating or updating each branch's PR with its parent as the base.
+/// creating or updating each branch's PR with its parent as the base. `--stack`
+/// widens the scope to the current branch's whole stack (its upstack too),
+/// still downstack-first so every PR's base ref exists when its PR opens.
+/// `--update-only` skips (and reports) branches with no recorded PR; `--draft`
+/// opens new PRs as drafts.
 // A cohesive validate -> push/PR loop -> persist -> report sequence; splitting it
 // would only trade this lint for `too_many_arguments` on a helper.
 #[allow(clippy::too_many_lines)]
@@ -566,7 +570,16 @@ pub fn submit(args: &SubmitArgs, format: OutputFormat) -> Result<(), Error> {
 
     // Walk the downstack bottom-up so each PR's base ref is already on the
     // remote when we open the PR (the lowest base is always the trunk).
-    let chain = ops::downstack_chain(&state, &current, &repo.trunk)?;
+    // --stack appends the current branch's upstack, still base-before-dependent
+    // (`upstack_order` is bottom-up), so the ordering property holds stack-wide.
+    let mut chain = ops::downstack_chain(&state, &current, &repo.trunk)?;
+    if args.stack {
+        chain.extend(
+            ops::upstack_order(&state.branches, &current)
+                .into_iter()
+                .skip(1),
+        );
+    }
 
     let (owner, repo_name) = stacc_github::parse_remote(&git.remote_url(&repo.remote)?)
         .ok_or_else(|| Error::Usage(format!("remote `{}` is not a GitHub URL", repo.remote)))?;
@@ -574,6 +587,8 @@ pub fn submit(args: &SubmitArgs, format: OutputFormat) -> Result<(), Error> {
 
     // (branch, created?, number, url) for each branch we acted on.
     let mut results: Vec<(String, bool, u64, String)> = Vec::new();
+    // Branches passed over by --update-only (no recorded PR to update).
+    let mut skipped: Vec<String> = Vec::new();
     // The PR records to write back, applied together in one transactional update
     // after the network work so a concurrent change to another branch survives.
     let mut pr_updates: Vec<(String, PullRequest)> = Vec::new();
@@ -588,11 +603,23 @@ pub fn submit(args: &SubmitArgs, format: OutputFormat) -> Result<(), Error> {
             .name
             .clone();
 
+        let existing = state
+            .branches
+            .get(branch)
+            .and_then(|b| b.pr.as_ref().map(|pr| pr.number));
+
+        // --update-only: a branch with no PR is skipped entirely (not even
+        // pushed), and reported, instead of getting a new PR.
+        if args.update_only && existing.is_none() {
+            skipped.push(branch.clone());
+            continue;
+        }
+
         git.push_force_with_lease(&repo.remote, branch)?;
 
         let title = git.commit_subject(branch)?;
         // --description applies to the branch the user is actually submitting;
-        // ancestors fall back to their own commit body.
+        // the others fall back to their own commit body.
         let body = if is_current {
             match &args.description {
                 Some(value) => resolve_description(value)?,
@@ -601,11 +628,6 @@ pub fn submit(args: &SubmitArgs, format: OutputFormat) -> Result<(), Error> {
         } else {
             git.commit_body(branch)?
         };
-
-        let existing = state
-            .branches
-            .get(branch)
-            .and_then(|b| b.pr.as_ref().map(|pr| pr.number));
 
         let pr = match existing {
             Some(number) => github.update_pull_request(
@@ -626,6 +648,7 @@ pub fn submit(args: &SubmitArgs, format: OutputFormat) -> Result<(), Error> {
                     head: branch.clone(),
                     base,
                     body,
+                    draft: args.draft,
                 },
             )?,
         };
@@ -663,12 +686,15 @@ pub fn submit(args: &SubmitArgs, format: OutputFormat) -> Result<(), Error> {
                     })
                 })
                 .collect();
-            println!("{}", json!({ "submitted": list }));
+            println!("{}", json!({ "submitted": list, "skipped": skipped }));
         }
         OutputFormat::Pretty => {
             for (branch, created, number, url) in &results {
                 let verb = if *created { "Created" } else { "Updated" };
                 println!("{verb} PR #{number} for {branch}: {url}");
+            }
+            for branch in &skipped {
+                println!("Skipped {branch} (no PR to update; --update-only)");
             }
         }
     }

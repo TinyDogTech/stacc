@@ -114,6 +114,83 @@ fn move_moves_the_whole_subtree() {
     assert!(git_ok(p, &["merge-base", "--is-ancestor", "a", "b"]));
 }
 
+/// The commit a ref points at.
+fn sha(dir: &Path, rev: &str) -> String {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", rev])
+        .output()
+        .expect("spawn git");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// The recorded state blob for `branch` (from the state ref).
+fn state_blob(dir: &Path, branch: &str) -> String {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["show", &format!("refs/stacc/data:branches/{branch}")])
+        .output()
+        .expect("spawn git");
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+#[test]
+fn move_only_moves_the_branch_alone_and_children_stay() {
+    let tmp = init_repo();
+    let p = tmp.path();
+    // main -> a -> b, and main -> c (sibling of a).
+    create(p, "a", "a.txt", "a\n");
+    create(p, "b", "b.txt", "b\n");
+    run_git(p, &["checkout", "-q", "main"]);
+    create(p, "c", "c.txt", "c\n");
+
+    // Move ONLY a onto c; its child b must stay put on a's old position.
+    run_git(p, &["checkout", "-q", "a"]);
+    let b_before = sha(p, "b");
+    let out = stacc(p, &["move", "--onto", "c", "--only", "--format", "json"]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains(r#""restacked":["a"]"#), "got: {s}");
+    assert!(s.contains(r#""reparented":["b"]"#), "got: {s}");
+    // a moved: it descends c now.
+    assert!(git_ok(p, &["merge-base", "--is-ancestor", "c", "a"]));
+    // b's ref is untouched and it does not descend the moved a.
+    assert_eq!(sha(p, "b"), b_before);
+    assert!(!git_ok(p, &["merge-base", "--is-ancestor", "a", "b"]));
+    // b's recorded base is re-pointed onto a's OLD parent (main), so it does
+    // not follow a on the next restack.
+    let blob = state_blob(p, "b");
+    assert!(blob.contains(r#""name": "main""#), "got: {blob}");
+    assert_eq!(current_branch(p), "a");
+}
+
+#[test]
+fn move_only_without_children_just_moves_the_branch() {
+    let tmp = init_repo();
+    let p = tmp.path();
+    // main -> a, and main -> b (siblings).
+    create(p, "a", "a.txt", "a\n");
+    run_git(p, &["checkout", "-q", "main"]);
+    create(p, "b", "b.txt", "b\n"); // left on b
+
+    let out = stacc(p, &["move", "--onto", "a", "--only", "--format", "json"]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains(r#""restacked":["b"]"#), "got: {s}");
+    assert!(s.contains(r#""reparented":[]"#), "got: {s}");
+    assert!(git_ok(p, &["merge-base", "--is-ancestor", "a", "b"]));
+}
+
 #[test]
 fn move_onto_own_upstack_errors() {
     let tmp = init_repo();

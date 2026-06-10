@@ -31,6 +31,17 @@ fn stacc(dir: &std::path::Path, args: &[&str]) -> Output {
         .expect("spawn stacc")
 }
 
+/// The commit a ref points at.
+fn sha(dir: &std::path::Path, rev: &str) -> String {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", rev])
+        .output()
+        .expect("spawn git");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
 fn write_commit(dir: &std::path::Path, file: &str, contents: &str, msg: &str) {
     std::fs::write(dir.join(file), contents).expect("write file");
     run_git(dir, &["add", file]);
@@ -205,6 +216,91 @@ fn restack_pretty_output() {
         "got: {}",
         String::from_utf8_lossy(&out.stdout)
     );
+}
+
+#[test]
+fn restack_only_restacks_just_the_current_branch() {
+    let tmp = drifted_stack();
+    let p = tmp.path();
+    // From `a` (drifted off main, with upstack `b`), --only narrows the scope
+    // to `a` alone.
+    run_git(p, &["checkout", "-q", "a"]);
+    let b_before = sha(p, "b");
+    let out = stacc(p, &["restack", "--only", "--format", "json"]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains(r#""restacked":["a"]"#), "got: {s}");
+    assert!(git_ok(p, &["merge-base", "--is-ancestor", "main", "a"]));
+    // The upstack child is untouched: same tip, not descending the new `a`.
+    assert_eq!(sha(p, "b"), b_before);
+    assert!(!git_ok(p, &["merge-base", "--is-ancestor", "a", "b"]));
+}
+
+#[test]
+fn restack_downstack_restacks_ancestors_not_children() {
+    let tmp = drifted_stack(); // main -> a -> b, drifted off main
+    let p = tmp.path();
+    // Add a child of b so b has an upstack to leave alone.
+    run_git(p, &["checkout", "-q", "b"]);
+    run_git(p, &["checkout", "-q", "-b", "c"]);
+    write_commit(p, "c.txt", "c\n", "c1");
+    assert!(stacc(p, &["track", "--base", "b"]).status.success());
+
+    run_git(p, &["checkout", "-q", "b"]);
+    let c_before = sha(p, "c");
+    let out = stacc(p, &["restack", "--downstack", "--format", "json"]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains(r#""restacked":["a","b"]"#), "got: {s}");
+    assert!(git_ok(p, &["merge-base", "--is-ancestor", "main", "a"]));
+    assert!(git_ok(p, &["merge-base", "--is-ancestor", "a", "b"]));
+    // The upstack child `c` is out of scope: untouched.
+    assert_eq!(sha(p, "c"), c_before);
+    assert!(!git_ok(p, &["merge-base", "--is-ancestor", "b", "c"]));
+}
+
+#[test]
+fn restack_upstack_is_the_default_made_explicit() {
+    let tmp = drifted_stack();
+    let p = tmp.path();
+    run_git(p, &["checkout", "-q", "a"]);
+    let out = stacc(p, &["restack", "--upstack", "--format", "json"]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains(r#""restacked":["a","b"]"#), "got: {s}");
+}
+
+#[test]
+fn restack_scope_flags_conflict() {
+    let tmp = drifted_stack();
+    let p = tmp.path();
+    run_git(p, &["checkout", "-q", "a"]);
+    for flags in [
+        ["--only", "--stack"],
+        ["--only", "--downstack"],
+        ["--downstack", "--upstack"],
+        ["--upstack", "--stack"],
+    ] {
+        let out = stacc(p, &["restack", flags[0], flags[1]]);
+        assert!(!out.status.success(), "{flags:?} should conflict");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("cannot be used with"),
+            "stderr for {flags:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
 }
 
 #[test]
