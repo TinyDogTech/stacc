@@ -76,6 +76,10 @@ struct RawPullRequest {
     state: String,
     #[serde(default)]
     merged: bool,
+    // The list endpoint (`GET /pulls`) omits `merged` and carries `merged_at`
+    // instead; without reading it a merged PR found by head parses as Closed.
+    #[serde(default)]
+    merged_at: Option<String>,
     #[serde(default)]
     title: String,
     #[serde(default)]
@@ -87,7 +91,7 @@ struct RawPullRequest {
 
 impl From<RawPullRequest> for PullRequest {
     fn from(raw: RawPullRequest) -> Self {
-        let state = if raw.merged {
+        let state = if raw.merged || raw.merged_at.is_some() {
             PrState::Merged
         } else if raw.state == "closed" {
             PrState::Closed
@@ -249,7 +253,7 @@ impl GitHub {
         repo: &str,
         branch: &str,
     ) -> Result<Option<PullRequest>, GitHubError> {
-        self.find_pull_request_by_head(owner, repo, branch, None)
+        self.find_pull_request_by_head(owner, repo, branch, "open", None)
     }
 
     /// Like [`pull_request_for_branch`](Self::pull_request_for_branch) but caps
@@ -263,7 +267,21 @@ impl GitHub {
         branch: &str,
         timeout: Duration,
     ) -> Result<Option<PullRequest>, GitHubError> {
-        self.find_pull_request_by_head(owner, repo, branch, Some(timeout))
+        self.find_pull_request_by_head(owner, repo, branch, "open", Some(timeout))
+    }
+
+    /// Find the newest pull request whose head is `owner:branch` in *any*
+    /// state (`GET /pulls?head=...&state=all`, newest first). Unlike
+    /// [`pull_request_for_branch`](Self::pull_request_for_branch), merged and
+    /// closed PRs are included; `sync` uses this to adopt PRs created outside
+    /// stacc and reconcile ones that already merged.
+    pub fn pull_request_for_branch_any_state(
+        &self,
+        owner: &str,
+        repo: &str,
+        branch: &str,
+    ) -> Result<Option<PullRequest>, GitHubError> {
+        self.find_pull_request_by_head(owner, repo, branch, "all", None)
     }
 
     fn find_pull_request_by_head(
@@ -271,13 +289,18 @@ impl GitHub {
         owner: &str,
         repo: &str,
         branch: &str,
+        state: &str,
         timeout: Option<Duration>,
     ) -> Result<Option<PullRequest>, GitHubError> {
         let url = format!("{}/repos/{owner}/{repo}/pulls", self.base_url);
+        // Newest first, so with `state=all` the head's most recent PR wins
+        // (e.g. an old closed PR never shadows the branch's current one).
         let mut request = self
             .request("GET", &url)
             .query("head", &format!("{owner}:{branch}"))
-            .query("state", "open")
+            .query("state", state)
+            .query("sort", "created")
+            .query("direction", "desc")
             .query("per_page", "1");
         if let Some(timeout) = timeout {
             request = request.timeout(timeout);
@@ -424,6 +447,7 @@ mod tests {
             html_url: "u".into(),
             state: state.into(),
             merged,
+            merged_at: None,
             title: "t".into(),
             body: None,
             mergeable_state: None,
@@ -435,6 +459,12 @@ mod tests {
         assert_eq!(PullRequest::from(raw("closed", true)).state, PrState::Merged);
         assert_eq!(PullRequest::from(raw("closed", false)).state, PrState::Closed);
         assert_eq!(PullRequest::from(raw("open", false)).state, PrState::Open);
+        // The list endpoint signals a merge via `merged_at` with `merged` absent.
+        let listed = RawPullRequest {
+            merged_at: Some("2026-06-10T18:00:00Z".into()),
+            ..raw("closed", false)
+        };
+        assert_eq!(PullRequest::from(listed).state, PrState::Merged);
     }
 
     #[test]
@@ -543,6 +573,61 @@ mod tests {
     }
 
     #[test]
+    fn pull_request_for_branch_any_state_detects_a_merged_pr() {
+        let server = MockServer::start();
+        // The list endpoint reports merges via `merged_at`, not `merged`.
+        let mock = server.mock(|when, then| {
+            when.method(httpmock::Method::GET)
+                .path("/repos/o/r/pulls")
+                .query_param("head", "o:feature")
+                .query_param("state", "all")
+                .query_param("sort", "created")
+                .query_param("direction", "desc")
+                .query_param("per_page", "1");
+            then.status(200).json_body(json!([{
+                "number": 7,
+                "html_url": "https://github.com/o/r/pull/7",
+                "state": "closed",
+                "merged_at": "2026-06-10T18:00:00Z",
+            }]));
+        });
+
+        let gh = GitHub::with_base_url("t", server.base_url());
+        let pr = gh
+            .pull_request_for_branch_any_state("o", "r", "feature")
+            .unwrap()
+            .expect("a PR for the head");
+        assert_eq!(pr.number, 7);
+        assert_eq!(pr.state, PrState::Merged);
+        mock.assert();
+    }
+
+    #[test]
+    fn pull_request_for_branch_any_state_reports_closed_unmerged() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(httpmock::Method::GET)
+                .path("/repos/o/r/pulls")
+                .query_param("head", "o:feature")
+                .query_param("state", "all");
+            then.status(200).json_body(json!([{
+                "number": 8,
+                "html_url": "u",
+                "state": "closed",
+                "merged_at": null,
+            }]));
+        });
+
+        let gh = GitHub::with_base_url("t", server.base_url());
+        let pr = gh
+            .pull_request_for_branch_any_state("o", "r", "feature")
+            .unwrap()
+            .expect("a PR for the head");
+        assert_eq!(pr.state, PrState::Closed);
+        mock.assert();
+    }
+
+    #[test]
     fn pull_request_for_branch_is_none_when_no_pr_matches() {
         let server = MockServer::start();
         let mock = server.mock(|when, then| {
@@ -608,6 +693,7 @@ mod tests {
                 html_url: "u".into(),
                 state: "open".into(),
                 merged: false,
+                merged_at: None,
                 title: "t".into(),
                 body: None,
                 mergeable_state: ms.map(String::from),
