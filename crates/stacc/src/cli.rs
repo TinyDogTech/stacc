@@ -111,6 +111,8 @@ pub enum Command {
     Log(LogArgs),
     /// Show the current branch's position and PR status.
     Status,
+    /// Show a branch's stack detail: base, head, children, diffstat, and PR.
+    Info(InfoArgs),
     /// Print the current branch's PR URL (and open it in a browser on a terminal).
     Pr,
     /// Manage the GitHub access token.
@@ -256,6 +258,25 @@ impl LogArgs {
     pub fn scoped(&self) -> bool {
         self.stack || self.steps.is_some()
     }
+}
+
+/// Arguments for `stacc info`.
+#[derive(Debug, clap::Args)]
+pub struct InfoArgs {
+    /// Branch to inspect (defaults to the current branch).
+    pub branch: Option<String>,
+
+    /// Include the branch's diff against its base.
+    #[arg(long)]
+    pub diff: bool,
+
+    /// Include the branch's per-commit patches (like `git log -p`).
+    #[arg(long)]
+    pub patch: bool,
+
+    /// Fetch the PR title, state, and body from GitHub (best-effort).
+    #[arg(long)]
+    pub body: bool,
 }
 
 /// Arguments for `stacc checkout`.
