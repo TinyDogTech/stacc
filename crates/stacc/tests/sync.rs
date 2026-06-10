@@ -25,6 +25,55 @@ fn git_ok(dir: &std::path::Path, args: &[&str]) -> bool {
         .success()
 }
 
+fn git_out(dir: &std::path::Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .expect("spawn git");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+fn ref_exists(dir: &std::path::Path, branch: &str) -> bool {
+    // Capture the output: `--verify` prints the hash on success, which would
+    // otherwise leak into the test output via the inherited stdout.
+    !git_out(
+        dir,
+        &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")],
+    )
+    .is_empty()
+}
+
+/// Inject a recorded PR for `branch` (base `base`, hash from the live ref).
+fn track_pr(p: &std::path::Path, branch: &str, base: &str, number: u64) {
+    let store = StateStore::new(Git::open(p));
+    let mut state = store.load().unwrap();
+    state.branches.insert(
+        branch.to_string(),
+        BranchState {
+            base: Base {
+                name: base.to_string(),
+                hash: git_out(p, &["rev-parse", base]),
+            },
+            pr: Some(PullRequest { number, url: None }),
+        },
+    );
+    store.save(&state).unwrap();
+}
+
+/// Mock `GET /pulls/{number}` returning a merged (or open) PR.
+fn mock_pr_state(server: &MockServer, number: u64, merged: bool) {
+    let state = if merged { "closed" } else { "open" };
+    server.mock(move |when, then| {
+        when.method(httpmock::Method::GET)
+            .path(format!("/repos/stacc-sandbox/example/pulls/{number}"));
+        then.status(200).json_body(serde_json::json!({
+            "number": number, "html_url": "u", "state": state, "merged": merged,
+        }));
+    });
+}
+
 fn write(dir: &std::path::Path, name: &str, contents: &str) {
     std::fs::write(dir.join(name), contents).expect("write file");
 }
@@ -458,4 +507,136 @@ fn sync_conflict_writes_context_then_continue_completes() {
     assert!(!git_dir.join("stacc-continue.json").exists());
     assert!(!ctx_path.exists());
     assert!(git_ok(tmp.path(), &["merge-base", "--is-ancestor", "main", "feature"]));
+}
+
+#[test]
+fn sync_deletes_the_merged_branchs_ref_and_keeps_unmerged_ones() {
+    let tmp = repo();
+    let p = tmp.path();
+    assert!(stacc(p, &["init"]).status.success());
+    run_git(p, &["checkout", "-q", "-b", "feature-1"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "f1"]);
+    track_pr(p, "feature-1", "main", 1);
+    run_git(p, &["checkout", "-q", "-b", "feature-2"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "f2"]);
+    track_pr(p, "feature-2", "feature-1", 2);
+    run_git(p, &["checkout", "-q", "main"]);
+
+    // PR 1 merged out of band; PR 2 still open.
+    let server = MockServer::start();
+    mock_pr_state(&server, 1, true);
+    mock_pr_state(&server, 2, false);
+
+    let out = stacc_env(
+        p,
+        &["sync", "--offline", "--format", "json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains(r#""merged":["feature-1"]"#), "got: {s}");
+    assert!(s.contains(r#""cleaned":["feature-1"]"#), "got: {s}");
+    assert!(s.contains(r#""cleanup_skipped":[]"#), "got: {s}");
+    // The merged branch's local ref is gone; the open-PR branch's survives.
+    assert!(!ref_exists(p, "feature-1"), "merged ref must be deleted");
+    assert!(ref_exists(p, "feature-2"), "unmerged ref must survive");
+}
+
+#[test]
+fn sync_keep_branches_keeps_the_merged_ref() {
+    let tmp = repo();
+    let p = tmp.path();
+    assert!(stacc(p, &["init"]).status.success());
+    run_git(p, &["checkout", "-q", "-b", "feature"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "f1"]);
+    track_pr(p, "feature", "main", 1);
+    run_git(p, &["checkout", "-q", "main"]);
+
+    let server = MockServer::start();
+    mock_pr_state(&server, 1, true);
+
+    let out = stacc_env(
+        p,
+        &["sync", "--offline", "--keep-branches", "--format", "json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains(r#""merged":["feature"]"#), "still untracked from state: {s}");
+    assert!(s.contains(r#""cleaned":[]"#), "nothing deleted: {s}");
+    assert!(ref_exists(p, "feature"), "ref must survive --keep-branches");
+}
+
+#[test]
+fn sync_keeps_a_merged_branch_checked_out_in_another_worktree() {
+    let tmp = repo();
+    let p = tmp.path();
+    assert!(stacc(p, &["init"]).status.success());
+    run_git(p, &["checkout", "-q", "-b", "feature"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "f1"]);
+    track_pr(p, "feature", "main", 1);
+    run_git(p, &["checkout", "-q", "main"]);
+    // Check the merged branch out in a second worktree: deleting its ref would
+    // desync that worktree, so sync must keep it and say why.
+    let wt = TempDir::new().expect("worktree dir");
+    let wt_path = wt.path().join("wt");
+    run_git(p, &["worktree", "add", "-q", wt_path.to_str().unwrap(), "feature"]);
+
+    let server = MockServer::start();
+    mock_pr_state(&server, 1, true);
+
+    let out = stacc_env(
+        p,
+        &["sync", "--offline", "--format", "json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains(r#""cleaned":[]"#), "got: {s}");
+    assert!(s.contains(r#""cleanup_skipped":[{"branch":"feature""#), "got: {s}");
+    assert!(s.contains("checked out in"), "reason names the worktree: {s}");
+    assert!(ref_exists(p, "feature"), "checked-out ref must survive");
+}
+
+#[test]
+fn sync_on_the_merged_branch_ends_on_the_trunk_with_the_ref_gone() {
+    let tmp = repo();
+    let p = tmp.path();
+    assert!(stacc(p, &["init"]).status.success());
+    run_git(p, &["checkout", "-q", "-b", "feature"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "f1"]);
+    track_pr(p, "feature", "main", 1);
+    // Stay on `feature`: sync must move to the trunk before deleting it.
+
+    let server = MockServer::start();
+    mock_pr_state(&server, 1, true);
+
+    let out = stacc_env(
+        p,
+        &["sync", "--offline", "--format", "json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains(r#""cleaned":["feature"]"#), "got: {s}");
+    assert_eq!(git_out(p, &["rev-parse", "--abbrev-ref", "HEAD"]), "main");
+    assert!(!ref_exists(p, "feature"), "merged ref must be gone");
+}
+
+#[test]
+fn sync_offline_without_pr_detection_deletes_nothing() {
+    let tmp = repo();
+    let p = tmp.path();
+    assert!(stacc(p, &["init"]).status.success());
+    run_git(p, &["checkout", "-q", "-b", "feature"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "f1"]);
+    assert!(stacc(p, &["track"]).status.success());
+
+    // No PRs recorded, so no merge detection: nothing to clean.
+    let out = stacc(p, &["sync", "--offline", "--format", "json"]);
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains(r#""cleaned":[]"#), "got: {s}");
+    assert!(s.contains(r#""cleanup_skipped":[]"#), "got: {s}");
+    assert!(ref_exists(p, "feature"), "tracked ref must survive");
 }
