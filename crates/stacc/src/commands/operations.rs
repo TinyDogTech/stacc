@@ -444,7 +444,7 @@ pub fn fold(args: &FoldArgs, format: OutputFormat) -> Result<(), Error> {
     finish_fold_refs(&git, &branch, &parent);
 
     let pr_closed = if args.close {
-        close_folded_pr(&git, &repo, &branch, branch_state.pr.as_ref().map(|pr| pr.number))
+        close_pr_best_effort(&git, &repo, &branch, branch_state.pr.as_ref().map(|pr| pr.number))
     } else {
         None
     };
@@ -482,10 +482,11 @@ fn finish_fold_refs(git: &Git, branch: &str, parent: &str) {
     }
 }
 
-/// Close the folded branch's PR on GitHub, best-effort: `Some(true)` when it
-/// closed, `Some(false)` (plus a warning) when the attempt failed, `None` when
-/// there is no recorded PR to close.
-fn close_folded_pr(
+/// Close `branch`'s PR on GitHub, best-effort: `Some(true)` when it closed,
+/// `Some(false)` (plus a warning) when the attempt failed, `None` when there is
+/// no recorded PR to close. Shared by `fold` and `delete`, whose `--close` is
+/// an opt-in side effect that must never fail the already-finished local work.
+pub(crate) fn close_pr_best_effort(
     git: &Git,
     repo: &RepoConfig,
     branch: &str,
@@ -505,7 +506,7 @@ fn close_folded_pr(
         Ok(()) => Some(true),
         Err(err) => {
             eprintln!(
-                "warning: folded `{branch}` but could not close its PR #{number} ({err}); close it on GitHub manually"
+                "warning: could not close `{branch}`'s PR #{number} ({err}); close it on GitHub manually"
             );
             Some(false)
         }
@@ -1842,7 +1843,7 @@ fn continue_op(
         } => {
             finish_fold_refs(git, branch, parent);
             let pr_closed = if *close {
-                close_folded_pr(git, repo, branch, *pr_number)
+                close_pr_best_effort(git, repo, branch, *pr_number)
             } else {
                 None
             };

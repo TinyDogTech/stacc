@@ -18,6 +18,7 @@ mod auth;
 mod log;
 mod navigation;
 mod operations;
+mod removal;
 mod reorder;
 mod split;
 
@@ -28,6 +29,7 @@ pub use navigation::{bottom, checkout, down, top, up};
 pub use operations::{
     abort_cmd, continue_cmd, fold, merge, modify, move_cmd, restack, squash, sync, undo,
 };
+pub use removal::{delete, pop};
 pub use reorder::reorder;
 pub use split::split;
 

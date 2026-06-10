@@ -19,8 +19,8 @@ use error::Error;
 /// Names that stacc always handles itself. These always shadow any user alias.
 const BUILTINS: &[&str] = &[
     "init", "track", "untrack", "create", "modify", "log", "status", "submit", "sync", "restack",
-    "move", "absorb", "squash", "fold", "split", "reorder", "rename", "merge", "continue",
-    "abort", "undo", "up", "down", "top", "bottom", "checkout", "pr", "auth",
+    "move", "absorb", "squash", "fold", "split", "reorder", "delete", "pop", "rename", "merge",
+    "continue", "abort", "undo", "up", "down", "top", "bottom", "checkout", "pr", "auth",
 ];
 
 /// Short aliases stacc ships with, seeded at the lowest precedence so a user or
@@ -94,6 +94,8 @@ fn dispatch(cli: &Cli) -> Result<(), Error> {
         Command::Fold(args) => commands::fold(args, cli.global.format),
         Command::Split(args) => commands::split(args, cli.global.format),
         Command::Reorder(args) => commands::reorder(args, cli.global.format),
+        Command::Delete(args) => commands::delete(args, cli.global.format),
+        Command::Pop => commands::pop(cli.global.format),
         Command::Rename(args) => commands::rename(args, cli.global.format),
         Command::Merge(args) => commands::merge(args, cli.global.format),
         Command::Continue => commands::continue_cmd(cli.global.format),
