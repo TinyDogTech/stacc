@@ -121,6 +121,9 @@ pub enum Command {
     Pr,
     /// Manage the GitHub access token.
     Auth(AuthArgs),
+    /// Get and set stacc configuration (repo-local `.stacc.toml`, or the
+    /// user-global file with `--global`).
+    Config(ConfigArgs),
     /// Print a tab-completion script for a shell to stdout.
     ///
     /// The script completes the `stacc` name. `st` users can reuse it, e.g.
@@ -148,6 +151,45 @@ pub enum AuthAction {
     Logout,
     /// Report which auth source is active and which user it identifies.
     Status,
+}
+
+/// Arguments for `stacc config`.
+#[derive(Debug, clap::Args)]
+pub struct ConfigArgs {
+    #[command(subcommand)]
+    pub action: ConfigAction,
+}
+
+/// Sub-actions under `stacc config`. Keys: `trunk`, `remote`, `aliases.<name>`.
+// An interactive TTY menu is a possible future convenience (KTD-6); the
+// non-interactive get/set surface is the contract.
+#[derive(Debug, Subcommand)]
+pub enum ConfigAction {
+    /// Print a key's resolved value (repo overrides global overrides detected).
+    Get {
+        /// Key to read: `trunk`, `remote`, or `aliases.<name>`.
+        key: String,
+    },
+    /// Set a key in the repo-local `.stacc.toml` (or the user config with `--global`).
+    Set {
+        /// Key to write: `trunk`, `remote`, or `aliases.<name>`.
+        key: String,
+        /// Value to store.
+        value: String,
+        /// Write the user-global config file instead of the repo-local one.
+        #[arg(long)]
+        global: bool,
+    },
+    /// Remove a key from the repo-local `.stacc.toml` (or the user config with `--global`).
+    Unset {
+        /// Key to remove: `trunk`, `remote`, or `aliases.<name>`.
+        key: String,
+        /// Edit the user-global config file instead of the repo-local one.
+        #[arg(long)]
+        global: bool,
+    },
+    /// List every known key with its resolved value and source.
+    List,
 }
 
 /// Arguments for `stacc completion`.
