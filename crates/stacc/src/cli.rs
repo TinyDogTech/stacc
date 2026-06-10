@@ -121,6 +121,11 @@ pub enum Command {
     Pr,
     /// Manage the GitHub access token.
     Auth(AuthArgs),
+    /// Print a tab-completion script for a shell to stdout.
+    ///
+    /// The script completes the `stacc` name. `st` users can reuse it, e.g.
+    /// `complete -F _stacc st` (bash) or `compdef _stacc st` (zsh).
+    Completion(CompletionArgs),
 
     /// Any other subcommand is proxied to `git` (e.g. `commit`, `rebase`, `push`).
     #[command(external_subcommand)]
@@ -143,6 +148,14 @@ pub enum AuthAction {
     Logout,
     /// Report which auth source is active and which user it identifies.
     Status,
+}
+
+/// Arguments for `stacc completion`.
+#[derive(Debug, clap::Args)]
+pub struct CompletionArgs {
+    /// Shell to generate the script for.
+    #[arg(value_enum)]
+    pub shell: clap_complete::Shell,
 }
 
 /// Arguments for `stacc init`.

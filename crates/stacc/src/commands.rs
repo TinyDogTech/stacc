@@ -15,6 +15,7 @@ use crate::error::Error;
 
 mod absorb;
 mod auth;
+mod completion;
 mod info;
 mod log;
 mod navigation;
@@ -25,6 +26,7 @@ mod split;
 
 pub use absorb::absorb;
 pub use auth::auth;
+pub use completion::completion;
 pub use info::info;
 pub use log::log;
 pub use navigation::{bottom, checkout, children, down, parent, top, up};

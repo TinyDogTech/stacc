@@ -21,7 +21,7 @@ const BUILTINS: &[&str] = &[
     "init", "track", "untrack", "create", "modify", "log", "status", "submit", "sync", "restack",
     "move", "absorb", "squash", "fold", "split", "reorder", "delete", "pop", "rename", "merge",
     "continue", "abort", "undo", "up", "down", "top", "bottom", "checkout", "parent", "children",
-    "pr", "auth", "info",
+    "pr", "auth", "info", "completion",
 ];
 
 /// Short aliases stacc ships with, seeded at the lowest precedence so a user or
@@ -113,6 +113,11 @@ fn dispatch(cli: &Cli) -> Result<(), Error> {
         Command::Parent => commands::parent(cli.global.format),
         Command::Children => commands::children(cli.global.format),
         Command::Auth(args) => commands::auth(args, cli.global.format),
+        // Pure script output; --format json is deliberately ignored here.
+        Command::Completion(args) => {
+            commands::completion(args);
+            Ok(())
+        }
         Command::External(_) => unreachable!("external subcommands are proxied in run"),
     }
 }
