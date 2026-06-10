@@ -6,6 +6,7 @@ mod error;
 pub use auth::{clear_token, load_token, store_token, DeviceCode, DeviceFlow};
 pub use error::GitHubError;
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use serde::de::DeserializeOwned;
@@ -33,6 +34,8 @@ pub struct PullRequest {
     pub state: PrState,
     pub title: String,
     pub body: String,
+    /// Whether the PR is a draft.
+    pub draft: bool,
     /// GitHub's `mergeable_state` (e.g. `clean`, `blocked`, `behind`, `dirty`,
     /// `unknown`), or `None` when GitHub has not computed it yet.
     pub mergeable_state: Option<String>,
@@ -84,6 +87,8 @@ struct RawPullRequest {
     title: String,
     #[serde(default)]
     body: Option<String>,
+    #[serde(default)]
+    draft: bool,
     // Existing fixtures omit this; without the default they fail to deserialize.
     #[serde(default)]
     mergeable_state: Option<String>,
@@ -104,9 +109,35 @@ impl From<RawPullRequest> for PullRequest {
             state,
             title: raw.title,
             body: raw.body.unwrap_or_default(),
+            draft: raw.draft,
             mergeable_state: raw.mergeable_state,
         }
     }
+}
+
+/// The review decision GitHub reports for a pull request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewDecision {
+    Approved,
+    ChangesRequested,
+    ReviewRequired,
+}
+
+/// The CI check rollup for a pull request's head commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckRollup {
+    Pass,
+    Fail,
+    Pending,
+}
+
+/// Per-PR review decision and CI rollup, from the batched status query.
+/// Either side is `None` when GitHub reports nothing (no reviewers configured,
+/// no checks on the head commit).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PrChecks {
+    pub review: Option<ReviewDecision>,
+    pub checks: Option<CheckRollup>,
 }
 
 /// The outcome of a merge request: whether GitHub merged it, and the squash
@@ -372,6 +403,74 @@ impl GitHub {
         }
     }
 
+    /// Review decision and CI check rollup for a set of pull requests, in ONE
+    /// GraphQL call (`POST /graphql`) regardless of how many numbers are asked
+    /// for, capped at `timeout`. Each number maps to its [`PrChecks`]; a PR the
+    /// response omits (deleted, or an unknown number) is simply absent. Parsing
+    /// is defensive: a partial or error-bearing GraphQL response yields an
+    /// emptier map, never an error, so callers degrade silently.
+    pub fn pull_request_checks_within(
+        &self,
+        owner: &str,
+        repo: &str,
+        numbers: &[u64],
+        timeout: Duration,
+    ) -> Result<BTreeMap<u64, PrChecks>, GitHubError> {
+        if numbers.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        // One aliased `pullRequest` field per number; the repo coordinates ride
+        // as variables so they need no escaping inside the query text.
+        let fields: String = numbers
+            .iter()
+            .map(|n| {
+                format!(
+                    "pr{n}: pullRequest(number: {n}) {{ reviewDecision \
+                     commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ state }} }} }} }} }} "
+                )
+            })
+            .collect();
+        let query = format!(
+            "query($owner: String!, $name: String!) {{ \
+             repository(owner: $owner, name: $name) {{ {fields}}} }}"
+        );
+        let body = serde_json::json!({
+            "query": query,
+            "variables": { "owner": owner, "name": repo },
+        });
+        let url = format!("{}/graphql", self.base_url);
+        let response = self
+            .request("POST", &url)
+            .timeout(timeout)
+            .send_json(&body)
+            .map_err(GitHubError::from_ureq)?;
+        let value: serde_json::Value = response.into_json()?;
+
+        let repository = &value["data"]["repository"];
+        let mut map = BTreeMap::new();
+        for &number in numbers {
+            let pr = &repository[format!("pr{number}")];
+            if !pr.is_object() {
+                continue;
+            }
+            let review = match pr["reviewDecision"].as_str() {
+                Some("APPROVED") => Some(ReviewDecision::Approved),
+                Some("CHANGES_REQUESTED") => Some(ReviewDecision::ChangesRequested),
+                Some("REVIEW_REQUIRED") => Some(ReviewDecision::ReviewRequired),
+                _ => None,
+            };
+            let rollup = &pr["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["state"];
+            let checks = match rollup.as_str() {
+                Some("SUCCESS") => Some(CheckRollup::Pass),
+                Some("FAILURE" | "ERROR") => Some(CheckRollup::Fail),
+                Some("PENDING" | "EXPECTED") => Some(CheckRollup::Pending),
+                _ => None,
+            };
+            map.insert(number, PrChecks { review, checks });
+        }
+        Ok(map)
+    }
+
     /// Build a request with the auth + GitHub headers already set.
     fn request(&self, method: &str, url: &str) -> ureq::Request {
         self.agent
@@ -450,6 +549,7 @@ mod tests {
             merged_at: None,
             title: "t".into(),
             body: None,
+            draft: false,
             mergeable_state: None,
         }
     }
@@ -696,6 +796,7 @@ mod tests {
                 merged_at: None,
                 title: "t".into(),
                 body: None,
+                draft: false,
                 mergeable_state: ms.map(String::from),
             })
         };
@@ -739,6 +840,131 @@ mod tests {
             gh.merge_pull_request("o", "r", 7).unwrap_err(),
             GitHubError::NotMergeable
         ));
+    }
+
+    #[test]
+    fn draft_field_deserializes_and_defaults_to_false() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(httpmock::Method::GET).path("/repos/o/r/pulls/7");
+            then.status(200).json_body(json!({
+                "number": 7, "html_url": "u", "state": "open", "merged": false,
+                "draft": true,
+            }));
+        });
+
+        let gh = GitHub::with_base_url("t", server.base_url());
+        assert!(gh.get_pull_request("o", "r", 7).unwrap().draft);
+        // Fixtures without the field (and the From helper) read as not-draft.
+        assert!(!PullRequest::from(raw("open", false)).draft);
+    }
+
+    #[test]
+    fn pull_request_checks_batches_one_graphql_call() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(httpmock::Method::POST)
+                .path("/graphql")
+                .body_contains("pr7: pullRequest(number: 7)")
+                .body_contains("pr8: pullRequest(number: 8)");
+            then.status(200).json_body(json!({
+                "data": { "repository": {
+                    "pr7": {
+                        "reviewDecision": "APPROVED",
+                        "commits": { "nodes": [ { "commit": {
+                            "statusCheckRollup": { "state": "SUCCESS" }
+                        } } ] }
+                    },
+                    "pr8": {
+                        "reviewDecision": "CHANGES_REQUESTED",
+                        "commits": { "nodes": [ { "commit": {
+                            "statusCheckRollup": { "state": "FAILURE" }
+                        } } ] }
+                    },
+                } }
+            }));
+        });
+
+        let gh = GitHub::with_base_url("t", server.base_url());
+        let map = gh
+            .pull_request_checks_within("o", "r", &[7, 8], Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(
+            map[&7],
+            PrChecks {
+                review: Some(ReviewDecision::Approved),
+                checks: Some(CheckRollup::Pass),
+            }
+        );
+        assert_eq!(
+            map[&8],
+            PrChecks {
+                review: Some(ReviewDecision::ChangesRequested),
+                checks: Some(CheckRollup::Fail),
+            }
+        );
+        mock.assert(); // exactly one call covered both PRs
+    }
+
+    #[test]
+    fn pull_request_checks_tolerates_missing_data() {
+        let server = MockServer::start();
+        // pr7: no review decision, pending checks; pr8: GitHub returned null
+        // (e.g. an unknown number); pr9: no checks configured at all.
+        server.mock(|when, then| {
+            when.method(httpmock::Method::POST).path("/graphql");
+            then.status(200).json_body(json!({
+                "data": { "repository": {
+                    "pr7": {
+                        "reviewDecision": null,
+                        "commits": { "nodes": [ { "commit": {
+                            "statusCheckRollup": { "state": "PENDING" }
+                        } } ] }
+                    },
+                    "pr8": null,
+                    "pr9": { "reviewDecision": "REVIEW_REQUIRED", "commits": { "nodes": [] } },
+                } }
+            }));
+        });
+
+        let gh = GitHub::with_base_url("t", server.base_url());
+        let map = gh
+            .pull_request_checks_within("o", "r", &[7, 8, 9], Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(
+            map.get(&7),
+            Some(&PrChecks { review: None, checks: Some(CheckRollup::Pending) })
+        );
+        assert_eq!(map.get(&8), None, "a null PR is simply absent");
+        assert_eq!(
+            map.get(&9),
+            Some(&PrChecks { review: Some(ReviewDecision::ReviewRequired), checks: None })
+        );
+    }
+
+    #[test]
+    fn pull_request_checks_empty_input_short_circuits() {
+        // No server: an empty number list must not touch the network.
+        let gh = GitHub::with_base_url("t", "http://127.0.0.1:1");
+        let map = gh
+            .pull_request_checks_within("o", "r", &[], Duration::from_secs(5))
+            .unwrap();
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn pull_request_checks_surfaces_http_errors() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(httpmock::Method::POST).path("/graphql");
+            then.status(500).json_body(json!({ "message": "boom" }));
+        });
+
+        let gh = GitHub::with_base_url("t", server.base_url());
+        let err = gh
+            .pull_request_checks_within("o", "r", &[7], Duration::from_secs(5))
+            .unwrap_err();
+        assert!(matches!(err, GitHubError::Status { status: 500, .. }));
     }
 
     #[test]
