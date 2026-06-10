@@ -1,7 +1,7 @@
 //! Stack operations: sync, restack, modify, move, and the conflict-recovery
 //! (continue/abort) lifecycle they share.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{json, Value};
 use stacc_core::{ops, recovery};
@@ -1050,7 +1050,7 @@ pub fn sync(args: &SyncArgs, format: OutputFormat) -> Result<(), Error> {
     let (adopted, adopted_merged) = adopt_prs(&git, &store, &mut state, &repo)?;
     let adopted_names: BTreeSet<String> = adopted.iter().map(|a| a.branch.clone()).collect();
     let mut merged = detect_merged(&git, &state, &repo, &adopted_names)?;
-    merged.extend(adopted_merged);
+    merged.extend(adopted_merged.into_keys());
     // Snapshot the merged branches' tips NOW, the leases for the ref cleanup
     // after the reconcile: a branch that moves mid-sync is kept, not destroyed.
     let leases: Vec<(String, String)> = merged
@@ -1140,60 +1140,43 @@ fn detect_merged(
     Ok(merged)
 }
 
-/// A PR `sync` adopted: a tracked branch with no recorded PR that GitHub says
-/// has an open one (created via `gh` or the web UI).
+/// A PR adopted by head-branch lookup: a tracked branch with no recorded PR
+/// that GitHub says has an open one (created via `gh` or the web UI).
 struct AdoptedPr {
     branch: String,
     number: u64,
     url: String,
 }
 
-/// Look up PRs by head branch for tracked branches with no recorded PR.
-/// Open PRs are recorded in state (and mirrored into `state` in memory) and
-/// returned; merged PRs are returned as a drop set for merge-detection.
-/// Closed-unmerged PRs are deliberately not recorded: `submit` opens a fresh
-/// PR for a closed head, and a recorded closed PR would resurrect it instead.
+/// The shared adoption core of `sync` and `merge`: look up each candidate (a
+/// tracked branch with no recorded PR) by head branch, in any state. Open PRs
+/// are recorded in state (persisted, and mirrored into `state` in memory) and
+/// returned; merged PRs are returned (branch -> PR number) for the caller's
+/// merge handling. Closed-unmerged PRs are deliberately not recorded: `submit`
+/// opens a fresh PR for a closed head, and a recorded closed PR would
+/// resurrect it instead. (`submit` has its own open-only lookup: it adopts in
+/// order to update the PR, where merged and closed heads must fall through to
+/// create.)
 ///
-/// Best-effort like submit's adoption: a missing token, a non-GitHub remote,
-/// or a failed lookup skips adoption rather than failing the sync (a branch
-/// with no PR anywhere is the common WIP case, not an error).
-fn adopt_prs(
-    git: &Git,
+/// A failed lookup reads as no PR: best-effort, never fatal (a branch with no
+/// PR anywhere is the common WIP case, not an error).
+fn adopt_prs_among(
+    github: &GitHub,
+    owner: &str,
+    repo_name: &str,
     store: &StateStore,
     state: &mut State,
-    repo: &RepoConfig,
-) -> Result<(Vec<AdoptedPr>, BTreeSet<String>), Error> {
-    let candidates: Vec<String> = state
-        .branches
-        .iter()
-        .filter(|(_, b)| b.pr.is_none())
-        .map(|(name, _)| name.clone())
-        .collect();
-    if candidates.is_empty() {
-        return Ok((Vec::new(), BTreeSet::new()));
-    }
-    let Some((owner, repo_name)) = git
-        .remote_url(&repo.remote)
-        .ok()
-        .and_then(|url| stacc_github::parse_remote(&url))
-    else {
-        return Ok((Vec::new(), BTreeSet::new()));
-    };
-    let Ok(github) = GitHub::from_env() else {
-        return Ok((Vec::new(), BTreeSet::new()));
-    };
-
+    candidates: &[String],
+) -> Result<(Vec<AdoptedPr>, BTreeMap<String, u64>), Error> {
     let mut adopted: Vec<AdoptedPr> = Vec::new();
-    let mut merged: BTreeSet<String> = BTreeSet::new();
-    for name in &candidates {
-        // A failed lookup (`Err`) reads as no PR: best-effort, never fatal.
-        let Ok(Some(pr)) = github.pull_request_for_branch_any_state(&owner, &repo_name, name)
-        else {
+    let mut merged: BTreeMap<String, u64> = BTreeMap::new();
+    for name in candidates {
+        let Ok(Some(pr)) = github.pull_request_for_branch_any_state(owner, repo_name, name) else {
             continue;
         };
         match pr.state {
             PrState::Merged => {
-                merged.insert(name.clone());
+                merged.insert(name.clone(), pr.number);
             }
             PrState::Open => {
                 let record = PullRequest {
@@ -1213,8 +1196,9 @@ fn adopt_prs(
         }
     }
 
-    // Persist the open adoptions before the fallible fetch and restack, so a
-    // failure later does not lose what GitHub already told us.
+    // Persist the open adoptions before the caller's fallible work (sync's
+    // fetch and restack, merge's walk), so a failure later does not lose what
+    // GitHub already told us.
     if !adopted.is_empty() {
         store.update(|s| {
             for a in &adopted {
@@ -1229,6 +1213,37 @@ fn adopt_prs(
         })?;
     }
     Ok((adopted, merged))
+}
+
+/// `sync`'s adoption pass: every tracked branch with no recorded PR is a
+/// candidate. Best-effort like submit's adoption: a missing token or a
+/// non-GitHub remote skips adoption rather than failing the sync.
+fn adopt_prs(
+    git: &Git,
+    store: &StateStore,
+    state: &mut State,
+    repo: &RepoConfig,
+) -> Result<(Vec<AdoptedPr>, BTreeMap<String, u64>), Error> {
+    let candidates: Vec<String> = state
+        .branches
+        .iter()
+        .filter(|(_, b)| b.pr.is_none())
+        .map(|(name, _)| name.clone())
+        .collect();
+    if candidates.is_empty() {
+        return Ok((Vec::new(), BTreeMap::new()));
+    }
+    let Some((owner, repo_name)) = git
+        .remote_url(&repo.remote)
+        .ok()
+        .and_then(|url| stacc_github::parse_remote(&url))
+    else {
+        return Ok((Vec::new(), BTreeMap::new()));
+    };
+    let Ok(github) = GitHub::from_env() else {
+        return Ok((Vec::new(), BTreeMap::new()));
+    };
+    adopt_prs_among(&github, &owner, &repo_name, store, state, &candidates)
 }
 
 /// Reconcile a caller-supplied drop set and restack the stack, the shared core
@@ -1416,6 +1431,23 @@ pub fn merge(args: &MergeArgs, format: OutputFormat) -> Result<(), Error> {
         }
     };
 
+    // Adopt PRs created outside stacc (gh, the web UI) for chain branches with
+    // no recorded PR, BEFORE the retarget pass below: an adopted child PR must
+    // also be pointed at the trunk, or its parent's branch deletion on merge
+    // closes it. Open PRs are recorded (so the walk merges them); merged ones
+    // are carried into the walk as already-merged. (API only, runs in
+    // `--offline` too.)
+    let candidates: Vec<String> = chain
+        .iter()
+        .filter(|name| state.branches.get(*name).is_some_and(|b| b.pr.is_none()))
+        .cloned()
+        .collect();
+    let (adopted, adopted_merged) =
+        adopt_prs_among(&github, &owner, &repo_name, &store, &mut state, &candidates)?;
+    for a in &adopted {
+        eprintln!("note: adopted PR #{} for `{}`: {}", a.number, a.branch, a.url);
+    }
+
     // Retarget every non-bottom open PR to the trunk UP FRONT, before any parent
     // merges. A child PR whose base is the parent's branch is closed (un-
     // reopenably) when GitHub deletes that branch on merge; pointing it at the
@@ -1443,6 +1475,7 @@ pub fn merge(args: &MergeArgs, format: OutputFormat) -> Result<(), Error> {
         &owner,
         &repo_name,
         &chain,
+        &adopted_merged,
         args.offline,
         args.keep_branches,
     );
@@ -1546,7 +1579,16 @@ fn retarget_children_to_trunk(
 /// prefix. Mutates `state` (the reconcile drops/restacks as it goes). After each
 /// merged PR's reconcile, deletes its local branch ref (leased on the tip it
 /// had when it merged; `keep_branches` opts out).
-#[allow(clippy::too_many_arguments)]
+///
+/// `adopted_merged` names chain branches whose head-branch lookup (the adoption
+/// pass in `merge`) found an already-merged PR; merged PRs are never recorded
+/// in state, so they reach this walk with no recorded PR and would otherwise
+/// stop it. They count like the `PrState::Merged` arm: reconciled away, not
+/// re-queried.
+// One cohesive bottom-up walk: every arm's break/stop is coupled to the loop's
+// deferred-error reporting, so splitting it would only trade this lint for
+// too_many_arguments on a helper (same trade-off as `merge` above).
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn merge_stack(
     git: &Git,
     store: &StateStore,
@@ -1556,6 +1598,7 @@ fn merge_stack(
     owner: &str,
     repo_name: &str,
     chain: &[String],
+    adopted_merged: &BTreeMap<String, u64>,
     offline: bool,
     keep_branches: bool,
 ) -> MergeWalk {
@@ -1570,73 +1613,81 @@ fn merge_stack(
     let mut loop_err: Option<Error> = None;
 
     for (i, branch) in chain.iter().enumerate() {
-        let Some(pr) = state.branches.get(branch).and_then(|b| b.pr.clone()) else {
-            stopped = Some(json!({ "kind": "no_pr", "branch": branch, "reason": "no recorded PR; submit it first" }));
-            break;
-        };
-        let current = match github.get_pull_request(owner, repo_name, pr.number) {
-            Ok(current) => current,
-            Err(err) => {
-                loop_err = Some(err.into());
-                break;
-            }
-        };
-        match current.state {
-            PrState::Merged => {
-                // Already merged out of band: count it and reconcile it away below.
-                merged_prs.push(MergedPr { branch: branch.clone(), number: pr.number, sha: None, out_of_band: true });
-            }
-            PrState::Closed => {
-                stopped = Some(json!({ "kind": "closed", "branch": branch, "number": pr.number, "reason": "PR is closed, not merged" }));
-                break;
-            }
-            PrState::Open => {
-                // Online: the previous iteration's reconcile restacked this branch
-                // onto the merged trunk; force-push it so the PR head is `trunk +
-                // its own commits` before GitHub recomputes readiness. Offline
-                // skips this (no fetch, no push) and leans on GitHub's server-side
-                // 3-way merge, which still squashes only the branch's net diff: a
-                // non-overlapping stack merges clean, an overlapping one reads
-                // not-ready below and the walk stops there.
-                if i > 0 && !offline {
-                    if let Err(err) = git.push_force_with_lease(&repo.remote, branch) {
-                        loop_err = Some(Error::Usage(format!(
-                            "merged the PR(s) below, but could not force-push `{branch}` onto the merged trunk ({err}); run `stacc sync` then `stacc merge` to finish"
-                        )));
-                        break;
-                    }
-                }
-                let live = match poll_pr_ready(github, owner, repo_name, pr.number) {
-                    Ok(live) => live,
-                    Err(err) => {
-                        loop_err = Some(err);
-                        break;
-                    }
-                };
-                if !live.ready() {
-                    stopped = Some(json!({ "kind": "not_ready", "branch": branch, "number": pr.number, "mergeable_state": live.mergeable_state, "reason": "not cleanly mergeable" }));
+        if let Some(pr) = state.branches.get(branch).and_then(|b| b.pr.clone()) {
+            let current = match github.get_pull_request(owner, repo_name, pr.number) {
+                Ok(current) => current,
+                Err(err) => {
+                    loop_err = Some(err.into());
                     break;
                 }
-                match github.merge_pull_request(owner, repo_name, pr.number) {
-                    Ok(outcome) if outcome.merged => {
-                        merged_prs.push(MergedPr { branch: branch.clone(), number: pr.number, sha: outcome.sha, out_of_band: false });
+            };
+            match current.state {
+                PrState::Merged => {
+                    // Already merged out of band: count it and reconcile it away below.
+                    merged_prs.push(MergedPr { branch: branch.clone(), number: pr.number, sha: None, out_of_band: true });
+                }
+                PrState::Closed => {
+                    stopped = Some(json!({ "kind": "closed", "branch": branch, "number": pr.number, "reason": "PR is closed, not merged" }));
+                    break;
+                }
+                PrState::Open => {
+                    // Online: the previous iteration's reconcile restacked this branch
+                    // onto the merged trunk; force-push it so the PR head is `trunk +
+                    // its own commits` before GitHub recomputes readiness. Offline
+                    // skips this (no fetch, no push) and leans on GitHub's server-side
+                    // 3-way merge, which still squashes only the branch's net diff: a
+                    // non-overlapping stack merges clean, an overlapping one reads
+                    // not-ready below and the walk stops there.
+                    if i > 0 && !offline {
+                        if let Err(err) = git.push_force_with_lease(&repo.remote, branch) {
+                            loop_err = Some(Error::Usage(format!(
+                                "merged the PR(s) below, but could not force-push `{branch}` onto the merged trunk ({err}); run `stacc sync` then `stacc merge` to finish"
+                            )));
+                            break;
+                        }
                     }
-                    // 200 but not merged: a clean stop, not a silent drop.
-                    Ok(_) => {
-                        stopped = Some(json!({ "kind": "did_not_merge", "branch": branch, "number": pr.number, "reason": "GitHub accepted the request but did not merge the PR" }));
+                    let live = match poll_pr_ready(github, owner, repo_name, pr.number) {
+                        Ok(live) => live,
+                        Err(err) => {
+                            loop_err = Some(err);
+                            break;
+                        }
+                    };
+                    if !live.ready() {
+                        stopped = Some(json!({ "kind": "not_ready", "branch": branch, "number": pr.number, "mergeable_state": live.mergeable_state, "reason": "not cleanly mergeable" }));
                         break;
                     }
-                    // No longer mergeable (the head moved since the readiness read).
-                    Err(stacc_github::GitHubError::NotMergeable) => {
-                        stopped = Some(json!({ "kind": "not_mergeable", "branch": branch, "number": pr.number, "reason": "no longer mergeable (head moved or checks failed)" }));
-                        break;
-                    }
-                    Err(err) => {
-                        loop_err = Some(err.into());
-                        break;
+                    match github.merge_pull_request(owner, repo_name, pr.number) {
+                        Ok(outcome) if outcome.merged => {
+                            merged_prs.push(MergedPr { branch: branch.clone(), number: pr.number, sha: outcome.sha, out_of_band: false });
+                        }
+                        // 200 but not merged: a clean stop, not a silent drop.
+                        Ok(_) => {
+                            stopped = Some(json!({ "kind": "did_not_merge", "branch": branch, "number": pr.number, "reason": "GitHub accepted the request but did not merge the PR" }));
+                            break;
+                        }
+                        // No longer mergeable (the head moved since the readiness read).
+                        Err(stacc_github::GitHubError::NotMergeable) => {
+                            stopped = Some(json!({ "kind": "not_mergeable", "branch": branch, "number": pr.number, "reason": "no longer mergeable (head moved or checks failed)" }));
+                            break;
+                        }
+                        Err(err) => {
+                            loop_err = Some(err.into());
+                            break;
+                        }
                     }
                 }
             }
+        } else if let Some(&number) = adopted_merged.get(branch) {
+            // The adoption pass found this branch's PR already merged out of
+            // band (merged PRs are never recorded in state, so it reads as
+            // unrecorded here): count it like the `PrState::Merged` arm above
+            // and let the reconcile below drop it.
+            merged_prs.push(MergedPr { branch: branch.clone(), number, sha: None, out_of_band: true });
+        } else {
+            // No recorded PR, and the adoption pass found none on GitHub either.
+            stopped = Some(json!({ "kind": "no_pr", "branch": branch, "reason": "no PR recorded or found on GitHub; submit it first" }));
+            break;
         }
 
         // Reaching here means `branch` merged (out of band or just now): every

@@ -957,3 +957,283 @@ fn merge_of_the_whole_stack_ends_on_the_trunk_with_refs_gone() {
     // The starting branch merged and its ref is gone: merge ends on the trunk.
     assert_eq!(git_out(p, &["rev-parse", "--abbrev-ref", "HEAD"]), "main");
 }
+
+/// Track `branch` with NO recorded PR (base `base`, hash from the live ref),
+/// the shape adoption acts on: tracked in stacc, PR opened outside it.
+fn track_no_pr(p: &Path, branch: &str, base: &str) {
+    let store = StateStore::new(Git::open(p));
+    let mut state = store.load().unwrap();
+    state.branches.insert(
+        branch.to_string(),
+        BranchState {
+            base: Base {
+                name: base.to_string(),
+                hash: git_out(p, &["rev-parse", base]),
+            },
+            pr: None,
+        },
+    );
+    store.save(&state).unwrap();
+}
+
+/// Mock `GET /pulls?head=stacc-sandbox:{branch}&state=all` (the adoption
+/// lookup) returning `body`.
+fn mock_pr_by_head(server: &MockServer, branch: &str, body: serde_json::Value) {
+    let head = format!("stacc-sandbox:{branch}");
+    server.mock(move |w, t| {
+        w.method(Method::GET)
+            .path("/repos/stacc-sandbox/example/pulls")
+            .query_param("head", &head)
+            .query_param("state", "all");
+        t.status(200).json_body(body.clone());
+    });
+}
+
+#[test]
+fn merge_adopts_a_gh_created_open_pr_and_merges_it() {
+    let tmp = repo();
+    let p = tmp.path();
+    // `feature` is tracked but its PR (#5) was opened with gh: no record in state.
+    run_git(p, &["checkout", "-q", "-b", "feature"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "f1"]);
+    track_no_pr(p, "feature", "main");
+
+    let server = MockServer::start();
+    let base = "/repos/stacc-sandbox/example";
+    server.mock(|w, t| {
+        w.method(Method::GET).path(format!("{base}/branches/main/protection"));
+        t.status(404).json_body(serde_json::json!({ "message": "x" }));
+    });
+    mock_pr_by_head(
+        &server,
+        "feature",
+        serde_json::json!([{
+            "number": 5, "html_url": "https://github.com/stacc-sandbox/example/pull/5",
+            "state": "open", "merged_at": null,
+        }]),
+    );
+    server.mock(|w, t| {
+        w.method(Method::GET).path(format!("{base}/pulls/5"));
+        t.status(200).json_body(pr_open(5, "clean"));
+    });
+    let merge5 = server.mock(|w, t| {
+        w.method(Method::PUT).path(format!("{base}/pulls/5/merge"));
+        t.status(200).json_body(serde_json::json!({ "merged": true }));
+    });
+
+    let out = stacc_env(
+        p,
+        &["merge", "--offline", "--format", "json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    // The whole point of adoption: no prior `stacc sync`/`submit` required.
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains(r#""number":5"#), "adopted PR merged: {s}");
+    assert!(s.contains(r#""out_of_band":false"#), "merged by us, not out of band: {s}");
+    assert!(s.contains(r#""cleaned":["feature"]"#), "got: {s}");
+    merge5.assert();
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("adopted PR #5 for `feature`"),
+        "adoption surfaced: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!ref_exists(p, "feature"), "merged ref must be gone");
+    let log = String::from_utf8_lossy(&stacc(p, &["log", "--format", "json"]).stdout).into_owned();
+    assert!(!log.contains(r#""name":"feature""#), "feature dropped from state: {log}");
+}
+
+#[test]
+fn merge_retargets_an_adopted_mid_chain_pr_to_the_trunk() {
+    let tmp = repo();
+    let p = tmp.path();
+    // main -> bottom (recorded #1) -> top (gh-created #2, unrecorded). Adoption
+    // must land BEFORE the retarget pass, so #2 is pointed at the trunk and
+    // survives bottom's branch deletion on merge.
+    run_git(p, &["checkout", "-q", "-b", "bottom"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "b"]);
+    run_git(p, &["checkout", "-q", "-b", "top"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "t"]);
+    track_pr(p, "bottom", "main", 1);
+    track_no_pr(p, "top", "bottom");
+
+    let server = MockServer::start();
+    let base = "/repos/stacc-sandbox/example";
+    server.mock(|w, t| {
+        w.method(Method::GET).path(format!("{base}/branches/main/protection"));
+        t.status(404).json_body(serde_json::json!({ "message": "x" }));
+    });
+    mock_pr_by_head(
+        &server,
+        "top",
+        serde_json::json!([{
+            "number": 2, "html_url": "u", "state": "open", "merged_at": null,
+        }]),
+    );
+    server.mock(|w, t| {
+        w.method(Method::GET).path(format!("{base}/pulls/1"));
+        t.status(200).json_body(pr_open(1, "clean"));
+    });
+    server.mock(|w, t| {
+        w.method(Method::GET).path(format!("{base}/pulls/2"));
+        t.status(200).json_body(pr_open(2, "clean"));
+    });
+    let patch2 = server.mock(|w, t| {
+        w.method(Method::PATCH)
+            .path(format!("{base}/pulls/2"))
+            .json_body(serde_json::json!({ "base": "main" }));
+        t.status(200).json_body(pr_open(2, "clean"));
+    });
+    let merge1 = server.mock(|w, t| {
+        w.method(Method::PUT).path(format!("{base}/pulls/1/merge"));
+        t.status(200).json_body(serde_json::json!({ "merged": true }));
+    });
+    let merge2 = server.mock(|w, t| {
+        w.method(Method::PUT).path(format!("{base}/pulls/2/merge"));
+        t.status(200).json_body(serde_json::json!({ "merged": true }));
+    });
+
+    run_git(p, &["checkout", "-q", "top"]);
+    let out = stacc_env(
+        p,
+        &["merge", "--offline", "--format", "json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains(r#""number":1"#) && s.contains(r#""number":2"#), "got: {s}");
+    // The adopted PR went through the same up-front retarget as a recorded one.
+    patch2.assert();
+    merge1.assert();
+    merge2.assert();
+}
+
+#[test]
+fn merge_reconciles_an_adopted_out_of_band_merged_pr() {
+    let tmp = repo();
+    let p = tmp.path();
+    // `feature`'s PR (#7) was opened AND merged outside stacc: nothing recorded.
+    run_git(p, &["checkout", "-q", "-b", "feature"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "f1"]);
+    track_no_pr(p, "feature", "main");
+
+    let server = MockServer::start();
+    let base = "/repos/stacc-sandbox/example";
+    server.mock(|w, t| {
+        w.method(Method::GET).path(format!("{base}/branches/main/protection"));
+        t.status(404).json_body(serde_json::json!({ "message": "x" }));
+    });
+    // The list endpoint reports the merge via `merged_at`. There is no
+    // GET /pulls/7 mock: the walk must trust the adoption lookup, not re-query.
+    mock_pr_by_head(
+        &server,
+        "feature",
+        serde_json::json!([{
+            "number": 7, "html_url": "u", "state": "closed",
+            "merged_at": "2026-06-10T18:00:00Z",
+        }]),
+    );
+
+    let out = stacc_env(
+        p,
+        &["merge", "--offline", "--format", "json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains(r#""number":7"#), "got: {s}");
+    assert!(s.contains(r#""out_of_band":true"#), "counted like a merged-out-of-band PR: {s}");
+    assert!(s.contains(r#""cleaned":["feature"]"#), "got: {s}");
+    assert!(!ref_exists(p, "feature"), "merged ref must be gone");
+    let log = String::from_utf8_lossy(&stacc(p, &["log", "--format", "json"]).stdout).into_owned();
+    assert!(!log.contains(r#""name":"feature""#), "feature dropped from state: {log}");
+}
+
+#[test]
+fn merge_stops_with_no_pr_when_github_has_none() {
+    let tmp = repo();
+    let p = tmp.path();
+    run_git(p, &["checkout", "-q", "-b", "feature"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "f1"]);
+    track_no_pr(p, "feature", "main");
+
+    let server = MockServer::start();
+    let base = "/repos/stacc-sandbox/example";
+    server.mock(|w, t| {
+        w.method(Method::GET).path(format!("{base}/branches/main/protection"));
+        t.status(404).json_body(serde_json::json!({ "message": "x" }));
+    });
+    mock_pr_by_head(&server, "feature", serde_json::json!([]));
+
+    let out = stacc_env(
+        p,
+        &["merge", "--offline", "--format", "json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains(r#""kind":"no_pr""#), "still stops with no_pr: {s}");
+    assert!(s.contains(r#""merged":[]"#), "nothing merged: {s}");
+    assert!(ref_exists(p, "feature"), "branch kept");
+    let state = StateStore::new(Git::open(p)).load().unwrap();
+    assert!(state.branches["feature"].pr.is_none(), "state untouched");
+}
+
+#[test]
+fn merge_does_not_adopt_a_closed_unmerged_pr() {
+    let tmp = repo();
+    let p = tmp.path();
+    run_git(p, &["checkout", "-q", "-b", "feature"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "f1"]);
+    track_no_pr(p, "feature", "main");
+
+    // Closed without merging: submit should open a fresh PR for this head
+    // later, so merge must not resurrect the closed one into state (sync
+    // parity). No merge mock exists, so adopting it would error loudly.
+    let server = MockServer::start();
+    let base = "/repos/stacc-sandbox/example";
+    server.mock(|w, t| {
+        w.method(Method::GET).path(format!("{base}/branches/main/protection"));
+        t.status(404).json_body(serde_json::json!({ "message": "x" }));
+    });
+    mock_pr_by_head(
+        &server,
+        "feature",
+        serde_json::json!([{
+            "number": 9, "html_url": "u", "state": "closed", "merged_at": null,
+        }]),
+    );
+
+    let out = stacc_env(
+        p,
+        &["merge", "--offline", "--format", "json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains(r#""kind":"no_pr""#), "closed PR reads as no PR: {s}");
+    assert!(s.contains(r#""merged":[]"#), "nothing merged: {s}");
+    assert!(ref_exists(p, "feature"), "branch kept");
+    let state = StateStore::new(Git::open(p)).load().unwrap();
+    assert!(state.branches["feature"].pr.is_none(), "no PR recorded for a closed PR");
+}
