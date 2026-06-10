@@ -234,6 +234,19 @@ pub struct CreateArgs {
     /// Commit message for staged changes (defaults to the branch name).
     #[arg(long, short)]
     pub message: Option<String>,
+    /// Stage all changes, tracked and untracked (`git add -A`), before the
+    /// branch-create commit.
+    #[arg(long, short = 'a')]
+    pub all: bool,
+    /// Base the new branch on `<branch>` instead of the current branch.
+    /// Mutually exclusive with `--insert`.
+    #[arg(long, value_name = "BRANCH")]
+    pub onto: Option<String>,
+    /// Insert the new branch between the current branch and its children: the
+    /// current branch's existing children are reparented onto the new branch
+    /// and restacked. Mutually exclusive with `--onto`.
+    #[arg(long)]
+    pub insert: bool,
 }
 
 /// Arguments for `stacc modify`.
@@ -246,6 +259,24 @@ pub struct ModifyArgs {
     /// subject when amending.
     #[arg(long, short)]
     pub message: Option<String>,
+    /// Stage all changes, tracked and untracked (`git add -A`), before
+    /// amending or committing.
+    #[arg(long, short = 'a')]
+    pub all: bool,
+    /// Apply the staged changes into the named downstack branch's tip instead
+    /// of the current branch, replaying the commits above it and restacking.
+    #[arg(long, value_name = "BRANCH")]
+    pub into: Option<String>,
+    /// Reword the tip's commit message only, with no content change. Never
+    /// opens an editor: requires `--message` (an interactive editor is a
+    /// possible future convenience) and refuses staged changes.
+    #[arg(long)]
+    pub edit: bool,
+    /// Use only the staged changes under these paths (comma-separated; a path
+    /// matches literally or as a directory prefix); the rest stay staged.
+    /// Path-granular for now; hunk-granular selection is a planned follow-up.
+    #[arg(long, value_name = "PATHS", value_delimiter = ',')]
+    pub patch: Vec<String>,
 }
 
 /// Arguments for `stacc up` / `stacc down`: how many levels to move.

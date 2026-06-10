@@ -282,6 +282,34 @@ impl Git {
         self.run(&["checkout", "-b", branch]).map(|_| ())
     }
 
+    /// Create `branch` off `start` and switch to it
+    /// (`git checkout -b <branch> <start>`).
+    pub fn checkout_new_branch_at(&self, branch: &str, start: &str) -> Result<(), GitError> {
+        self.run(&["checkout", "-b", branch, start]).map(|_| ())
+    }
+
+    /// Stage every change in the working tree, tracked and untracked,
+    /// including deletions (`git add -A`).
+    pub fn stage_all(&self) -> Result<(), GitError> {
+        self.run(&["add", "-A"]).map(|_| ())
+    }
+
+    /// Stage the changes under `paths`, including deletions and untracked
+    /// files (`git add -A -- <paths>`).
+    pub fn stage_paths(&self, paths: &[String]) -> Result<(), GitError> {
+        let mut args = vec!["add", "-A", "--"];
+        args.extend(paths.iter().map(String::as_str));
+        self.run(&args).map(|_| ())
+    }
+
+    /// Unstage the changes under `paths`, leaving the working tree untouched
+    /// (`git reset -q HEAD -- <paths>`).
+    pub fn unstage_paths(&self, paths: &[String]) -> Result<(), GitError> {
+        let mut args = vec!["reset", "-q", "HEAD", "--"];
+        args.extend(paths.iter().map(String::as_str));
+        self.run(&args).map(|_| ())
+    }
+
     /// Commit the staged changes with `message` (`git commit -m`).
     pub fn commit(&self, message: &str) -> Result<(), GitError> {
         self.run(&["commit", "-m", message]).map(|_| ())

@@ -305,3 +305,125 @@ fn modify_amend_with_nothing_staged_errors() {
         String::from_utf8_lossy(&out.stdout)
     );
 }
+
+#[test]
+fn modify_all_stages_everything_then_amends() {
+    let tmp = stack_main_a_b();
+    let p = tmp.path();
+    std::fs::write(p.join("a.txt"), "a-edited\n").expect("write"); // tracked, unstaged
+    std::fs::write(p.join("x.txt"), "x\n").expect("write"); // untracked
+
+    let out = stacc(p, &["modify", "--all", "--format", "json"]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains(r#""amended":true"#), "got: {s}");
+    assert!(s.contains(r#""restacked":["b"]"#), "got: {s}");
+    // Both the tracked edit and the untracked file landed in a's tip, and the
+    // working tree is clean.
+    assert_eq!(git_out(p, &["show", "a:a.txt"]), "a-edited");
+    assert!(git_ok(p, &["cat-file", "-e", "a:x.txt"]));
+    assert_eq!(git_out(p, &["status", "--porcelain"]), "");
+    assert_eq!(current_branch(p), "a");
+}
+
+#[test]
+fn modify_into_lands_staged_changes_in_a_downstack_tip() {
+    let tmp = stack_main_a_b();
+    let p = tmp.path();
+    run_git(p, &["checkout", "-q", "b"]);
+    let a_before = git_out(p, &["rev-parse", "a"]);
+    std::fs::write(p.join("a.txt"), "a-into\n").expect("write");
+    run_git(p, &["add", "a.txt"]);
+
+    let out = stacc(p, &["modify", "--into", "a", "--format", "json"]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains(r#""op":"modify""#), "got: {s}");
+    assert!(s.contains(r#""into":"a""#), "got: {s}");
+    assert!(s.contains(r#""applied":1"#), "got: {s}");
+    // The change landed in a's tip and is carried through b's replayed history.
+    assert_ne!(git_out(p, &["rev-parse", "a"]), a_before);
+    assert_eq!(git_out(p, &["show", "a:a.txt"]), "a-into");
+    assert_eq!(git_out(p, &["show", "b:a.txt"]), "a-into");
+    // a's commit message survived the rewrite, b still descends a, and the
+    // working tree is clean (the staged change now reads as committed).
+    assert_eq!(git_out(p, &["log", "-1", "--format=%s", "a"]), "a1");
+    assert!(git_ok(p, &["merge-base", "--is-ancestor", "a", "b"]));
+    assert_eq!(current_branch(p), "b");
+    assert_eq!(git_out(p, &["status", "--porcelain"]), "");
+}
+
+#[test]
+fn modify_into_a_non_downstack_branch_errors() {
+    let tmp = stack_main_a_b();
+    let p = tmp.path();
+    // On a; b is in a's UPstack, not its downstack.
+    let out = stacc(p, &["modify", "--into", "b", "--format", "json"]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("downstack"),
+        "got: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
+fn modify_edit_rewords_without_changing_the_tree() {
+    let tmp = stack_main_a_b();
+    let p = tmp.path();
+    let tree_before = git_out(p, &["rev-parse", "a^{tree}"]);
+
+    let out = stacc(p, &["modify", "--edit", "-m", "a1 reworded", "--format", "json"]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains(r#""restacked":["b"]"#), "got: {s}");
+    assert_eq!(git_out(p, &["log", "-1", "--format=%s", "a"]), "a1 reworded");
+    assert_eq!(git_out(p, &["rev-parse", "a^{tree}"]), tree_before);
+}
+
+#[test]
+fn modify_edit_without_message_errors() {
+    let tmp = stack_main_a_b();
+    let p = tmp.path();
+    let out = stacc(p, &["modify", "--edit", "--format", "json"]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("--message"),
+        "got: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
+fn modify_patch_includes_only_matching_paths_and_keeps_the_rest_staged() {
+    let tmp = stack_main_a_b();
+    let p = tmp.path();
+    std::fs::write(p.join("a.txt"), "a-patched\n").expect("write");
+    std::fs::write(p.join("x.txt"), "x\n").expect("write");
+    run_git(p, &["add", "a.txt", "x.txt"]);
+
+    let out = stacc(p, &["modify", "--patch", "a.txt", "--format", "json"]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // a.txt's change was amended in; x.txt is NOT in the commit and is still
+    // staged afterwards.
+    assert_eq!(git_out(p, &["show", "a:a.txt"]), "a-patched");
+    assert!(!git_ok(p, &["cat-file", "-e", "a:x.txt"]));
+    assert_eq!(git_out(p, &["diff", "--cached", "--name-only"]), "x.txt");
+    assert_eq!(current_branch(p), "a");
+}
