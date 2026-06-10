@@ -239,6 +239,54 @@ impl GitHub {
         Ok(raw.into())
     }
 
+    /// Find the open pull request whose head is `owner:branch`, if one exists
+    /// (`GET /repos/{owner}/{repo}/pulls?head={owner}:{branch}&state=open`).
+    /// Returns the first match, or `None` when no open PR has that head. Used
+    /// to adopt PRs created outside stacc (e.g. via `gh` before a migration).
+    pub fn pull_request_for_branch(
+        &self,
+        owner: &str,
+        repo: &str,
+        branch: &str,
+    ) -> Result<Option<PullRequest>, GitHubError> {
+        self.find_pull_request_by_head(owner, repo, branch, None)
+    }
+
+    /// Like [`pull_request_for_branch`](Self::pull_request_for_branch) but caps
+    /// this single call at `timeout`, mirroring
+    /// [`get_pull_request_within`](Self::get_pull_request_within) for callers
+    /// working under a wall-clock budget.
+    pub fn pull_request_for_branch_within(
+        &self,
+        owner: &str,
+        repo: &str,
+        branch: &str,
+        timeout: Duration,
+    ) -> Result<Option<PullRequest>, GitHubError> {
+        self.find_pull_request_by_head(owner, repo, branch, Some(timeout))
+    }
+
+    fn find_pull_request_by_head(
+        &self,
+        owner: &str,
+        repo: &str,
+        branch: &str,
+        timeout: Option<Duration>,
+    ) -> Result<Option<PullRequest>, GitHubError> {
+        let url = format!("{}/repos/{owner}/{repo}/pulls", self.base_url);
+        let mut request = self
+            .request("GET", &url)
+            .query("head", &format!("{owner}:{branch}"))
+            .query("state", "open")
+            .query("per_page", "1");
+        if let Some(timeout) = timeout {
+            request = request.timeout(timeout);
+        }
+        let response = request.call().map_err(GitHubError::from_ureq)?;
+        let raws: Vec<RawPullRequest> = response.into_json()?;
+        Ok(raws.into_iter().next().map(PullRequest::from))
+    }
+
     /// Like [`get_pull_request`](Self::get_pull_request) but caps this single
     /// call at `timeout`, so a caller polling several PRs under a wall-clock
     /// budget can bound in-flight time, not just when it stops starting calls.
@@ -464,6 +512,53 @@ mod tests {
 
         let gh = GitHub::with_base_url("t", server.base_url());
         assert_eq!(gh.get_pull_request("o", "r", 7).unwrap().state, PrState::Merged);
+    }
+
+    #[test]
+    fn pull_request_for_branch_finds_the_open_pr() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(httpmock::Method::GET)
+                .path("/repos/o/r/pulls")
+                .query_param("head", "o:feature")
+                .query_param("state", "open")
+                .query_param("per_page", "1");
+            then.status(200).json_body(json!([{
+                "number": 12,
+                "html_url": "https://github.com/o/r/pull/12",
+                "state": "open",
+                "merged": false,
+            }]));
+        });
+
+        let gh = GitHub::with_base_url("t", server.base_url());
+        let pr = gh
+            .pull_request_for_branch("o", "r", "feature")
+            .unwrap()
+            .expect("an open PR for the head");
+        assert_eq!(pr.number, 12);
+        assert_eq!(pr.url, "https://github.com/o/r/pull/12");
+        assert_eq!(pr.state, PrState::Open);
+        mock.assert();
+    }
+
+    #[test]
+    fn pull_request_for_branch_is_none_when_no_pr_matches() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(httpmock::Method::GET)
+                .path("/repos/o/r/pulls")
+                .query_param("head", "o:feature");
+            then.status(200).json_body(json!([]));
+        });
+
+        let gh = GitHub::with_base_url("t", server.base_url());
+        // Exercise the budgeted variant; it shares the lookup with the plain one.
+        let pr = gh
+            .pull_request_for_branch_within("o", "r", "feature", Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(pr, None);
+        mock.assert();
     }
 
     #[test]

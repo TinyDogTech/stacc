@@ -585,8 +585,8 @@ pub fn submit(args: &SubmitArgs, format: OutputFormat) -> Result<(), Error> {
         .ok_or_else(|| Error::Usage(format!("remote `{}` is not a GitHub URL", repo.remote)))?;
     let github = GitHub::from_env()?;
 
-    // (branch, created?, number, url) for each branch we acted on.
-    let mut results: Vec<(String, bool, u64, String)> = Vec::new();
+    // (branch, action, number, url) for each branch we acted on.
+    let mut results: Vec<(String, PrAction, u64, String)> = Vec::new();
     // Branches passed over by --update-only (no recorded PR to update).
     let mut skipped: Vec<String> = Vec::new();
     // The PR records to write back, applied together in one transactional update
@@ -603,17 +603,34 @@ pub fn submit(args: &SubmitArgs, format: OutputFormat) -> Result<(), Error> {
             .name
             .clone();
 
-        let existing = state
+        let recorded = state
             .branches
             .get(branch)
             .and_then(|b| b.pr.as_ref().map(|pr| pr.number));
 
         // --update-only: a branch with no PR is skipped entirely (not even
         // pushed), and reported, instead of getting a new PR.
-        if args.update_only && existing.is_none() {
+        if args.update_only && recorded.is_none() {
             skipped.push(branch.clone());
             continue;
         }
+
+        // Adoption: a branch with no recorded PR may still have one open on
+        // GitHub (created by gh/graphite before the stack migrated to stacc).
+        // Look it up by head before creating, so submit reconciles the existing
+        // PR instead of hitting GitHub's 422 duplicate error. A failed lookup
+        // falls through to create; a real problem (auth, network) surfaces there.
+        let mut adopted = false;
+        let existing = match recorded {
+            Some(number) => Some(number),
+            None => match github.pull_request_for_branch(&owner, &repo_name, branch) {
+                Ok(Some(found)) => {
+                    adopted = true;
+                    Some(found.number)
+                }
+                Ok(None) | Err(_) => None,
+            },
+        };
 
         git.push_force_with_lease(&repo.remote, branch)?;
 
@@ -661,7 +678,14 @@ pub fn submit(args: &SubmitArgs, format: OutputFormat) -> Result<(), Error> {
             },
         ));
 
-        results.push((branch.clone(), existing.is_none(), pr.number, pr.url));
+        let action = if adopted {
+            PrAction::Adopted
+        } else if recorded.is_none() {
+            PrAction::Created
+        } else {
+            PrAction::Updated
+        };
+        results.push((branch.clone(), action, pr.number, pr.url));
     }
 
     store.update(|state| {
@@ -677,20 +701,30 @@ pub fn submit(args: &SubmitArgs, format: OutputFormat) -> Result<(), Error> {
         OutputFormat::Json => {
             let list: Vec<serde_json::Value> = results
                 .iter()
-                .map(|(branch, created, number, url)| {
-                    json!({
-                        "status": if *created { "created" } else { "updated" },
+                .map(|(branch, action, number, url)| {
+                    // An adopted PR took the update path; the extra flag says
+                    // stacc discovered (rather than created) the record.
+                    let mut entry = json!({
+                        "status": if *action == PrAction::Created { "created" } else { "updated" },
                         "branch": branch,
                         "number": number,
                         "url": url,
-                    })
+                    });
+                    if *action == PrAction::Adopted {
+                        entry["adopted"] = json!(true);
+                    }
+                    entry
                 })
                 .collect();
             println!("{}", json!({ "submitted": list, "skipped": skipped }));
         }
         OutputFormat::Pretty => {
-            for (branch, created, number, url) in &results {
-                let verb = if *created { "Created" } else { "Updated" };
+            for (branch, action, number, url) in &results {
+                let verb = match action {
+                    PrAction::Created => "Created",
+                    PrAction::Updated => "Updated",
+                    PrAction::Adopted => "Adopted",
+                };
                 println!("{verb} PR #{number} for {branch}: {url}");
             }
             for branch in &skipped {
@@ -699,6 +733,15 @@ pub fn submit(args: &SubmitArgs, format: OutputFormat) -> Result<(), Error> {
         }
     }
     Ok(())
+}
+
+/// How `submit` handled one branch's PR: created fresh, updated a recorded one,
+/// or adopted an open PR that existed on GitHub but not yet in stacc state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrAction {
+    Created,
+    Updated,
+    Adopted,
 }
 
 /// Resolve a `--description` value: `@path` reads a file, anything else is literal.

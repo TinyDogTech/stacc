@@ -169,6 +169,104 @@ fn submit_updates_existing_pr() {
 }
 
 #[test]
+fn submit_adopts_an_existing_pr_by_head() {
+    let (tmp, _bare) = setup();
+    assert!(stacc(tmp.path(), &["init"]).status.success());
+    run_git(tmp.path(), &["checkout", "-q", "-b", "feature"]);
+    run_git(tmp.path(), &["commit", "-q", "--allow-empty", "-m", "Add feature"]);
+    assert!(stacc(tmp.path(), &["track"]).status.success());
+    // No PR recorded in state, but an open PR with this head exists on GitHub
+    // (created by gh/graphite before the stack migrated to stacc).
+
+    let server = MockServer::start();
+    let lookup = server.mock(|when, then| {
+        when.method(httpmock::Method::GET)
+            .path("/repos/TinyDogTech/stacc/pulls")
+            .query_param("head", "TinyDogTech:feature")
+            .query_param("state", "open");
+        then.status(200).json_body(serde_json::json!([pr_body(55)]));
+    });
+    // The adopted PR takes the update path.
+    let update = server.mock(|when, then| {
+        when.method(httpmock::Method::PATCH)
+            .path("/repos/TinyDogTech/stacc/pulls/55");
+        then.status(200).json_body(pr_body(55));
+    });
+    // Creating would duplicate the PR; this mock must never fire.
+    let create = server.mock(|when, then| {
+        when.method(httpmock::Method::POST)
+            .path("/repos/TinyDogTech/stacc/pulls");
+        then.status(422)
+            .json_body(serde_json::json!({ "message": "A pull request already exists" }));
+    });
+
+    let out = stacc_env(
+        tmp.path(),
+        &["submit", "--format", "json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains(r#""status":"updated""#), "adoption takes the update path: {s}");
+    assert!(s.contains(r#""adopted":true"#), "got: {s}");
+    assert!(s.contains(r#""number":55"#), "got: {s}");
+    lookup.assert();
+    update.assert();
+    create.assert_hits(0);
+
+    // The adopted number is recorded in state for the next submit/log.
+    let show = Command::new("git")
+        .arg("-C")
+        .arg(tmp.path())
+        .args(["show", "refs/stacc/data:branches/feature"])
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&show.stdout).contains(r#""number": 55"#));
+
+    // A second submit reads the recorded number: update again, no new lookup.
+    let out = stacc_env(
+        tmp.path(),
+        &["submit", "--format", "json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(!s.contains(r#""adopted""#), "a recorded PR is a plain update: {s}");
+    lookup.assert_hits(1);
+}
+
+#[test]
+fn submit_reports_adoption_in_pretty_output() {
+    let (tmp, _bare) = setup();
+    assert!(stacc(tmp.path(), &["init"]).status.success());
+    run_git(tmp.path(), &["checkout", "-q", "-b", "feature"]);
+    run_git(tmp.path(), &["commit", "-q", "--allow-empty", "-m", "Add feature"]);
+    assert!(stacc(tmp.path(), &["track"]).status.success());
+
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(httpmock::Method::GET)
+            .path("/repos/TinyDogTech/stacc/pulls")
+            .query_param("head", "TinyDogTech:feature");
+        then.status(200).json_body(serde_json::json!([pr_body(56)]));
+    });
+    server.mock(|when, then| {
+        when.method(httpmock::Method::PATCH)
+            .path("/repos/TinyDogTech/stacc/pulls/56");
+        then.status(200).json_body(pr_body(56));
+    });
+
+    let out = stacc_env(
+        tmp.path(),
+        &["submit"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("Adopted PR #56 for feature"), "got: {s}");
+}
+
+#[test]
 fn submit_requires_tracked_branch() {
     let (tmp, _bare) = setup();
     assert!(stacc(tmp.path(), &["init"]).status.success());
