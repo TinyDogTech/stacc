@@ -629,6 +629,18 @@ impl Git {
         matches!(self.ref_commit(name), Ok(None))
     }
 
+    /// Whether `name` is usable as a branch name, per
+    /// `git check-ref-format --branch`. The exit code is the answer (any
+    /// rejection, including a name git parses as an option, reads as invalid);
+    /// only a failure to spawn git is an error.
+    pub fn valid_branch_name(&self, name: &str) -> Result<bool, GitError> {
+        let output = self
+            .command(&["check-ref-format", "--branch", name])
+            .output()
+            .map_err(|source| GitError::Spawn { source })?;
+        Ok(output.status.success())
+    }
+
     /// Read the blob at `<rev>:<path>`, or `None` if it is not present.
     pub fn read_blob(&self, rev: &str, path: &str) -> Result<Option<String>, GitError> {
         let spec = format!("{rev}:{path}");
@@ -1252,6 +1264,31 @@ mod tests {
         assert_eq!(repo.rev_parse("side").unwrap(), first);
         repo.force_branch("side", &second).unwrap();
         assert_eq!(repo.rev_parse("side").unwrap(), second);
+    }
+
+    #[test]
+    fn valid_branch_name_accepts_good_and_rejects_bad_names() {
+        let (_tmp, repo) = init_repo();
+        assert!(repo.valid_branch_name("feature/foo-1").unwrap());
+        assert!(!repo.valid_branch_name("has space").unwrap());
+        assert!(!repo.valid_branch_name("bad..name").unwrap());
+        assert!(!repo.valid_branch_name("-leading-dash").unwrap());
+        assert!(!repo.valid_branch_name("").unwrap());
+    }
+
+    #[test]
+    fn update_ref_with_empty_old_asserts_creation() {
+        // git's documented contract: an empty old value means the ref must NOT
+        // exist, so `update_ref(..., Some(""))` is an atomic create. `split`
+        // leans on this to create new branch refs without a clobber window.
+        let (_tmp, repo) = init_repo();
+        let head = repo.rev_parse("HEAD").unwrap();
+        repo.update_ref("refs/heads/fresh", &head, Some("")).unwrap();
+        assert_eq!(repo.rev_parse("fresh").unwrap(), head);
+        // Creating over an existing ref fails instead of moving it.
+        let err = repo.update_ref("refs/heads/fresh", &head, Some(""));
+        assert!(err.is_err(), "create-assert must refuse an existing ref");
+        assert_eq!(repo.rev_parse("fresh").unwrap(), head);
     }
 
     #[test]
