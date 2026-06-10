@@ -210,17 +210,28 @@ pub fn untrack(args: &UntrackArgs, format: OutputFormat) -> Result<(), Error> {
     Ok(())
 }
 
-/// `stacc create`: create a new branch stacked on the current one, commit any
-/// staged changes, and track it. The base is the current branch (the trunk when
-/// starting a stack). Refuses only on a detached HEAD.
+/// `stacc create`: create a new branch stacked on the current one (or on
+/// `--onto <branch>`), commit any staged changes (`--all` stages everything
+/// first), and track it. `--insert` splices the new branch between the current
+/// branch and its existing children, reparenting and restacking them. Refuses
+/// only on a detached HEAD (unless `--onto` names the base explicitly).
+// A cohesive validate -> branch -> track -> commit -> (insert-restack) -> report
+// sequence; splitting it would only trade this lint for too_many_arguments.
+#[allow(clippy::too_many_lines)]
 pub fn create(args: &CreateArgs, format: OutputFormat) -> Result<(), Error> {
     let git = Git::open(".");
     let store = StateStore::new(git.clone());
-    let state = store.load()?;
+    let mut state = store.load()?;
     let repo = state
         .repo
         .clone()
         .ok_or_else(|| Error::Usage("stacc is not initialized; run `stacc init` first".into()))?;
+
+    if args.insert && args.onto.is_some() {
+        return Err(Error::Usage(
+            "--insert and --onto are mutually exclusive: --insert splices the new branch above the current one, --onto bases it elsewhere".into(),
+        ));
+    }
 
     // Refuse names that would shadow the trunk or clobber a tracked branch
     // (which would silently drop its recorded PR), before mutating anything.
@@ -237,17 +248,55 @@ pub fn create(args: &CreateArgs, format: OutputFormat) -> Result<(), Error> {
         )));
     }
 
-    let base = git.current_branch().map_err(|_| {
-        Error::Usage(
-            "cannot create a branch from a detached HEAD; check out a branch first".into(),
-        )
-    })?;
+    let base = match &args.onto {
+        Some(onto) => onto.clone(),
+        None => git.current_branch().map_err(|_| {
+            Error::Usage(
+                "cannot create a branch from a detached HEAD; check out a branch first, or pass --onto".into(),
+            )
+        })?,
+    };
     let base_hash = git.rev_parse(&base)?;
 
-    git.checkout_new_branch(&args.name)?;
+    // --insert: the base's existing children move onto the new branch. Capture
+    // them and fail fast on a worktree conflict BEFORE mutating anything.
+    let children = if args.insert {
+        ops::children(&state.branches, &base)
+    } else {
+        Vec::new()
+    };
+    if !children.is_empty() {
+        let subtrees: Vec<String> = ops::upstack_order(&state.branches, &base)
+            .into_iter()
+            .skip(1)
+            .collect();
+        operations::guard_worktree(&git, &subtrees)?;
+    }
 
-    // Track the branch before committing so a failing commit (e.g. a pre-commit
-    // hook) can't strand it untracked; the staged changes survive for a retry.
+    if args.all {
+        git.stage_all()?;
+    }
+
+    match &args.onto {
+        Some(onto) => git.checkout_new_branch_at(&args.name, onto)?,
+        None => git.checkout_new_branch(&args.name)?,
+    }
+
+    // Track the branch (and, under --insert, reparent the base's children onto
+    // it; their base.hash is kept, it marks where each child's own commits
+    // start) before committing, so a failing commit (e.g. a pre-commit hook)
+    // can't strand it untracked; the staged changes survive for a retry.
+    let apply_insert = {
+        let name = args.name.clone();
+        let children = children.clone();
+        move |state: &mut stacc_state::State| {
+            for child in &children {
+                if let Some(b) = state.branches.get_mut(child) {
+                    b.base.name.clone_from(&name);
+                }
+            }
+        }
+    };
     store
         .update(|state| {
             state.branches.insert(
@@ -260,6 +309,7 @@ pub fn create(args: &CreateArgs, format: OutputFormat) -> Result<(), Error> {
                     pr: None,
                 },
             );
+            apply_insert(state);
             Ok(())
         })
         .map_err(|e| {
@@ -268,6 +318,17 @@ pub fn create(args: &CreateArgs, format: OutputFormat) -> Result<(), Error> {
                 args.name
             ))
         })?;
+    state.branches.insert(
+        args.name.clone(),
+        BranchState {
+            base: Base {
+                name: base.clone(),
+                hash: base_hash.clone(),
+            },
+            pr: None,
+        },
+    );
+    apply_insert(&mut state);
 
     let (committed, sha) = if git.has_staged_changes()? {
         let message = args.message.clone().unwrap_or_else(|| args.name.clone());
@@ -276,6 +337,31 @@ pub fn create(args: &CreateArgs, format: OutputFormat) -> Result<(), Error> {
     } else {
         (false, None)
     };
+
+    // --insert: restack the reparented children's subtrees onto the new branch's
+    // tip. A conflict resumes via the plain Restack continuation; the reparent
+    // is already saved, so the re-applied delta only keeps a CAS retry honest.
+    let mut restacked = Vec::new();
+    if !children.is_empty() {
+        let order: Vec<String> = ops::upstack_order(&state.branches, &args.name)
+            .into_iter()
+            .skip(1)
+            .collect();
+        restacked = operations::restack_with_recovery(
+            &git,
+            &store,
+            &mut state,
+            &repo,
+            &order,
+            |remaining| stacc_core::recovery::Operation::Restack { remaining },
+            &apply_insert,
+        )?;
+        operations::clear_conflict_artifacts(&git);
+        // Best-effort: the engine leaves HEAD on the last child it rebased.
+        if let Err(err) = git.checkout(&args.name) {
+            eprintln!("warning: could not switch back to `{}`: {err}", args.name);
+        }
+    }
 
     match format {
         OutputFormat::Json => println!(
@@ -286,6 +372,8 @@ pub fn create(args: &CreateArgs, format: OutputFormat) -> Result<(), Error> {
                 "base": base,
                 "committed": committed,
                 "sha": sha,
+                "reparented": children,
+                "restacked": restacked,
             })
         ),
         OutputFormat::Pretty => {
@@ -295,6 +383,12 @@ pub fn create(args: &CreateArgs, format: OutputFormat) -> Result<(), Error> {
                 ""
             };
             println!("Created {} (base: {base}){suffix}", args.name);
+            if !children.is_empty() {
+                println!("  reparented onto {}: {}", args.name, children.join(", "));
+            }
+            for name in &restacked {
+                println!("Restacked {name}");
+            }
         }
     }
     Ok(())

@@ -503,7 +503,8 @@ fn parse_by_file_specs(specs: &[String]) -> Result<Vec<FileGroup>, Error> {
 /// Whether `path` belongs to `pathspec`: a literal match, or a directory
 /// prefix (`src` matches `src/a.rs`). Deliberately not gitignore-style
 /// globbing: literal-or-prefix keeps the partition decidable and predictable.
-fn spec_matches(pathspec: &str, path: &str) -> bool {
+/// Shared with `modify --patch`, whose path selection uses the same rule.
+pub(crate) fn spec_matches(pathspec: &str, path: &str) -> bool {
     path == pathspec
         || path
             .strip_prefix(pathspec)

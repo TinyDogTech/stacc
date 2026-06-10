@@ -5,10 +5,12 @@ use std::collections::BTreeSet;
 
 use serde_json::{json, Value};
 use stacc_core::{ops, recovery};
-use stacc_git::{Git, RebaseError};
+use stacc_git::{Git, Hunk, HunkKind, RebaseError};
 use stacc_github::{GitHub, PrState, PullRequestUpdate};
 use stacc_state::{Base, BranchState, PullRequest, RepoConfig, State, StateError, StateStore};
 
+use super::absorb;
+use super::split::spec_matches;
 use crate::cli::{
     FoldArgs, MergeArgs, ModifyArgs, MoveArgs, OutputFormat, RestackArgs, SquashArgs, SyncArgs,
     UndoArgs,
@@ -16,9 +18,15 @@ use crate::cli::{
 use crate::error::Error;
 
 /// `stacc modify`: fold staged changes into the current branch (amend its tip by
-/// default, append with `--commit`), then restack its upstack onto the new tip.
-/// On conflict, records an `Operation::Modify` whose `pre_amend` anchor lets
-/// `abort` undo the amend. Local-only: no push.
+/// default, append with `--commit`, reword-only with `--edit`), then restack its
+/// upstack onto the new tip. `--all` stages everything first; `--patch <paths>`
+/// narrows the staged set to the matching paths, leaving the rest staged;
+/// `--into <branch>` lands the staged changes in a downstack branch's tip
+/// instead (see [`modify_into`]). On conflict, records an `Operation::Modify`
+/// whose `pre_amend` anchor lets `abort` undo the amend. Local-only: no push.
+// A cohesive validate -> stage/narrow -> amend -> restack -> report sequence;
+// splitting it would only trade this lint for too_many_arguments on a helper.
+#[allow(clippy::too_many_lines)]
 pub fn modify(args: &ModifyArgs, format: OutputFormat) -> Result<(), Error> {
     let git = Git::open(".");
     let store = StateStore::new(git.clone());
@@ -53,9 +61,37 @@ pub fn modify(args: &ModifyArgs, format: OutputFormat) -> Result<(), Error> {
             ))
         })?;
 
+    validate_modify_flags(args)?;
+
+    if args.all {
+        git.stage_all()?;
+    }
+
+    if args.into.is_some() {
+        return modify_into(&git, &store, &mut state, &repo, &branch, args, format);
+    }
+
     // Fail fast if any branch we would restack is checked out in another
     // worktree, rather than amending and then skipping that child mid-pass.
     guard_worktree(&git, &ops::upstack_order(&state.branches, &branch))?;
+
+    // --patch: narrow the staged set to the matching paths. The non-matching
+    // paths are unstaged around the amend and re-staged after the restack.
+    let excluded = if args.patch.is_empty() {
+        Vec::new()
+    } else {
+        let (included, excluded) = partition_patch(&git.diff_hunks()?, &args.patch);
+        if included.is_empty() {
+            return Err(Error::Usage(
+                "no staged changes match --patch; stage the paths first or fix the pathspecs"
+                    .into(),
+            ));
+        }
+        if !excluded.is_empty() {
+            git.unstage_paths(&excluded)?;
+        }
+        excluded
+    };
 
     let pre_amend = git.rev_parse("HEAD")?;
 
@@ -68,6 +104,13 @@ pub fn modify(args: &ModifyArgs, format: OutputFormat) -> Result<(), Error> {
         let message = args.message.clone().unwrap_or_else(|| branch.clone());
         git.commit(&message)?;
     } else {
+        // --edit guarantees a pure reword: with staged content the amend would
+        // change the tree too, so refuse rather than silently fold it in.
+        if args.edit && git.has_staged_changes()? {
+            return Err(Error::Usage(
+                "staged changes present; --edit rewords only. Unstage them, or drop --edit to fold them into the tip".into(),
+            ));
+        }
         // Amending a branch with no commit of its own would rewrite the base's
         // commit; require an explicit --commit there instead.
         if pre_amend == git.rev_parse(&base_name)? {
@@ -111,6 +154,14 @@ pub fn modify(args: &ModifyArgs, format: OutputFormat) -> Result<(), Error> {
         eprintln!("warning: could not switch back to `{branch}`: {err}");
     }
 
+    // Put back what --patch excluded: a restack's autostash round-trip leaves
+    // those changes unstaged in the working tree, so re-stage them last.
+    if !excluded.is_empty() {
+        if let Err(err) = git.stage_paths(&excluded) {
+            eprintln!("warning: could not re-stage the paths --patch excluded: {err}");
+        }
+    }
+
     let tip = git.rev_parse(&branch)?;
     match format {
         OutputFormat::Json => println!(
@@ -129,6 +180,262 @@ pub fn modify(args: &ModifyArgs, format: OutputFormat) -> Result<(), Error> {
             } else {
                 println!("Amended {branch}");
             }
+            for name in &restacked {
+                println!("Restacked {name}");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Reject contradictory `modify` flag combinations with structured usage
+/// errors (kept out of clap so `--format json` renders them like every other
+/// error).
+fn validate_modify_flags(args: &ModifyArgs) -> Result<(), Error> {
+    if args.edit {
+        if args.commit {
+            return Err(Error::Usage(
+                "--edit rewords the tip in place; it cannot be combined with --commit".into(),
+            ));
+        }
+        if args.all || !args.patch.is_empty() {
+            return Err(Error::Usage(
+                "--edit rewords only; it cannot be combined with --all or --patch".into(),
+            ));
+        }
+        if args.into.is_some() {
+            return Err(Error::Usage(
+                "--edit rewords the current tip; it cannot be combined with --into".into(),
+            ));
+        }
+        if args.message.is_none() {
+            return Err(Error::Usage(
+                "--edit requires --message; stacc never opens an editor (interactive rewording is a possible future convenience)".into(),
+            ));
+        }
+    }
+    if args.into.is_some() {
+        if args.commit {
+            return Err(Error::Usage(
+                "--into amends the target's tip in place; it cannot be combined with --commit"
+                    .into(),
+            ));
+        }
+        if args.message.is_some() {
+            return Err(Error::Usage(
+                "--into keeps the target commit's message; --message is not supported with it"
+                    .into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Partition the staged hunks by the `--patch` pathspecs (literal or directory
+/// prefix, the `split --by-file` rule): hunks touching a matching path are
+/// included, and the distinct non-matching paths are returned so the caller
+/// can unstage them around the commit and re-stage them afterwards.
+fn partition_patch(hunks: &[Hunk], specs: &[String]) -> (Vec<Hunk>, Vec<String>) {
+    let mut included = Vec::new();
+    let mut excluded: BTreeSet<String> = BTreeSet::new();
+    for hunk in hunks {
+        let matched = specs.iter().any(|spec| {
+            spec_matches(spec, &hunk.path)
+                || hunk
+                    .old_path
+                    .as_deref()
+                    .is_some_and(|old| spec_matches(spec, old))
+        });
+        if matched {
+            included.push(hunk.clone());
+        } else {
+            excluded.insert(hunk.path.clone());
+            if let Some(old) = &hunk.old_path {
+                excluded.insert(old.clone());
+            }
+        }
+    }
+    (included, excluded.into_iter().collect())
+}
+
+/// `stacc modify --into <target>`: land the staged changes in `target`'s tip
+/// instead of the current branch. The mechanics are absorb's: splice the staged
+/// hunks into the target's tip commit and replay every commit above it up to
+/// the current tip in memory (the shared [`absorb::rewrite_chain`]), move each
+/// chain branch's ref to its rewritten tip in lockstep, mixed-reset the current
+/// branch so the landed hunks read as committed, and restack the target's
+/// upstack. Only in-place line edits are supported (the splice machinery needs
+/// pre-image lines); file adds, deletes, renames, binaries, and pure insertions
+/// are structured errors, never silently misplaced.
+// A cohesive validate -> map -> rewrite -> move-refs -> restack sequence,
+// mirroring absorb's shape.
+#[allow(clippy::too_many_lines)]
+fn modify_into(
+    git: &Git,
+    store: &StateStore,
+    state: &mut State,
+    repo: &RepoConfig,
+    branch: &str,
+    args: &ModifyArgs,
+    format: OutputFormat,
+) -> Result<(), Error> {
+    let target = args.into.as_deref().expect("--into is set");
+
+    // The target must be strictly below the current branch in its downstack.
+    if target == branch {
+        return Err(Error::Usage(format!(
+            "`{target}` is the current branch; run `stacc modify` without --into"
+        )));
+    }
+    let chain = ops::downstack_chain(state, branch, &repo.trunk)?;
+    let Some(pos) = chain.iter().position(|b| b == target) else {
+        return Err(Error::Usage(format!(
+            "`{target}` is not in `{branch}`'s downstack; --into lands changes in a branch below the current one"
+        )));
+    };
+
+    if !git.has_staged_changes()? {
+        return Err(Error::Usage(
+            "nothing staged to apply; stage the changes you want landed in the target first"
+                .into(),
+        ));
+    }
+
+    let tip = git.rev_parse(branch)?;
+    let target_tip = git.rev_parse(target)?;
+    // The rewrite replays `target_tip..tip`, so the chain must be restacked.
+    if !git.is_ancestor(&target_tip, &tip)? {
+        return Err(Error::Usage(format!(
+            "`{branch}` does not descend `{target}`'s tip; run `stacc restack` first, then retry"
+        )));
+    }
+
+    // The staged hunks, narrowed by --patch when given; non-matching paths stay
+    // staged (re-staged after the mixed reset below).
+    let hunks = git.diff_hunks()?;
+    let (included, excluded) = if args.patch.is_empty() {
+        (hunks, Vec::new())
+    } else {
+        let (included, excluded) = partition_patch(&hunks, &args.patch);
+        if included.is_empty() {
+            return Err(Error::Usage(
+                "no staged changes match --patch; stage the paths first or fix the pathspecs"
+                    .into(),
+            ));
+        }
+        (included, excluded)
+    };
+
+    // Every hunk must be a splice the target's blobs can take, checked up front
+    // so the command errors before mutating anything.
+    let mut mapped = Vec::new();
+    for hunk in included {
+        if !matches!(hunk.kind, HunkKind::Modified) || hunk.old_range.count == 0 {
+            return Err(Error::Usage(format!(
+                "cannot apply `{}` into `{target}`: --into supports in-place edits to existing lines only (not file adds, deletes, renames, binaries, or pure insertions); land it with a plain `stacc modify`",
+                hunk.path
+            )));
+        }
+        let path = hunk.old_path.clone().unwrap_or_else(|| hunk.path.clone());
+        if git.read_blob(&target_tip, &path)?.is_none() {
+            return Err(Error::Usage(format!(
+                "`{path}` does not exist in `{target}`'s tip; cannot land its changes there"
+            )));
+        }
+        mapped.push(absorb::Mapped {
+            hunk,
+            commit: target_tip.clone(),
+        });
+    }
+
+    // Fail fast if anything the rewrite or restack touches is checked out in
+    // another worktree, BEFORE mutating (mirrors absorb).
+    let upstack = ops::upstack_order(&state.branches, target);
+    guard_worktree(git, &upstack)?;
+
+    // The chain to rewrite: the target's tip plus everything above it up to the
+    // current tip, oldest first. Every hunk targets the first commit, so the
+    // shared propagation applies it there and in every descendant.
+    let mut commits = vec![target_tip.clone()];
+    commits.extend(git.rev_list(&target_tip, &tip)?);
+    let parent_of_first = git.rev_parse(&format!("{target_tip}^")).ok();
+    let new_by_old = absorb::rewrite_chain(git, parent_of_first.as_deref(), &commits, &mapped)?;
+
+    // Move each chain branch from the target up to (and including) the current
+    // branch onto its rewritten tip, leased on the old one. A drifted member
+    // whose tip is not in the rewritten chain is left to the restack below.
+    for member in &chain[pos..] {
+        let old = git.rev_parse(member)?;
+        if let Some(new) = new_by_old.get(&old) {
+            git.update_ref(&format!("refs/heads/{member}"), new, Some(&old))
+                .map_err(|e| {
+                    Error::Usage(format!(
+                        "could not move `{member}` to its rewritten tip ({e}); the tip moved under modify, run `stacc restack` to reconcile"
+                    ))
+                })?;
+        }
+    }
+
+    // The current branch is checked out here: sync HEAD and the index to the
+    // rewritten tip while leaving the working tree alone, so the landed hunks
+    // read as committed and only what --patch excluded remains a modification.
+    let new_tip = new_by_old.get(&tip).cloned().unwrap_or(tip);
+    git.reset_mixed(&new_tip)?;
+
+    // Each chain member above the target now sits on its parent's rewritten
+    // tip; record those base hashes (idempotent, re-applied on CAS retries).
+    let mut hash_updates: Vec<(String, String)> = Vec::new();
+    for pair in chain[pos..].windows(2) {
+        hash_updates.push((pair[1].clone(), git.rev_parse(&pair[0])?));
+    }
+    let apply_hashes = move |s: &mut State| {
+        for (child, hash) in &hash_updates {
+            if let Some(b) = s.branches.get_mut(child) {
+                b.base.hash.clone_from(hash);
+            }
+        }
+    };
+    apply_hashes(state);
+
+    // Restack the target's upstack. The chain members moved in lockstep, so
+    // they skip as already-based; only branches hanging off the chain rebase.
+    let restacked = restack_with_recovery(
+        git,
+        store,
+        state,
+        repo,
+        &upstack,
+        |remaining| recovery::Operation::Restack { remaining },
+        &apply_hashes,
+    )?;
+    clear_conflict_artifacts(git);
+    if let Err(err) = git.checkout(branch) {
+        eprintln!("warning: could not switch back to `{branch}`: {err}");
+    }
+
+    // Put back what --patch excluded: the mixed reset (and any restack
+    // autostash) left those changes unstaged in the working tree.
+    if !excluded.is_empty() {
+        if let Err(err) = git.stage_paths(&excluded) {
+            eprintln!("warning: could not re-stage the paths --patch excluded: {err}");
+        }
+    }
+
+    let sha = git.rev_parse(branch)?;
+    match format {
+        OutputFormat::Json => println!(
+            "{}",
+            json!({
+                "op": "modify",
+                "branch": branch,
+                "into": target,
+                "applied": mapped.len(),
+                "sha": sha,
+                "restacked": restacked,
+            })
+        ),
+        OutputFormat::Pretty => {
+            println!("Applied {} staged hunk(s) into {target}", mapped.len());
             for name in &restacked {
                 println!("Restacked {name}");
             }

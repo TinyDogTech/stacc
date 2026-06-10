@@ -26,11 +26,13 @@ use super::operations::{clear_conflict_artifacts, guard_worktree, restack_with_r
 use crate::cli::{AbsorbArgs, OutputFormat};
 use crate::error::Error;
 
-/// A hunk that mapped to one of the branch's own commits.
-struct Mapped {
-    hunk: Hunk,
-    /// The full SHA of the commit the hunk's lines blame to.
-    commit: String,
+/// A hunk assigned to a commit in the chain being rewritten. For `absorb` the
+/// commit is found by blame; for `modify --into` it is the target's tip.
+/// Shared with `modify --into`, which reuses [`rewrite_chain`].
+pub(crate) struct Mapped {
+    pub(crate) hunk: Hunk,
+    /// The full SHA of the commit the hunk lands in.
+    pub(crate) commit: String,
 }
 
 /// A hunk that could not be absorbed, with a machine-readable reason.
@@ -136,7 +138,11 @@ pub fn absorb(args: &AbsorbArgs, format: OutputFormat) -> Result<(), Error> {
     // Rewrite the branch's own commit chain in memory, landing each commit's
     // assigned hunks, and move the branch ref to the new tip under the old tip
     // as a lease.
-    let new_tip = rewrite_chain(&git, &exclude, &own_commits, &mapping)?;
+    let new_by_old = rewrite_chain(&git, Some(&exclude), &own_commits, &mapping.mapped)?;
+    let new_tip = new_by_old
+        .get(own_commits.last().expect("own_commits is non-empty"))
+        .cloned()
+        .expect("the tip is always rewritten");
     git.update_ref(&format!("refs/heads/{branch}"), &new_tip, Some(&tip))
         .map_err(|e| {
             Error::Usage(format!(
@@ -258,43 +264,47 @@ fn map_hunks(
     Ok(Mapping { mapped, unabsorbed })
 }
 
-/// Rebuild the branch's own commit chain from `parent_of_first` (exclusive),
-/// replaying each commit onto its rewritten parent with the absorbed hunks
-/// spliced into its blobs. Returns the new tip.
+/// Rebuild a commit chain from `parent_of_first` (exclusive; `None` when the
+/// first chain commit is a root), replaying each commit onto its rewritten
+/// parent with the assigned hunks spliced into its blobs. Returns the
+/// old-commit -> new-commit map (the last chain commit's entry is the new tip).
+/// Shared by `absorb` (chain = the branch's own commits) and `modify --into`
+/// (chain = the target's tip plus everything above it).
 ///
 /// Each commit keeps its own tree; the only change is that every file edited by
-/// an absorbed hunk gets that hunk applied to **every** own commit from the
+/// an assigned hunk gets that hunk applied to **every** chain commit from the
 /// hunk's target onward (its target index and later). This is sound because the
-/// blame mapping guarantees the hunk's pre-image lines are byte-identical from
-/// the introducing commit through the tip: the same contiguous block exists in
-/// each of those commits' blobs, so a content-located splice patches each one
-/// without disturbing that commit's own unrelated changes. An ancestor's
-/// absorbed edit therefore propagates to every descendant (they all carry the
-/// edited lines), and a descendant's own edits to other lines survive intact.
-fn rewrite_chain(
+/// mapping guarantees the hunk's pre-image lines are byte-identical from the
+/// target commit through the tip: the same contiguous block exists in each of
+/// those commits' blobs, so a content-located splice patches each one without
+/// disturbing that commit's own unrelated changes. An ancestor's edit therefore
+/// propagates to every descendant (they all carry the edited lines), and a
+/// descendant's own edits to other lines survive intact.
+pub(crate) fn rewrite_chain(
     git: &Git,
-    parent_of_first: &str,
+    parent_of_first: Option<&str>,
     own_commits: &[String],
-    mapping: &Mapping,
-) -> Result<String, Error> {
-    // Index each own commit so a hunk applies from its target commit onward.
+    mapped: &[Mapped],
+) -> Result<BTreeMap<String, String>, Error> {
+    // Index each chain commit so a hunk applies from its target commit onward.
     let index_of: BTreeMap<&str, usize> = own_commits
         .iter()
         .enumerate()
         .map(|(i, c)| (c.as_str(), i))
         .collect();
 
-    // Per file, the absorbed hunks with each one's target commit index, so at a
+    // Per file, the assigned hunks with each one's target commit index, so at a
     // given commit we apply exactly the hunks whose target is this commit or an
-    // ancestor own commit (their edited lines exist from there on).
+    // ancestor chain commit (their edited lines exist from there on).
     let mut hunks_by_path: BTreeMap<String, Vec<(usize, &Hunk)>> = BTreeMap::new();
-    for m in &mapping.mapped {
+    for m in mapped {
         let path = m.hunk.old_path.clone().unwrap_or_else(|| m.hunk.path.clone());
         let idx = index_of[m.commit.as_str()];
         hunks_by_path.entry(path).or_default().push((idx, &m.hunk));
     }
 
-    let mut new_parent = parent_of_first.to_string();
+    let mut new_by_old: BTreeMap<String, String> = BTreeMap::new();
+    let mut new_parent: Option<String> = parent_of_first.map(ToString::to_string);
     for (idx, commit) in own_commits.iter().enumerate() {
         let mut entries = git.tree_entries(commit)?;
 
@@ -331,10 +341,12 @@ fn rewrite_chain(
         }
 
         let new_tree = git.mktree(&entries)?;
-        new_parent = git.commit_tree_like(&new_tree, Some(&new_parent), commit)?;
+        let new_commit = git.commit_tree_like(&new_tree, new_parent.as_deref(), commit)?;
+        new_by_old.insert(commit.clone(), new_commit.clone());
+        new_parent = Some(new_commit);
     }
 
-    Ok(new_parent)
+    Ok(new_by_old)
 }
 
 /// Apply each hunk to `content` by locating its pre-image (removed) lines
