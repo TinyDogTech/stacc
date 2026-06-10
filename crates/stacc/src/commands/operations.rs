@@ -1044,7 +1044,13 @@ pub fn sync(args: &SyncArgs, format: OutputFormat) -> Result<(), Error> {
         return continue_op(&git, &store, &mut state, &repo, format);
     }
 
-    let merged = detect_merged(&git, &state, &repo)?;
+    // Adopt PRs created outside stacc (gh, the web UI): a tracked branch with
+    // no recorded PR may still have one on GitHub. Open PRs are recorded so
+    // later submit/merge see them; merged ones join merge-detection's drop set.
+    let (adopted, adopted_merged) = adopt_prs(&git, &store, &mut state, &repo)?;
+    let adopted_names: BTreeSet<String> = adopted.iter().map(|a| a.branch.clone()).collect();
+    let mut merged = detect_merged(&git, &state, &repo, &adopted_names)?;
+    merged.extend(adopted_merged);
     // Snapshot the merged branches' tips NOW, the leases for the ref cleanup
     // after the reconcile: a branch that moves mid-sync is kept, not destroyed.
     let leases: Vec<(String, String)> = merged
@@ -1075,6 +1081,7 @@ pub fn sync(args: &SyncArgs, format: OutputFormat) -> Result<(), Error> {
         "sync",
         &merged,
         &pruned,
+        &adopted,
         &outcome.reparented,
         &outcome.restacked,
         &cleaned,
@@ -1105,14 +1112,18 @@ struct SyncOutcome {
 }
 
 /// Ask GitHub which recorded PRs have merged, returning their branch names.
+/// `skip` names branches whose PR state this sync already fetched (the ones
+/// just adopted, known open), so they are not queried a second time.
 fn detect_merged(
     git: &Git,
     state: &State,
     repo: &RepoConfig,
+    skip: &BTreeSet<String>,
 ) -> Result<BTreeSet<String>, Error> {
     let with_prs: Vec<(String, u64)> = state
         .branches
         .iter()
+        .filter(|(name, _)| !skip.contains(*name))
         .filter_map(|(name, b)| b.pr.as_ref().map(|pr| (name.clone(), pr.number)))
         .collect();
     let mut merged: BTreeSet<String> = BTreeSet::new();
@@ -1127,6 +1138,97 @@ fn detect_merged(
         }
     }
     Ok(merged)
+}
+
+/// A PR `sync` adopted: a tracked branch with no recorded PR that GitHub says
+/// has an open one (created via `gh` or the web UI).
+struct AdoptedPr {
+    branch: String,
+    number: u64,
+    url: String,
+}
+
+/// Look up PRs by head branch for tracked branches with no recorded PR.
+/// Open PRs are recorded in state (and mirrored into `state` in memory) and
+/// returned; merged PRs are returned as a drop set for merge-detection.
+/// Closed-unmerged PRs are deliberately not recorded: `submit` opens a fresh
+/// PR for a closed head, and a recorded closed PR would resurrect it instead.
+///
+/// Best-effort like submit's adoption: a missing token, a non-GitHub remote,
+/// or a failed lookup skips adoption rather than failing the sync (a branch
+/// with no PR anywhere is the common WIP case, not an error).
+fn adopt_prs(
+    git: &Git,
+    store: &StateStore,
+    state: &mut State,
+    repo: &RepoConfig,
+) -> Result<(Vec<AdoptedPr>, BTreeSet<String>), Error> {
+    let candidates: Vec<String> = state
+        .branches
+        .iter()
+        .filter(|(_, b)| b.pr.is_none())
+        .map(|(name, _)| name.clone())
+        .collect();
+    if candidates.is_empty() {
+        return Ok((Vec::new(), BTreeSet::new()));
+    }
+    let Some((owner, repo_name)) = git
+        .remote_url(&repo.remote)
+        .ok()
+        .and_then(|url| stacc_github::parse_remote(&url))
+    else {
+        return Ok((Vec::new(), BTreeSet::new()));
+    };
+    let Ok(github) = GitHub::from_env() else {
+        return Ok((Vec::new(), BTreeSet::new()));
+    };
+
+    let mut adopted: Vec<AdoptedPr> = Vec::new();
+    let mut merged: BTreeSet<String> = BTreeSet::new();
+    for name in &candidates {
+        // A failed lookup (`Err`) reads as no PR: best-effort, never fatal.
+        let Ok(Some(pr)) = github.pull_request_for_branch_any_state(&owner, &repo_name, name)
+        else {
+            continue;
+        };
+        match pr.state {
+            PrState::Merged => {
+                merged.insert(name.clone());
+            }
+            PrState::Open => {
+                let record = PullRequest {
+                    number: pr.number,
+                    url: Some(pr.url.clone()),
+                };
+                if let Some(branch) = state.branches.get_mut(name) {
+                    branch.pr = Some(record);
+                }
+                adopted.push(AdoptedPr {
+                    branch: name.clone(),
+                    number: pr.number,
+                    url: pr.url,
+                });
+            }
+            PrState::Closed => {}
+        }
+    }
+
+    // Persist the open adoptions before the fallible fetch and restack, so a
+    // failure later does not lose what GitHub already told us.
+    if !adopted.is_empty() {
+        store.update(|s| {
+            for a in &adopted {
+                if let Some(branch) = s.branches.get_mut(&a.branch) {
+                    branch.pr = Some(PullRequest {
+                        number: a.number,
+                        url: Some(a.url.clone()),
+                    });
+                }
+            }
+            Ok(())
+        })?;
+    }
+    Ok((adopted, merged))
 }
 
 /// Reconcile a caller-supplied drop set and restack the stack, the shared core
@@ -2260,6 +2362,7 @@ fn continue_op(
                 &BTreeSet::new(),
                 &BTreeSet::new(),
                 &[],
+                &[],
                 &restacked,
                 &[],
                 &[],
@@ -2591,6 +2694,7 @@ fn report_sync(
     op: &str,
     merged: &BTreeSet<String>,
     pruned: &BTreeSet<String>,
+    adopted: &[AdoptedPr],
     reparented: &[(String, String)],
     restacked: &[String],
     cleaned: &[String],
@@ -2600,6 +2704,10 @@ fn report_sync(
         OutputFormat::Json => {
             let merged_list: Vec<&String> = merged.iter().collect();
             let pruned_list: Vec<&String> = pruned.iter().collect();
+            let adopted_list: Vec<Value> = adopted
+                .iter()
+                .map(|a| json!({ "branch": a.branch, "number": a.number, "url": a.url }))
+                .collect();
             let reparented_list: Vec<Value> = reparented
                 .iter()
                 .map(|(branch, base)| json!({ "branch": branch, "base": base }))
@@ -2610,6 +2718,7 @@ fn report_sync(
                     "op": op,
                     "merged": merged_list,
                     "pruned": pruned_list,
+                    "adopted": adopted_list,
                     "reparented": reparented_list,
                     "restacked": restacked,
                     "cleaned": cleaned,
@@ -2618,7 +2727,11 @@ fn report_sync(
             );
         }
         OutputFormat::Pretty => {
-            if merged.is_empty() && pruned.is_empty() && reparented.is_empty() && restacked.is_empty()
+            if merged.is_empty()
+                && pruned.is_empty()
+                && adopted.is_empty()
+                && reparented.is_empty()
+                && restacked.is_empty()
             {
                 println!("Already up to date.");
             } else {
@@ -2627,6 +2740,9 @@ fn report_sync(
                 }
                 for name in pruned {
                     println!("Pruned (no git ref): {name}");
+                }
+                for a in adopted {
+                    println!("Adopted PR #{} for {}: {}", a.number, a.branch, a.url);
                 }
                 for (name, base) in reparented {
                     println!("Re-parented {name} -> {base}");
