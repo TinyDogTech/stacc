@@ -923,7 +923,8 @@ fn build_client(git: &Git, repo: &RepoConfig) -> Option<(GitHub, String, String)
 /// status, title, draft, mergeable_state, review, checks}`. The fields past
 /// `url` are live data: all null when the status fetch failed, and
 /// `mergeable_state`/`review`/`checks` also null when GitHub reports nothing
-/// (state not yet computed, no reviewers, no CI). Each branch with its own
+/// (state not yet computed, no reviewers, no CI) or the PR is not open (the
+/// rollup is only fetched for open PRs). Each branch with its own
 /// commits carries a `commit {sha, subject, age}`. A branch whose git ref is
 /// gone carries `"deleted": true` and no `commit`.
 fn stack_json(

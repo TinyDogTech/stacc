@@ -22,6 +22,9 @@ fn stacc(dir: &std::path::Path, args: &[&str]) -> Output {
 fn stacc_env(dir: &std::path::Path, args: &[&str], envs: &[(&str, &str)]) -> Output {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_stacc"));
     cmd.current_dir(dir).args(args);
+    // Pin the assumed terminal width: an inherited COLUMNS would change where
+    // titles truncate and break the exact-substring assertions below.
+    cmd.env_remove("COLUMNS");
     for (key, value) in envs {
         cmd.env(key, value);
     }

@@ -254,6 +254,15 @@ fn info_body_fetches_the_pr_title_state_and_body() {
     assert_eq!(v["pr"]["draft"], true);
     assert_eq!(v["pr"]["mergeable_state"], "behind");
     assert_eq!(v["pr_fetch"], "ok");
+
+    // The pretty form tags the same live facts on the PR line.
+    let out = stacc_env(
+        tmp.path(),
+        &["info", "--body"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    let s = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(s.contains("(open, draft, behind)"), "got: {s}");
 }
 
 #[test]
