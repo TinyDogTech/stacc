@@ -27,7 +27,7 @@ pub use absorb::absorb;
 pub use auth::auth;
 pub use info::info;
 pub use log::log;
-pub use navigation::{bottom, checkout, down, top, up};
+pub use navigation::{bottom, checkout, children, down, parent, top, up};
 pub use operations::{
     abort_cmd, continue_cmd, fold, merge, modify, move_cmd, restack, squash, sync, undo,
 };
