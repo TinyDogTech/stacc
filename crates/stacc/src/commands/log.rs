@@ -24,6 +24,8 @@ use crate::error::Error;
 /// Upper bound on the total time spent fetching live PR status, after which the
 /// remaining branches fall back to their PR number with no status.
 const STATUS_BUDGET: Duration = Duration::from_secs(5);
+/// Leftover budget below which another status call is not worth starting.
+const MIN_CALL_BUDGET: Duration = Duration::from_millis(50);
 /// Column width assumed when `$COLUMNS` is unset, for subject truncation.
 const FALLBACK_WIDTH: usize = 80;
 
@@ -692,8 +694,9 @@ fn pr_line(detail: &PrLive) -> String {
         }
     }
     if !detail.pr.title.is_empty() {
+        let reserved = line.chars().count() + 3; // the prefix built so far + " - "
         line.push_str(" - ");
-        line.push_str(&truncate_subject(&detail.pr.title));
+        line.push_str(&truncate_text(&detail.pr.title, reserved));
     }
     line
 }
@@ -747,10 +750,15 @@ fn check_str(checks: CheckRollup) -> &'static str {
 
 /// Sanitize and clip a commit subject for display: strip control bytes (a
 /// hostile or garbled subject must not inject ANSI escapes into the colored
-/// output) and truncate to fit the terminal width.
+/// output) and truncate to fit the terminal width after the `sha - ` prefix.
 fn truncate_subject(subject: &str) -> String {
-    let clean: String = subject.chars().filter(|c| !c.is_control()).collect();
-    let budget = term_width().saturating_sub(12).max(20);
+    truncate_text(subject, 12)
+}
+
+/// [`truncate_subject`] with an explicit column reserve for the line's prefix.
+fn truncate_text(text: &str, reserved: usize) -> String {
+    let clean: String = text.chars().filter(|c| !c.is_control()).collect();
+    let budget = term_width().saturating_sub(reserved).max(20);
     if clean.chars().count() <= budget {
         return clean;
     }
@@ -775,14 +783,26 @@ struct PrLive {
     checks: PrChecks,
 }
 
+impl PrLive {
+    /// Wrap a fetched PR with no rollup yet; the batched call fills it in.
+    fn new(pr: stacc_github::PullRequest) -> Self {
+        Self {
+            pr,
+            checks: PrChecks::default(),
+        }
+    }
+}
+
 /// branch name -> its live PR detail (`None` when unavailable).
 type PrStatusMap = BTreeMap<String, Option<PrLive>>;
 /// PRs discovered by head branch this run, for the caller to record in state.
 type Adoptions = Vec<(String, PullRequest)>;
 
-/// Fetch each visible branch's live PR status, never fatally. Branches with a
-/// recorded PR map to `Some(state)` on success and `None` on any failure (no
-/// token, no remote, an API error, or the wall-clock budget exhausted).
+/// Fetch each visible branch's live PR detail, never fatally. Branches with a
+/// recorded PR map to `Some(PrLive)` (the full REST response) on success and
+/// `None` on any failure (no token, no remote, an API error, or the wall-clock
+/// budget exhausted). A final batched GraphQL call fills in the review/CI
+/// rollup for the open PRs with whatever budget is left.
 ///
 /// Tracked branches with NO recorded PR (e.g. a stack migrated from another
 /// tool) are looked up by head branch under the same budget and tolerance; a
@@ -795,7 +815,7 @@ fn fetch_pr_status(
     visible: &BTreeSet<String>,
     deleted: &BTreeSet<String>,
 ) -> (PrStatusMap, Adoptions) {
-    let mut live: BTreeMap<String, Option<stacc_github::PullRequest>> = BTreeMap::new();
+    let mut map: PrStatusMap = BTreeMap::new();
     let mut adopted = Vec::new();
     let recorded: Vec<(String, u64)> = visible
         .iter()
@@ -814,11 +834,11 @@ fn fetch_pr_status(
         .cloned()
         .collect();
     if recorded.is_empty() && unrecorded.is_empty() {
-        return (BTreeMap::new(), adopted);
+        return (map, adopted);
     }
 
     let Some((github, owner, repo_name)) = build_client(git, repo) else {
-        let map = recorded.into_iter().map(|(name, _)| (name, None)).collect();
+        map.extend(recorded.into_iter().map(|(name, _)| (name, None)));
         return (map, adopted);
     };
 
@@ -826,23 +846,27 @@ fn fetch_pr_status(
     // call's timeout is whatever budget remains, so a single hung request can't
     // blow past STATUS_BUDGET. A branch we run out of time for falls back to None.
     let start = Instant::now();
+    let budget_left = || STATUS_BUDGET.saturating_sub(start.elapsed());
     for (name, number) in recorded {
-        let remaining = STATUS_BUDGET.saturating_sub(start.elapsed());
-        let status = if remaining > Duration::from_millis(50) {
+        let remaining = budget_left();
+        let status = if remaining > MIN_CALL_BUDGET {
             github
                 .get_pull_request_within(&owner, &repo_name, number, remaining)
                 .ok()
+                .map(PrLive::new)
         } else {
             None
         };
-        live.insert(name, status);
+        map.insert(name, status);
     }
     // By-head adoption lookups, after the recorded fetches so they only spend
     // leftover budget. Any failure (or no match) leaves the branch status-less,
-    // exactly as before; only a confirmed open PR produces an adoption.
+    // exactly as before; only a confirmed open PR produces an adoption. The
+    // list endpoint omits `mergeable_state`, so an adopted PR shows no
+    // blocked/behind/dirty hint until the next run fetches it by number.
     for name in unrecorded {
-        let remaining = STATUS_BUDGET.saturating_sub(start.elapsed());
-        if remaining <= Duration::from_millis(50) {
+        let remaining = budget_left();
+        if remaining <= MIN_CALL_BUDGET {
             break;
         }
         if let Ok(Some(pr)) =
@@ -855,7 +879,7 @@ fn fetch_pr_status(
                     url: Some(pr.url.clone()),
                 },
             ));
-            live.insert(name, Some(pr));
+            map.insert(name, Some(PrLive::new(pr)));
         }
     }
 
@@ -863,31 +887,24 @@ fn fetch_pr_status(
     // batched GraphQL call spending only leftover budget. Closed/merged PRs
     // have no actionable rollup and are skipped; any failure (or an exhausted
     // budget) just leaves every rollup empty, silently.
-    let open: Vec<u64> = live
+    let open: BTreeSet<u64> = map
         .values()
         .flatten()
-        .filter(|pr| pr.state == PrState::Open)
-        .map(|pr| pr.number)
+        .filter(|detail| detail.pr.state == PrState::Open)
+        .map(|detail| detail.pr.number)
         .collect();
-    let remaining = STATUS_BUDGET.saturating_sub(start.elapsed());
-    let rollups = if !open.is_empty() && remaining > Duration::from_millis(50) {
+    let open: Vec<u64> = open.into_iter().collect();
+    let remaining = budget_left();
+    let rollups = if !open.is_empty() && remaining > MIN_CALL_BUDGET {
         github
             .pull_request_checks_within(&owner, &repo_name, &open, remaining)
             .unwrap_or_default()
     } else {
         BTreeMap::new()
     };
-
-    let map = live
-        .into_iter()
-        .map(|(name, pr)| {
-            let detail = pr.map(|pr| PrLive {
-                checks: rollups.get(&pr.number).copied().unwrap_or_default(),
-                pr,
-            });
-            (name, detail)
-        })
-        .collect();
+    for detail in map.values_mut().flatten() {
+        detail.checks = rollups.get(&detail.pr.number).copied().unwrap_or_default();
+    }
     (map, adopted)
 }
 
@@ -903,8 +920,10 @@ fn build_client(git: &Git, repo: &RepoConfig) -> Option<(GitHub, String, String)
 // --- JSON ------------------------------------------------------------------
 
 /// The stack tree for `--format json`. `pr` is an object `{number, url,
-/// status, title, draft, mergeable_state, review, checks}` (everything past
-/// `url` is live data, null when unavailable) and each branch with its own
+/// status, title, draft, mergeable_state, review, checks}`. The fields past
+/// `url` are live data: all null when the status fetch failed, and
+/// `mergeable_state`/`review`/`checks` also null when GitHub reports nothing
+/// (state not yet computed, no reviewers, no CI). Each branch with its own
 /// commits carries a `commit {sha, subject, age}`. A branch whose git ref is
 /// gone carries `"deleted": true` and no `commit`.
 fn stack_json(
@@ -1144,6 +1163,20 @@ mod tests {
         assert_eq!(
             pr_line(&pr_live(PrState::Merged, true, Some("dirty"), "t")),
             "#7 Merged - t"
+        );
+    }
+
+    #[test]
+    fn pr_line_clips_a_long_title_to_the_terminal_width() {
+        let long = "y".repeat(500);
+        let line = pr_line(&pr_live(PrState::Open, true, Some("blocked"), &long));
+        assert!(line.ends_with("..."), "got: {line}");
+        // The whole line (prefix + clipped title) fits the terminal; 44 covers
+        // the widest prefix plus the truncation floor on absurdly narrow ones.
+        assert!(
+            line.chars().count() <= term_width().max(44),
+            "line overflows the terminal: {} cols",
+            line.chars().count()
         );
     }
 

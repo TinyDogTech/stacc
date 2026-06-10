@@ -7,6 +7,7 @@ pub use auth::{clear_token, load_token, store_token, DeviceCode, DeviceFlow};
 pub use error::GitHubError;
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::time::Duration;
 
 use serde::de::DeserializeOwned;
@@ -421,15 +422,14 @@ impl GitHub {
         }
         // One aliased `pullRequest` field per number; the repo coordinates ride
         // as variables so they need no escaping inside the query text.
-        let fields: String = numbers
-            .iter()
-            .map(|n| {
-                format!(
-                    "pr{n}: pullRequest(number: {n}) {{ reviewDecision \
-                     commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ state }} }} }} }} }} "
-                )
-            })
-            .collect();
+        let mut fields = String::new();
+        for n in numbers {
+            let _ = write!(
+                fields,
+                "pr{n}: pullRequest(number: {n}) {{ reviewDecision \
+                 commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ state }} }} }} }} }} "
+            );
+        }
         let query = format!(
             "query($owner: String!, $name: String!) {{ \
              repository(owner: $owner, name: $name) {{ {fields}}} }}"
@@ -438,7 +438,7 @@ impl GitHub {
             "query": query,
             "variables": { "owner": owner, "name": repo },
         });
-        let url = format!("{}/graphql", self.base_url);
+        let url = graphql_url(&self.base_url);
         let response = self
             .request("POST", &url)
             .timeout(timeout)
@@ -499,6 +499,17 @@ impl GitHub {
             .send_json(body)
             .map_err(GitHubError::from_ureq)?;
         Ok(response.into_json()?)
+    }
+}
+
+/// The GraphQL endpoint for a REST base URL. github.com (and the test mocks)
+/// serve GraphQL at `{base}/graphql`, but a GitHub Enterprise REST base ends
+/// in `/api/v3` while its GraphQL endpoint is `/api/graphql`.
+fn graphql_url(base_url: &str) -> String {
+    let trimmed = base_url.trim_end_matches('/');
+    match trimmed.strip_suffix("/api/v3") {
+        Some(host) => format!("{host}/api/graphql"),
+        None => format!("{trimmed}/graphql"),
     }
 }
 
@@ -789,15 +800,8 @@ mod tests {
     fn ready_reflects_mergeable_state() {
         let mk = |ms: Option<&str>| {
             PullRequest::from(RawPullRequest {
-                number: 1,
-                html_url: "u".into(),
-                state: "open".into(),
-                merged: false,
-                merged_at: None,
-                title: "t".into(),
-                body: None,
-                draft: false,
                 mergeable_state: ms.map(String::from),
+                ..raw("open", false)
             })
         };
         assert!(mk(Some("clean")).ready());
@@ -940,6 +944,16 @@ mod tests {
             map.get(&9),
             Some(&PrChecks { review: Some(ReviewDecision::ReviewRequired), checks: None })
         );
+    }
+
+    #[test]
+    fn graphql_url_handles_dotcom_and_enterprise_bases() {
+        assert_eq!(graphql_url("https://api.github.com"), "https://api.github.com/graphql");
+        assert_eq!(
+            graphql_url("https://ghe.corp/api/v3"),
+            "https://ghe.corp/api/graphql"
+        );
+        assert_eq!(graphql_url("http://127.0.0.1:8080/"), "http://127.0.0.1:8080/graphql");
     }
 
     #[test]
