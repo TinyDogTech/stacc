@@ -1,13 +1,13 @@
 {
-  "jillian/sta-71-u4-stacc-fold": "a7b6e3bde965cb6a8e6e8c3858127a45e2052eec",
-  "jillian/sta-72-u5-stacc-split": "e09620677ade60afbc72e80103a571cadeb1add0",
-  "jillian/sta-73-u6-stacc-reorder": "2cad3f2b73402011dc55c35a799677393eb442cf",
-  "jillian/sta-74-u7-stacc-delete-and-stacc-pop": "536af2625781e9c593007aecda131b8b6f754532",
-  "jillian/sta-75-u8-stacc-info": "abfa8d84e88a04bc765f2e7a35ccb6aaab88fe77",
-  "jillian/sta-76-u9-stacc-parent-stacc-children": "73d12bcf8401cd81699e12dcd029f68d3ce3d495",
-  "jillian/sta-77-u10-stacc-completion": "0ffdd692bc819709efa687999a263a10671f2f15",
-  "jillian/sta-78-u11-stacc-config": "e889b83f728943ed3336feddf9689ff4af511d45",
-  "jillian/sta-79-u12-content-staging-flags": "6bbe221526314b000eb44e95524601d3da4a7b8f",
-  "jillian/sta-80-u13-scope-flags": "c12714885a0c3685c885eb90ff700a9f2c58432d",
-  "jillian/sta-81-u14-pr-adoption": "510a110f1520786f294fb4d488427f346f7683d2"
+  "jillian/sta-71-u4-stacc-fold": "7e729b9e853ebdb83bb4115fd21b07925bd6df29",
+  "jillian/sta-72-u5-stacc-split": "b823e64c4030a9ad610ea5d250d6f3d934fbc473",
+  "jillian/sta-73-u6-stacc-reorder": "1c15d54c95871bc7bb7e2f1c52dcc46ff7dcbfcd",
+  "jillian/sta-74-u7-stacc-delete-and-stacc-pop": "6667b62ea09e5988316620be1e44f298d4538d37",
+  "jillian/sta-75-u8-stacc-info": "73f1368d0e9862537478691a5d0fa9dea46b8c12",
+  "jillian/sta-76-u9-stacc-parent-stacc-children": "9924793739bdf601d581878977704c4e7a690693",
+  "jillian/sta-77-u10-stacc-completion": "e46e5e180fd484108511c3af5320c8aee6688a22",
+  "jillian/sta-78-u11-stacc-config": "51c1963a07503e4db5577b6022e550e6b25b9456",
+  "jillian/sta-79-u12-content-staging-flags": "ce78caa659452f592024237b5b5904b850a11d33",
+  "jillian/sta-80-u13-scope-flags": "da4843eb1574d82ec8193dd0c6a32fd84aefe2a6",
+  "jillian/sta-81-u14-pr-adoption": "1f7ad58d83e9c8e5046d703c497ae88004547987"
 }
