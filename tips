@@ -1,15 +1,15 @@
 {
-  "jillian/sta-69-u2-stacc-absorb": "53179365f07d532b0a0fcf75c2df32a1c03ad801",
-  "jillian/sta-70-u3-stacc-squash": "f4a4431c338debef0ca0e306dbf88b1c1710402d",
-  "jillian/sta-71-u4-stacc-fold": "e4dca6a61a31f3c230460cede4b23ec959f14140",
-  "jillian/sta-72-u5-stacc-split": "69da094d23127c25075fd46c7c808be549354718",
-  "jillian/sta-73-u6-stacc-reorder": "e168bc529dff1245ad9a7d09a60405b152ad230d",
-  "jillian/sta-74-u7-stacc-delete-and-stacc-pop": "e33178de445c1993733e3d1d8da416c04e158c16",
-  "jillian/sta-75-u8-stacc-info": "8529e5ee2f447ba8fc8924df6dc5ed240dff3bfc",
-  "jillian/sta-76-u9-stacc-parent-stacc-children": "b94d66fd49fc946cb97fd2ab94e2d50393639cea",
-  "jillian/sta-77-u10-stacc-completion": "106c362072f18cdd733a7723757a4c51b142782a",
-  "jillian/sta-78-u11-stacc-config": "456dcf1c2e5592d1d05b65edbb4dcc4bdd4e1b9a",
-  "jillian/sta-79-u12-content-staging-flags": "e8b0f4ca56ca88b5fd563e18f09941eaf269a1f3",
-  "jillian/sta-80-u13-scope-flags": "94ab6c408193187cb854deb637b8f608f2fa1236",
-  "jillian/sta-81-u14-pr-adoption": "a7f140263b892d811824bb188f848925b08aa907"
+  "jillian/sta-69-u2-stacc-absorb": "b7af8c5b06cb69e0987dd587861f57d98ec83ed5",
+  "jillian/sta-70-u3-stacc-squash": "53debe9c5783e3433fde793609145cc96f328519",
+  "jillian/sta-71-u4-stacc-fold": "e98afa29753a5c5f7d19af12a9d9fdb1e65870ac",
+  "jillian/sta-72-u5-stacc-split": "804d282cce923c0926ae1b798a238e78fa207815",
+  "jillian/sta-73-u6-stacc-reorder": "ea45cd9eb0ede9feb7d166963b125e87d2a97804",
+  "jillian/sta-74-u7-stacc-delete-and-stacc-pop": "f29b9e98e0fb0968b6e6f365bc2a41765771255a",
+  "jillian/sta-75-u8-stacc-info": "d2bcc422fc226139a754e52dd07b1a00b458bc85",
+  "jillian/sta-76-u9-stacc-parent-stacc-children": "3fda57bb3375aadf4ac830bf7b99404fd734e530",
+  "jillian/sta-77-u10-stacc-completion": "87441406d7076180d63c5ffdacf2edccf14d5528",
+  "jillian/sta-78-u11-stacc-config": "8d9c813bcad054412b39a55d619f0b67a32f0b41",
+  "jillian/sta-79-u12-content-staging-flags": "25c6658488c7bbe7241acbf9d40683285bb60857",
+  "jillian/sta-80-u13-scope-flags": "89064dde93284e4973807c4a56ef0c969d95c81f",
+  "jillian/sta-81-u14-pr-adoption": "280fa4d4d8af4073ebfa4df872845c1910c4536f"
 }
