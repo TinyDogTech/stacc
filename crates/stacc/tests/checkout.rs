@@ -98,6 +98,73 @@ fn checkout_rejects_a_dash_prefixed_arg() {
 }
 
 #[test]
+fn checkout_trunk_switches_to_the_trunk() {
+    let tmp = init_repo();
+    let p = tmp.path();
+    create(p, "a"); // on a
+    let out = stacc(p, &["checkout", "--trunk", "--format", "json"]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(current_branch(p), "main");
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains(r#""branch":"main""#), "got: {s}");
+    assert!(s.contains(r#""moved":true"#), "got: {s}");
+}
+
+#[test]
+fn checkout_trunk_with_a_positional_branch_conflicts() {
+    let tmp = init_repo();
+    let p = tmp.path();
+    create(p, "a"); // on a
+    let out = stacc(p, &["checkout", "main", "--trunk"]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("cannot be used with"),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(current_branch(p), "a"); // repo untouched
+}
+
+#[test]
+fn checkout_stack_with_a_positional_branch_conflicts() {
+    let tmp = init_repo();
+    let p = tmp.path();
+    create(p, "a");
+    for flag in ["--stack", "--all"] {
+        let out = stacc(p, &["checkout", "main", flag]);
+        assert!(!out.status.success(), "{flag} with a positional should conflict");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("cannot be used with"),
+            "stderr for {flag}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    assert_eq!(current_branch(p), "a");
+}
+
+#[test]
+fn bare_checkout_with_scope_flags_still_errors_off_a_terminal() {
+    // --stack/--all scope the picker, but the non-interactive contract is
+    // unchanged: bare + no TTY is the same structured error.
+    let tmp = init_repo();
+    let p = tmp.path();
+    create(p, "a");
+    for flag in ["--stack", "--all"] {
+        let out = stacc(p, &["checkout", flag, "--no-interactive", "--format", "json"]);
+        assert!(!out.status.success(), "{flag} should not bypass the gate");
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains("needs a branch name"),
+            "got for {flag}: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+    }
+}
+
+#[test]
 fn bare_checkout_with_no_interactive_errors() {
     let tmp = init_repo();
     let p = tmp.path();

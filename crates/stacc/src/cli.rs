@@ -374,6 +374,19 @@ pub struct InfoArgs {
 pub struct CheckoutArgs {
     /// Branch to switch to. Omit on a terminal to pick interactively.
     pub branch: Option<String>,
+
+    /// Check out the trunk branch directly (no picker).
+    #[arg(long, group = "scope", conflicts_with = "branch")]
+    pub trunk: bool,
+
+    /// Limit the interactive picker to the current branch's stack.
+    #[arg(long, group = "scope", conflicts_with = "branch")]
+    pub stack: bool,
+
+    /// Offer every tracked branch in the interactive picker (the default,
+    /// made explicit).
+    #[arg(long, group = "scope", conflicts_with = "branch")]
+    pub all: bool,
 }
 
 /// Arguments for `stacc submit`.
@@ -383,6 +396,20 @@ pub struct SubmitArgs {
     /// Defaults to the branch's latest commit body.
     #[arg(long)]
     pub description: Option<String>,
+
+    /// Submit every branch in the current stack (ancestors and descendants),
+    /// not just the current branch and its downstack.
+    #[arg(long)]
+    pub stack: bool,
+
+    /// Only update branches that already have a PR; skip (and report) the
+    /// branches that would need a new one.
+    #[arg(long)]
+    pub update_only: bool,
+
+    /// Create new PRs as drafts (existing PRs are updated, never re-drafted).
+    #[arg(long)]
+    pub draft: bool,
 }
 
 /// Arguments for `stacc sync`.
@@ -399,12 +426,29 @@ pub struct SyncArgs {
     pub no_prune: bool,
 }
 
-/// Arguments for `stacc restack`.
+/// Arguments for `stacc restack`. The scope flags are mutually exclusive; with
+/// none, the scope is the current branch plus its upstack.
+// Independent CLI flags are naturally booleans; the count is a surface, not a
+// data-modeling smell (same as LogArgs).
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, clap::Args)]
 pub struct RestackArgs {
     /// Restack the whole stack instead of just the current branch and its upstack.
-    #[arg(long)]
+    #[arg(long, group = "scope")]
     pub stack: bool,
+
+    /// Restack only the current branch, leaving its upstack alone.
+    #[arg(long, group = "scope")]
+    pub only: bool,
+
+    /// Restack the current branch and its ancestors (toward the trunk),
+    /// leaving its upstack alone.
+    #[arg(long, group = "scope")]
+    pub downstack: bool,
+
+    /// Restack the current branch and its upstack (the default, made explicit).
+    #[arg(long, group = "scope")]
+    pub upstack: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -420,6 +464,11 @@ pub struct MoveArgs {
     /// Branch (or the trunk) to re-parent the current branch onto.
     #[arg(long)]
     pub onto: String,
+
+    /// Move only the current branch, not its upstack: its children are
+    /// reparented onto its old base so they stay put.
+    #[arg(long)]
+    pub only: bool,
 }
 
 /// Arguments for `stacc absorb`.

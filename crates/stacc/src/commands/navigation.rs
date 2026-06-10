@@ -137,7 +137,10 @@ pub fn children(format: OutputFormat) -> Result<(), Error> {
 }
 
 /// `stacc checkout`: switch to `args.branch`, or pick one interactively when run
-/// bare on a terminal. Bare + non-interactive errors structured (never prompts).
+/// bare on a terminal. `--trunk` checks out the trunk directly (no picker);
+/// `--stack`/`--all` scope the picker's candidates (the current branch's stack /
+/// every tracked branch, the latter being the default made explicit). Bare +
+/// non-interactive errors structured (never prompts), flags or not.
 pub fn checkout(
     args: &CheckoutArgs,
     format: OutputFormat,
@@ -152,6 +155,17 @@ pub fn checkout(
         }
         return go(&git, format, "checkout", &current, branch);
     }
+    // --trunk is deterministic: no picker, so no TTY needed.
+    if args.trunk {
+        let store = StateStore::new(git.clone());
+        let state = store.load()?;
+        let trunk = state
+            .repo
+            .as_ref()
+            .map(|r| r.trunk.clone())
+            .ok_or_else(|| Error::Usage("stacc is not initialized; run `stacc init` first".into()))?;
+        return go(&git, format, "checkout", &current, &trunk);
+    }
     if !crate::interactive::allowed(std::io::stdin().is_terminal(), no_interactive, format) {
         return Err(Error::Usage(
             "`stacc checkout` needs a branch name when not interactive; pass one explicitly".into(),
@@ -159,11 +173,36 @@ pub fn checkout(
     }
     let store = StateStore::new(git.clone());
     let state = store.load()?;
-    let mut items: Vec<String> = Vec::new();
-    if let Some(repo) = &state.repo {
-        items.push(repo.trunk.clone());
-    }
-    items.extend(state.branches.keys().cloned());
+    let items: Vec<String> = if args.stack {
+        // The current branch's stack: its ancestors (to the trunk) and its
+        // descendants, bottom-up.
+        let trunk = state
+            .repo
+            .as_ref()
+            .map(|r| r.trunk.clone())
+            .ok_or_else(|| Error::Usage("stacc is not initialized; run `stacc init` first".into()))?;
+        if current == trunk || !state.branches.contains_key(&current) {
+            return Err(Error::Usage(
+                "`--stack` scopes the picker to the current branch's stack; check out a tracked stack branch first".into(),
+            ));
+        }
+        let mut items = ops::downstack_chain(&state, &current, &trunk)?;
+        items.extend(
+            ops::upstack_order(&state.branches, &current)
+                .into_iter()
+                .skip(1),
+        );
+        items
+    } else {
+        // The default candidate set (--all is its explicit spelling): the trunk
+        // plus every tracked branch.
+        let mut items: Vec<String> = Vec::new();
+        if let Some(repo) = &state.repo {
+            items.push(repo.trunk.clone());
+        }
+        items.extend(state.branches.keys().cloned());
+        items
+    };
     if items.is_empty() {
         return Err(Error::Usage("no branches to choose from".into()));
     }

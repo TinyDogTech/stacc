@@ -53,6 +53,8 @@ pub struct NewPullRequest {
     pub head: String,
     pub base: String,
     pub body: String,
+    /// Open the PR as a draft.
+    pub draft: bool,
 }
 
 /// Fields to change on an existing pull request. Unset fields are left as-is.
@@ -440,6 +442,7 @@ mod tests {
                     head: "feature".into(),
                     base: "main".into(),
                     body: "B".into(),
+                    draft: false,
                 },
             )
             .unwrap();

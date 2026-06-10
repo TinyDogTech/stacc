@@ -861,9 +861,11 @@ fn report_fold(
 }
 
 /// `stacc move`: re-parent the current branch (and its upstack) onto `--onto`.
-/// Rejects a move onto the branch's own upstack (a cycle). On conflict records
-/// an `Operation::Move` whose `pre_base` lets `abort` roll the recorded base
-/// back. Local-only: no push.
+/// With `--only`, the branch moves alone: its children are reparented onto its
+/// old base (the same reparent delta as `delete`/`pop`, refs untouched) so they
+/// stay put instead of following the move. Rejects a move onto the branch's own
+/// upstack (a cycle). On conflict records an `Operation::Move` whose `pre_base`
+/// lets `abort` roll the recorded base back. Local-only: no push.
 pub fn move_cmd(args: &MoveArgs, format: OutputFormat) -> Result<(), Error> {
     let git = Git::open(".");
     let store = StateStore::new(git.clone());
@@ -929,34 +931,55 @@ pub fn move_cmd(args: &MoveArgs, format: OutputFormat) -> Result<(), Error> {
         )));
     }
 
-    // Fail fast if any branch in the subtree we would restack is checked out in
-    // another worktree.
-    guard_worktree(&git, &subtree)?;
+    // --only: the branch moves alone. Its children are reparented onto its old
+    // base so they stay put; their refs are untouched and their `base.hash` is
+    // kept (the `delete`/`pop` reparent semantics: it marks where each child's
+    // own commits start, so a later restack replays exactly those onto the old
+    // base, not the moved branch's commits).
+    let reparented = if args.only {
+        ops::children(&state.branches, &branch)
+    } else {
+        Vec::new()
+    };
+    let order: Vec<String> = if args.only {
+        vec![branch.clone()]
+    } else {
+        subtree.clone()
+    };
 
-    // Re-point the recorded base name. Keep base.hash: it marks where the
-    // branch's own commits start, which restack replays onto the new base's tip.
-    if let Some(b) = state.branches.get_mut(&branch) {
-        b.base.name.clone_from(onto);
-    }
+    // Fail fast if any branch we would restack is checked out in another
+    // worktree.
+    guard_worktree(&git, &order)?;
+
+    // The state delta: re-point the moved branch's base name (keep base.hash, it
+    // marks where the branch's own commits start, which restack replays onto the
+    // new base's tip) and, under --only, the children's bases onto the old one.
+    // Applied to fresh state on every transactional save, so a concurrent change
+    // to another branch is preserved by the re-apply.
+    let apply_move = |s: &mut State| {
+        if let Some(b) = s.branches.get_mut(&branch) {
+            b.base.name.clone_from(onto);
+        }
+        for child in &reparented {
+            if let Some(b) = s.branches.get_mut(child) {
+                b.base.name.clone_from(&pre_base);
+            }
+        }
+    };
+    apply_move(&mut state);
 
     let restacked = restack_with_recovery(
         &git,
         &store,
         &mut state,
         &repo,
-        &subtree,
+        &order,
         |remaining| recovery::Operation::Move {
             branch: branch.clone(),
             remaining,
             pre_base: pre_base.clone(),
         },
-        // Re-point the moved branch's base name onto fresh state, so a concurrent
-        // change to another branch is preserved by the re-apply.
-        &|s| {
-            if let Some(b) = s.branches.get_mut(&branch) {
-                b.base.name.clone_from(onto);
-            }
-        },
+        &apply_move,
     )?;
     clear_conflict_artifacts(&git);
     // Best-effort: the move is already saved, so a failure to switch back to the
@@ -966,18 +989,36 @@ pub fn move_cmd(args: &MoveArgs, format: OutputFormat) -> Result<(), Error> {
     }
 
     let tip = git.rev_parse(&branch)?;
-    report_move(format, &branch, onto, &tip, &restacked);
+    report_move(format, &branch, onto, &tip, &restacked, &reparented, &pre_base);
     Ok(())
 }
 
-fn report_move(format: OutputFormat, branch: &str, base: &str, sha: &str, restacked: &[String]) {
+fn report_move(
+    format: OutputFormat,
+    branch: &str,
+    base: &str,
+    sha: &str,
+    restacked: &[String],
+    reparented: &[String],
+    old_base: &str,
+) {
     match format {
         OutputFormat::Json => println!(
             "{}",
-            json!({ "op": "move", "branch": branch, "base": base, "sha": sha, "restacked": restacked })
+            json!({
+                "op": "move",
+                "branch": branch,
+                "base": base,
+                "sha": sha,
+                "restacked": restacked,
+                "reparented": reparented,
+            })
         ),
         OutputFormat::Pretty => {
             println!("Moved {branch} onto {base}");
+            if !reparented.is_empty() {
+                println!("  reparented onto {old_base}: {}", reparented.join(", "));
+            }
             for name in restacked {
                 println!("Restacked {name}");
             }
@@ -1564,9 +1605,10 @@ fn report_merge(
 }
 
 /// `stacc restack`: rebase tracked branches back onto their bases, repairing a
-/// drifted stack. Defaults to the current branch and its upstack; `--stack`
-/// restacks the whole stack. Unlike `sync`, this is purely local: no fetch, no
-/// merge detection.
+/// drifted stack. Defaults to the current branch and its upstack (`--upstack`
+/// makes that explicit); `--only` narrows to the current branch, `--downstack`
+/// to the current branch and its ancestors, and `--stack` widens to the whole
+/// stack. Unlike `sync`, this is purely local: no fetch, no merge detection.
 pub fn restack(args: &RestackArgs, format: OutputFormat) -> Result<(), Error> {
     let git = Git::open(".");
     let store = StateStore::new(git.clone());
@@ -1594,7 +1636,14 @@ pub fn restack(args: &RestackArgs, format: OutputFormat) -> Result<(), Error> {
                 repo.trunk
             )));
         }
-        ops::upstack_order(&state.branches, &current)
+        if args.only {
+            vec![current]
+        } else if args.downstack {
+            ops::downstack_chain(&state, &current, &repo.trunk)?
+        } else {
+            // The default scope; --upstack is its explicit spelling.
+            ops::upstack_order(&state.branches, &current)
+        }
     };
 
     let restacked = restack_with_recovery(

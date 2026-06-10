@@ -2,7 +2,7 @@
 date: 2026-06-09
 type: feat
 title: "P2: Daily-driver command parity (surgery, removal, ergonomics, flags)"
-status: active
+status: completed
 origin: docs/brainstorms/2026-06-07-graphite-swap-readiness-requirements.md
 depth: deep
 ---

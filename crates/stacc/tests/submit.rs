@@ -254,6 +254,148 @@ fn submit_walks_the_downstack() {
 }
 
 #[test]
+fn submit_stack_submits_the_whole_stack_downstack_first() {
+    let (tmp, _bare) = setup();
+    assert!(stacc(tmp.path(), &["init"]).status.success());
+
+    // main -> feature-1 -> feature-2; submit from feature-1, so feature-2 is
+    // only reachable through --stack.
+    run_git(tmp.path(), &["checkout", "-q", "-b", "feature-1"]);
+    run_git(tmp.path(), &["commit", "-q", "--allow-empty", "-m", "f1"]);
+    assert!(stacc(tmp.path(), &["track"]).status.success());
+
+    run_git(tmp.path(), &["checkout", "-q", "-b", "feature-2"]);
+    run_git(tmp.path(), &["commit", "-q", "--allow-empty", "-m", "f2"]);
+    assert!(stacc(tmp.path(), &["track", "--base", "feature-1"]).status.success());
+
+    run_git(tmp.path(), &["checkout", "-q", "feature-1"]);
+
+    let server = MockServer::start();
+    let mock_f1 = server.mock(|when, then| {
+        when.method(httpmock::Method::POST)
+            .path("/repos/TinyDogTech/stacc/pulls")
+            .body_contains(r#""head":"feature-1""#)
+            .body_contains(r#""base":"main""#);
+        then.status(201).json_body(pr_body(41));
+    });
+    let mock_f2 = server.mock(|when, then| {
+        when.method(httpmock::Method::POST)
+            .path("/repos/TinyDogTech/stacc/pulls")
+            .body_contains(r#""head":"feature-2""#)
+            .body_contains(r#""base":"feature-1""#);
+        then.status(201).json_body(pr_body(42));
+    });
+
+    let out = stacc_env(
+        tmp.path(),
+        &["submit", "--stack", "--format", "json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let s = String::from_utf8_lossy(&out.stdout);
+    // Downstack-first: feature-1's PR is reported before feature-2's, so its
+    // base ref existed on the remote when feature-2's PR opened.
+    let f1 = s.find(r#""branch":"feature-1""#).expect("feature-1 in output");
+    let f2 = s.find(r#""branch":"feature-2""#).expect("feature-2 in output");
+    assert!(f1 < f2, "expected feature-1 before feature-2: {s}");
+    mock_f1.assert();
+    mock_f2.assert();
+}
+
+#[test]
+fn submit_update_only_skips_branches_without_prs() {
+    let (tmp, _bare) = setup();
+    assert!(stacc(tmp.path(), &["init"]).status.success());
+
+    // main -> feature-1 (has PR #3) -> feature-2 (no PR); submit from feature-2.
+    run_git(tmp.path(), &["checkout", "-q", "-b", "feature-1"]);
+    run_git(tmp.path(), &["commit", "-q", "--allow-empty", "-m", "f1"]);
+    assert!(stacc(tmp.path(), &["track"]).status.success());
+
+    run_git(tmp.path(), &["checkout", "-q", "-b", "feature-2"]);
+    run_git(tmp.path(), &["commit", "-q", "--allow-empty", "-m", "f2"]);
+    assert!(stacc(tmp.path(), &["track", "--base", "feature-1"]).status.success());
+
+    let store = StateStore::new(Git::open(tmp.path()));
+    let mut state = store.load().unwrap();
+    state.branches.get_mut("feature-1").unwrap().pr = Some(PullRequest {
+        number: 3,
+        url: None,
+    });
+    store.save(&state).unwrap();
+
+    let server = MockServer::start();
+    // Only feature-1's existing PR is touched; no POST mock exists, so any
+    // attempt to create a PR would 404 and fail the command.
+    let mock = server.mock(|when, then| {
+        when.method(httpmock::Method::PATCH)
+            .path("/repos/TinyDogTech/stacc/pulls/3");
+        then.status(200).json_body(pr_body(3));
+    });
+
+    let out = stacc_env(
+        tmp.path(),
+        &["submit", "--update-only", "--format", "json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains(r#""status":"updated""#), "got: {s}");
+    assert!(s.contains(r#""skipped":["feature-2"]"#), "got: {s}");
+    mock.assert();
+}
+
+#[test]
+fn submit_draft_creates_a_draft_pr() {
+    let (tmp, _bare) = setup();
+    assert!(stacc(tmp.path(), &["init"]).status.success());
+    run_git(tmp.path(), &["checkout", "-q", "-b", "feature"]);
+    run_git(tmp.path(), &["commit", "-q", "--allow-empty", "-m", "Add feature"]);
+    assert!(stacc(tmp.path(), &["track"]).status.success());
+
+    let server = MockServer::start();
+    let mock = server.mock(|when, then| {
+        when.method(httpmock::Method::POST)
+            .path("/repos/TinyDogTech/stacc/pulls")
+            .body_contains(r#""draft":true"#);
+        then.status(201).json_body(pr_body(9));
+    });
+
+    let out = stacc_env(
+        tmp.path(),
+        &["submit", "--draft", "--format", "json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    mock.assert();
+}
+
+#[test]
+fn submit_without_draft_sends_draft_false() {
+    let (tmp, _bare) = setup();
+    assert!(stacc(tmp.path(), &["init"]).status.success());
+    run_git(tmp.path(), &["checkout", "-q", "-b", "feature"]);
+    run_git(tmp.path(), &["commit", "-q", "--allow-empty", "-m", "Add feature"]);
+    assert!(stacc(tmp.path(), &["track"]).status.success());
+
+    let server = MockServer::start();
+    let mock = server.mock(|when, then| {
+        when.method(httpmock::Method::POST)
+            .path("/repos/TinyDogTech/stacc/pulls")
+            .body_contains(r#""draft":false"#);
+        then.status(201).json_body(pr_body(10));
+    });
+
+    let out = stacc_env(
+        tmp.path(),
+        &["submit", "--format", "json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    mock.assert();
+}
+
+#[test]
 fn submit_re_pushes_a_rebased_branch_via_lease() {
     // Plain push would refuse a non-fast-forward after a rebase. The lease
     // push accepts it because the local remote-tracking ref still matches the
