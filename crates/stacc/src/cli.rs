@@ -83,6 +83,10 @@ pub enum Command {
     Split(SplitArgs),
     /// Reorder the branches between the trunk and the current branch, restacking descendants.
     Reorder(ReorderArgs),
+    /// Delete a branch and its metadata, reparenting and restacking its children onto its base.
+    Delete(DeleteArgs),
+    /// Remove the current branch, keeping its changes in the working tree as unstaged modifications.
+    Pop,
     /// Rename the current branch, updating local state, children, and the remote.
     Rename(RenameArgs),
     /// Squash-merge the ready PRs from the trunk up to the current branch, then sync.
@@ -329,6 +333,21 @@ pub struct SquashArgs {
 pub struct FoldArgs {
     /// Close the folded branch's PR on GitHub (best-effort; a failure to close
     /// is reported, not fatal).
+    #[arg(long)]
+    pub close: bool,
+}
+
+/// Arguments for `stacc delete`.
+#[derive(Debug, clap::Args)]
+pub struct DeleteArgs {
+    /// Branch to delete (must be tracked; never the trunk).
+    pub branch: String,
+    /// Delete even when the branch is not merged into its base, its diff is
+    /// not empty, and its PR is not closed or merged.
+    #[arg(long)]
+    pub force: bool,
+    /// Close the branch's PR on GitHub (left open by default; best-effort, a
+    /// failure to close is reported, not fatal).
     #[arg(long)]
     pub close: bool,
 }
