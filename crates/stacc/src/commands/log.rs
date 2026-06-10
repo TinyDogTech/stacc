@@ -650,7 +650,7 @@ fn meta_lines(
     if let Some(pr) = branches.get(node).and_then(|b| b.pr.as_ref()) {
         match pr_status.get(node).and_then(Option::as_ref) {
             Some(live) => {
-                lines.push(pr_line(pr.number, live));
+                lines.push(pr_line(live));
                 if let Some(rollup) = rollup_line(live.checks) {
                     lines.push(rollup);
                 }
@@ -677,13 +677,13 @@ fn pr_status_label(state: PrState) -> &'static str {
 /// The PR metadata line: `#NN <state>` plus a mergeable-state hint when GitHub
 /// reports the PR stuck, then the truncated title. An open draft renders as
 /// `Draft` (GitHub's draft flag is a sub-state of open).
-fn pr_line(number: u64, detail: &PrLive) -> String {
+fn pr_line(detail: &PrLive) -> String {
     let state = if detail.pr.draft && detail.pr.state == PrState::Open {
         "Draft"
     } else {
         pr_status_label(detail.pr.state)
     };
-    let mut line = format!("#{number} {state}");
+    let mut line = format!("#{} {state}", detail.pr.number);
     if detail.pr.state == PrState::Open {
         if let Some(hint) = super::mergeable_hint(detail.pr.mergeable_state.as_deref()) {
             line.push_str(" (");
@@ -1131,18 +1131,18 @@ mod tests {
 
     #[test]
     fn pr_line_shows_draft_hint_and_title() {
-        assert_eq!(pr_line(7, &pr_live(PrState::Open, false, None, "")), "#7 Open");
-        assert_eq!(pr_line(7, &pr_live(PrState::Open, true, None, "")), "#7 Draft");
+        assert_eq!(pr_line(&pr_live(PrState::Open, false, None, "")), "#7 Open");
+        assert_eq!(pr_line(&pr_live(PrState::Open, true, None, "")), "#7 Draft");
         assert_eq!(
-            pr_line(7, &pr_live(PrState::Open, false, Some("blocked"), "Add foo")),
+            pr_line(&pr_live(PrState::Open, false, Some("blocked"), "Add foo")),
             "#7 Open (blocked) - Add foo"
         );
         // `clean`/`unknown` are not actionable: no hint.
-        assert_eq!(pr_line(7, &pr_live(PrState::Open, false, Some("clean"), "")), "#7 Open");
-        assert_eq!(pr_line(7, &pr_live(PrState::Open, false, Some("unknown"), "")), "#7 Open");
+        assert_eq!(pr_line(&pr_live(PrState::Open, false, Some("clean"), "")), "#7 Open");
+        assert_eq!(pr_line(&pr_live(PrState::Open, false, Some("unknown"), "")), "#7 Open");
         // A merged PR never reads as draft and carries no stale hint.
         assert_eq!(
-            pr_line(7, &pr_live(PrState::Merged, true, Some("dirty"), "t")),
+            pr_line(&pr_live(PrState::Merged, true, Some("dirty"), "t")),
             "#7 Merged - t"
         );
     }

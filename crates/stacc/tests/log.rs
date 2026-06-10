@@ -692,6 +692,12 @@ fn log_full_shows_title_draft_and_mergeable_hint() {
             "mergeable_state": "blocked",
         }));
     });
+    // The open PR triggers the rollup query; answer it emptily so this test
+    // exercises exactly the tier-1 fields.
+    server.mock(|when, then| {
+        when.method(httpmock::Method::POST).path("/graphql");
+        then.status(200).json_body(serde_json::json!({ "data": { "repository": {} } }));
+    });
     let base = server.base_url();
     let envs: &[(&str, &str)] = &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", base.as_str())];
 
