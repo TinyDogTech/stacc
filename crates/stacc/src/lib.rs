@@ -20,7 +20,8 @@ use error::Error;
 const BUILTINS: &[&str] = &[
     "init", "track", "untrack", "create", "modify", "log", "status", "submit", "sync", "restack",
     "move", "absorb", "squash", "fold", "split", "reorder", "delete", "pop", "rename", "merge",
-    "continue", "abort", "undo", "up", "down", "top", "bottom", "checkout", "pr", "auth", "info",
+    "continue", "abort", "undo", "up", "down", "top", "bottom", "checkout", "parent", "children",
+    "pr", "auth", "info",
 ];
 
 /// Short aliases stacc ships with, seeded at the lowest precedence so a user or
@@ -109,6 +110,8 @@ fn dispatch(cli: &Cli) -> Result<(), Error> {
         Command::Checkout(args) => {
             commands::checkout(args, cli.global.format, cli.global.no_interactive)
         }
+        Command::Parent => commands::parent(cli.global.format),
+        Command::Children => commands::children(cli.global.format),
         Command::Auth(args) => commands::auth(args, cli.global.format),
         Command::External(_) => unreachable!("external subcommands are proxied in run"),
     }

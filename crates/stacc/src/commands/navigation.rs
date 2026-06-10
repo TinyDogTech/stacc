@@ -1,5 +1,6 @@
 //! Stack navigation: `up` / `down` / `top` / `bottom` move HEAD around the
-//! tracked stack via `git checkout`.
+//! tracked stack via `git checkout`, and the read-only `parent` / `children`
+//! report the current branch's neighbors without moving.
 
 use std::io::IsTerminal;
 
@@ -95,6 +96,44 @@ pub fn bottom(format: OutputFormat) -> Result<(), Error> {
     let (git, current, state, trunk) = context()?;
     let target = ops::bottom(&state.branches, &current, &trunk);
     go(&git, format, "bottom", &current, &target)
+}
+
+/// `stacc parent`: print the current branch's recorded base. Read-only. On the
+/// trunk or an untracked branch the parent is null and the exit code is 0, so
+/// scripts walking down a stack do not break at the root.
+pub fn parent(format: OutputFormat) -> Result<(), Error> {
+    let (_git, current, state, _trunk) = context()?;
+    let parent = ops::parent(&state.branches, &current);
+    match format {
+        OutputFormat::Json => {
+            println!("{}", json!({ "op": "parent", "parent": parent }));
+        }
+        OutputFormat::Pretty => {
+            if let Some(parent) = parent {
+                println!("{parent}");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `stacc children`: print the branches stacked directly on the current branch
+/// (recorded base == current), in name order. Read-only. On the trunk this
+/// lists the trunk-based branches; a leaf prints an empty list, exit 0.
+pub fn children(format: OutputFormat) -> Result<(), Error> {
+    let (_git, current, state, _trunk) = context()?;
+    let kids = ops::children(&state.branches, &current);
+    match format {
+        OutputFormat::Json => {
+            println!("{}", json!({ "op": "children", "children": kids }));
+        }
+        OutputFormat::Pretty => {
+            for kid in &kids {
+                println!("{kid}");
+            }
+        }
+    }
+    Ok(())
 }
 
 /// `stacc checkout`: switch to `args.branch`, or pick one interactively when run

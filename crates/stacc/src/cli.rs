@@ -107,6 +107,10 @@ pub enum Command {
     Bottom,
     /// Switch to a branch (pick interactively when run bare on a terminal).
     Checkout(CheckoutArgs),
+    /// Print the current branch's recorded parent (base); nothing on the trunk.
+    Parent,
+    /// Print the branches stacked directly on the current branch, name-ordered.
+    Children,
     /// Print the stack.
     Log(LogArgs),
     /// Show the current branch's position and PR status.
