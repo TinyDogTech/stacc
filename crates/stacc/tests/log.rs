@@ -55,6 +55,17 @@ fn seed_pr(dir: &std::path::Path, branch: &str, number: u64) {
     store.save(&state).unwrap();
 }
 
+/// The commit the state ref currently points at (for no-write assertions).
+fn state_ref(dir: &std::path::Path) -> String {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "refs/stacc/data"])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
 fn repo() -> TempDir {
     let tmp = TempDir::new().expect("temp dir");
     run_git(tmp.path(), &["init", "-q", "-b", "main"]);
@@ -518,6 +529,142 @@ fn log_no_status_makes_no_api_call() {
     assert!(s.contains("#7"), "PR number still shown: {s}");
     assert!(!s.contains("#7 Open"), "no live status under --no-status: {s}");
     mock.assert_hits(0); // --no-status must not hit the API at all
+}
+
+#[test]
+fn log_adopts_a_pr_found_by_head_and_records_it() {
+    let tmp = github_repo();
+    let p = tmp.path();
+    assert!(stacc(p, &["init"]).status.success());
+    run_git(p, &["checkout", "-q", "-b", "feature"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "feat: x"]);
+    assert!(stacc(p, &["track"]).status.success());
+    // No PR recorded: a stack migrated from gh/graphite.
+
+    let server = MockServer::start();
+    let by_head = server.mock(|when, then| {
+        when.method(httpmock::Method::GET)
+            .path("/repos/TinyDogTech/stacc/pulls")
+            .query_param("head", "TinyDogTech:feature")
+            .query_param("state", "open");
+        then.status(200).json_body(serde_json::json!([{
+            "number": 7,
+            "html_url": "https://github.com/TinyDogTech/stacc/pull/7",
+            "state": "open",
+            "merged": false,
+        }]));
+    });
+    let by_number = server.mock(|when, then| {
+        when.method(httpmock::Method::GET)
+            .path("/repos/TinyDogTech/stacc/pulls/7");
+        then.status(200).json_body(serde_json::json!({
+            "number": 7, "html_url": "u", "state": "open", "merged": false,
+        }));
+    });
+    let base = server.base_url();
+    let envs: &[(&str, &str)] = &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", base.as_str())];
+
+    // First log: discovers the PR by head, shows its live status, records it.
+    let out = stacc_env(p, &["log"], envs);
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let s = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(s.contains("#7 Open"), "adopted PR shows live status: {s}");
+    by_head.assert();
+    by_number.assert_hits(0);
+
+    // The adoption landed in state (number and url).
+    let show = Command::new("git")
+        .arg("-C")
+        .arg(p)
+        .args(["show", "refs/stacc/data:branches/feature"])
+        .output()
+        .unwrap();
+    let blob = String::from_utf8_lossy(&show.stdout).into_owned();
+    assert!(blob.contains(r#""number": 7"#), "got: {blob}");
+    assert!(blob.contains("/pull/7"), "url recorded too: {blob}");
+
+    // Second log: uses the recorded number directly; no second by-head lookup.
+    let out = stacc_env(p, &["log"], envs);
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let s = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(s.contains("#7 Open"), "recorded PR keeps its status: {s}");
+    by_head.assert_hits(1);
+    by_number.assert_hits(1);
+}
+
+#[test]
+fn log_by_head_lookup_failure_is_silent_and_writes_nothing() {
+    let tmp = github_repo();
+    let p = tmp.path();
+    assert!(stacc(p, &["init"]).status.success());
+    run_git(p, &["checkout", "-q", "-b", "feature"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "feat: x"]);
+    assert!(stacc(p, &["track"]).status.success());
+
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(httpmock::Method::GET)
+            .path("/repos/TinyDogTech/stacc/pulls");
+        then.status(500).json_body(serde_json::json!({ "message": "boom" }));
+    });
+    let base = server.base_url();
+    let envs: &[(&str, &str)] = &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", base.as_str())];
+
+    let before = state_ref(p);
+    let out = stacc_env(p, &["log"], envs);
+    assert!(out.status.success(), "must not be fatal: {}", String::from_utf8_lossy(&out.stderr));
+    let s = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(s.contains("feature"), "branch still renders: {s}");
+    assert!(!s.contains('#'), "no PR line on a failed lookup: {s}");
+    assert_eq!(state_ref(p), before, "a failed lookup writes no state");
+}
+
+#[test]
+fn log_stays_usable_offline_with_no_state_write() {
+    let tmp = github_repo();
+    let p = tmp.path();
+    assert!(stacc(p, &["init"]).status.success());
+    run_git(p, &["checkout", "-q", "-b", "feature"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "feat: x"]);
+    assert!(stacc(p, &["track"]).status.success());
+
+    // An unreachable API endpoint stands in for "offline".
+    let envs: &[(&str, &str)] = &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", "http://127.0.0.1:1")];
+
+    let before = state_ref(p);
+    let out = stacc_env(p, &["log"], envs);
+    assert!(out.status.success(), "offline log must not fail: {}", String::from_utf8_lossy(&out.stderr));
+    let s = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(s.contains("feature"), "branch still renders: {s}");
+    assert!(!s.contains('#'), "no PR line offline: {s}");
+    assert_eq!(state_ref(p), before, "offline log writes no state");
+}
+
+#[test]
+fn log_no_status_skips_the_by_head_lookup() {
+    let tmp = github_repo();
+    let p = tmp.path();
+    assert!(stacc(p, &["init"]).status.success());
+    run_git(p, &["checkout", "-q", "-b", "feature"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "feat: x"]);
+    assert!(stacc(p, &["track"]).status.success());
+
+    let server = MockServer::start();
+    let by_head = server.mock(|when, then| {
+        when.method(httpmock::Method::GET)
+            .path("/repos/TinyDogTech/stacc/pulls");
+        then.status(200).json_body(serde_json::json!([{
+            "number": 7, "html_url": "u", "state": "open", "merged": false,
+        }]));
+    });
+    let base = server.base_url();
+    let envs: &[(&str, &str)] = &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", base.as_str())];
+
+    let before = state_ref(p);
+    let out = stacc_env(p, &["log", "--no-status"], envs);
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    by_head.assert_hits(0); // --no-status does no lookups at all
+    assert_eq!(state_ref(p), before, "--no-status writes no state");
 }
 
 #[test]

@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 use stacc_core::ops;
 use stacc_git::Git;
 use stacc_github::{GitHub, PrState};
-use stacc_state::{BranchState, RepoConfig, StateStore};
+use stacc_state::{BranchState, PullRequest, RepoConfig, StateStore};
 
 use crate::cli::{ColorChoice, LogArgs, LogForm, OutputFormat};
 use crate::error::Error;
@@ -104,21 +104,20 @@ fn color_enabled(choice: ColorChoice) -> bool {
 pub fn log(args: &LogArgs, format: OutputFormat, color: ColorChoice) -> Result<(), Error> {
     let git = Git::open(".");
     let store = StateStore::new(git.clone());
-    let state = store.load()?;
+    let mut state = store.load()?;
     let repo = state
         .repo
         .clone()
         .ok_or_else(|| Error::Usage("stacc is not initialized; run `stacc init` first".into()))?;
     let trunk = repo.trunk.clone();
-    let branches = &state.branches;
     let current = git.current_branch().unwrap_or_default();
 
     // Trunk-reachable tracked branches (orphans are surfaced separately).
-    let reachable = ops::topo_order(branches, &trunk);
+    let reachable = ops::topo_order(&state.branches, &trunk);
     let reachable_set: BTreeSet<&str> = reachable.iter().map(String::as_str).collect();
 
     // The visible set after scope flags, always rooted at and including the trunk.
-    let visible = visible_set(args, branches, &trunk, &current, &reachable_set);
+    let visible = visible_set(args, &state.branches, &trunk, &current, &reachable_set);
 
     // long form: a pure git pass-through; JSON is a documented no-op.
     if args.form() == Some(LogForm::Long) {
@@ -126,7 +125,7 @@ pub fn log(args: &LogArgs, format: OutputFormat, color: ColorChoice) -> Result<(
             println!("{}", json!({ "trunk": trunk, "form": "long" }));
             return Ok(());
         }
-        let tips = tracked_tips(&visible, branches);
+        let tips = tracked_tips(&visible, &state.branches);
         let tip_refs: Vec<&str> = tips.iter().map(String::as_str).collect();
         let out = git.log_graph(&tip_refs, &trunk).unwrap_or_default();
         if !out.is_empty() {
@@ -135,21 +134,44 @@ pub fn log(args: &LogArgs, format: OutputFormat, color: ColorChoice) -> Result<(
         return Ok(());
     }
 
-    let children = child_map(&visible, branches, &trunk);
+    let children = child_map(&visible, &state.branches, &trunk);
 
     // Tracked branches whose git ref is gone (deleted or merged-and-pruned). We
     // mark them and skip their metadata + PR fetch, since git can't resolve them.
-    let deleted = missing_branches(&git, &visible, branches, &trunk);
+    let deleted = missing_branches(&git, &visible, &state.branches, &trunk);
 
     // Live PR status: fetched for JSON and the full pretty form (unless
     // --no-status); the short form is offline by contract.
     let want_status =
         !args.no_status && (format == OutputFormat::Json || args.form().is_none());
-    let pr_status = if want_status {
-        fetch_pr_status(&git, &repo, branches, &visible, &deleted)
+    let (pr_status, adopted) = if want_status {
+        fetch_pr_status(&git, &repo, &state.branches, &visible, &deleted)
     } else {
-        BTreeMap::new()
+        (BTreeMap::new(), Vec::new())
     };
+
+    // Self-heal: PRs discovered by head branch are recorded so the next log can
+    // fetch them by number directly. One transactional write covers them all;
+    // a failed write only loses the cache, this run still renders the statuses.
+    // No lookups succeed offline/without a token, so nothing is written then.
+    if !adopted.is_empty() {
+        let _ = store.update(|s| {
+            for (name, pr) in &adopted {
+                if let Some(branch) = s.branches.get_mut(name) {
+                    if branch.pr.is_none() {
+                        branch.pr = Some(pr.clone());
+                    }
+                }
+            }
+            Ok(())
+        });
+        for (name, pr) in adopted {
+            if let Some(branch) = state.branches.get_mut(&name) {
+                branch.pr = Some(pr);
+            }
+        }
+    }
+    let branches = &state.branches;
 
     match format {
         OutputFormat::Json => {
@@ -671,18 +693,29 @@ fn term_width() -> usize {
 
 // --- Live PR status --------------------------------------------------------
 
+/// branch name -> its live PR status (`None` when unavailable).
+type PrStatusMap = BTreeMap<String, Option<PrState>>;
+/// PRs discovered by head branch this run, for the caller to record in state.
+type Adoptions = Vec<(String, PullRequest)>;
+
 /// Fetch each visible branch's live PR status, never fatally. Branches with a
 /// recorded PR map to `Some(state)` on success and `None` on any failure (no
 /// token, no remote, an API error, or the wall-clock budget exhausted).
+///
+/// Tracked branches with NO recorded PR (e.g. a stack migrated from another
+/// tool) are looked up by head branch under the same budget and tolerance; a
+/// hit yields a live status now plus an adoption record `(branch, pr)` the
+/// caller persists, so the next log fetches by number directly.
 fn fetch_pr_status(
     git: &Git,
     repo: &RepoConfig,
     branches: &BTreeMap<String, BranchState>,
     visible: &BTreeSet<String>,
     deleted: &BTreeSet<String>,
-) -> BTreeMap<String, Option<PrState>> {
+) -> (PrStatusMap, Adoptions) {
     let mut map = BTreeMap::new();
-    let prs: Vec<(String, u64)> = visible
+    let mut adopted = Vec::new();
+    let recorded: Vec<(String, u64)> = visible
         .iter()
         .filter(|name| !deleted.contains(*name))
         .filter_map(|name| {
@@ -692,22 +725,28 @@ fn fetch_pr_status(
                 .map(|pr| (name.clone(), pr.number))
         })
         .collect();
-    if prs.is_empty() {
-        return map;
+    let unrecorded: Vec<String> = visible
+        .iter()
+        .filter(|name| !deleted.contains(*name))
+        .filter(|name| branches.get(*name).is_some_and(|b| b.pr.is_none()))
+        .cloned()
+        .collect();
+    if recorded.is_empty() && unrecorded.is_empty() {
+        return (map, adopted);
     }
 
     let Some((github, owner, repo_name)) = build_client(git, repo) else {
-        for (name, _) in prs {
+        for (name, _) in recorded {
             map.insert(name, None);
         }
-        return map;
+        return (map, adopted);
     };
 
     // Bound the TOTAL fetch time, not just when we stop starting calls: each
     // call's timeout is whatever budget remains, so a single hung request can't
     // blow past STATUS_BUDGET. A branch we run out of time for falls back to None.
     let start = Instant::now();
-    for (name, number) in prs {
+    for (name, number) in recorded {
         let remaining = STATUS_BUDGET.saturating_sub(start.elapsed());
         let status = if remaining > Duration::from_millis(50) {
             github
@@ -719,7 +758,28 @@ fn fetch_pr_status(
         };
         map.insert(name, status);
     }
-    map
+    // By-head adoption lookups, after the recorded fetches so they only spend
+    // leftover budget. Any failure (or no match) leaves the branch status-less,
+    // exactly as before; only a confirmed open PR produces an adoption.
+    for name in unrecorded {
+        let remaining = STATUS_BUDGET.saturating_sub(start.elapsed());
+        if remaining <= Duration::from_millis(50) {
+            break;
+        }
+        if let Ok(Some(pr)) =
+            github.pull_request_for_branch_within(&owner, &repo_name, &name, remaining)
+        {
+            map.insert(name.clone(), Some(pr.state));
+            adopted.push((
+                name,
+                PullRequest {
+                    number: pr.number,
+                    url: Some(pr.url),
+                },
+            ));
+        }
+    }
+    (map, adopted)
 }
 
 /// Best-effort GitHub client + (owner, repo) from the configured remote. `None`
