@@ -2,5 +2,9 @@
   "base": {
     "name": "jillian/sta-73-u6-stacc-reorder",
     "hash": "e168bc529dff1245ad9a7d09a60405b152ad230d"
+  },
+  "pr": {
+    "number": 78,
+    "url": "https://github.com/TinyDogTech/stacc/pull/78"
   }
 }

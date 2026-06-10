@@ -2,5 +2,9 @@
   "base": {
     "name": "jillian/sta-74-u7-stacc-delete-and-stacc-pop",
     "hash": "e33178de445c1993733e3d1d8da416c04e158c16"
+  },
+  "pr": {
+    "number": 79,
+    "url": "https://github.com/TinyDogTech/stacc/pull/79"
   }
 }

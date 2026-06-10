@@ -2,5 +2,9 @@
   "base": {
     "name": "jillian/sta-79-u12-content-staging-flags",
     "hash": "e8b0f4ca56ca88b5fd563e18f09941eaf269a1f3"
+  },
+  "pr": {
+    "number": 84,
+    "url": "https://github.com/TinyDogTech/stacc/pull/84"
   }
 }

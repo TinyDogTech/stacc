@@ -2,5 +2,9 @@
   "base": {
     "name": "jillian/sta-80-u13-scope-flags",
     "hash": "94ab6c408193187cb854deb637b8f608f2fa1236"
+  },
+  "pr": {
+    "number": 85,
+    "url": "https://github.com/TinyDogTech/stacc/pull/85"
   }
 }
