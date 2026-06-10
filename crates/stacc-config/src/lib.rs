@@ -19,8 +19,50 @@ pub enum ConfigError {
     #[error("failed to parse config file: {0}")]
     Toml(#[from] toml::de::Error),
 
+    #[error("failed to edit config file: {0}")]
+    Edit(#[from] toml_edit::TomlError),
+
+    #[error("cannot edit `{key}`: `aliases` is not a table in the config file")]
+    AliasesNotATable { key: String },
+
     #[error("could not determine {field}; pass it explicitly")]
     Missing { field: &'static str },
+}
+
+/// A key the config files support: the top-level `trunk` and `remote`
+/// overrides, and `aliases.<name>` entries in the `[aliases]` table. This is
+/// the complete settable namespace; `stacc config` validates against it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Key {
+    Trunk,
+    Remote,
+    Alias(String),
+}
+
+impl Key {
+    /// Parse a dotted key string. `None` means the key is not one stacc knows.
+    pub fn parse(key: &str) -> Option<Key> {
+        match key {
+            "trunk" => Some(Key::Trunk),
+            "remote" => Some(Key::Remote),
+            _ => match key.strip_prefix("aliases.") {
+                Some(name) if !name.is_empty() && !name.contains('.') => {
+                    Some(Key::Alias(name.to_string()))
+                }
+                _ => None,
+            },
+        }
+    }
+}
+
+impl std::fmt::Display for Key {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Key::Trunk => f.write_str("trunk"),
+            Key::Remote => f.write_str("remote"),
+            Key::Alias(name) => write!(f, "aliases.{name}"),
+        }
+    }
 }
 
 /// User-supplied values (from flags or a config file). A `None` field falls
@@ -68,6 +110,73 @@ pub fn aliases_from_file(path: &Path) -> BTreeMap<String, String> {
         return BTreeMap::new();
     };
     toml::from_str::<Wrap>(&text).unwrap_or_default().aliases
+}
+
+/// Set `key` to `value` in the TOML file at `path`, creating the file (and
+/// its parent directories) when missing. The edit is format-preserving:
+/// unrelated keys, comments, and layout survive the round-trip.
+pub fn set_in_file(path: &Path, key: &Key, value: &str) -> Result<(), ConfigError> {
+    let mut doc = load_document(path)?;
+    match key {
+        Key::Trunk => doc["trunk"] = toml_edit::value(value),
+        Key::Remote => doc["remote"] = toml_edit::value(value),
+        Key::Alias(name) => {
+            let aliases = doc
+                .entry("aliases")
+                .or_insert(toml_edit::table())
+                .as_table_mut()
+                .ok_or_else(|| ConfigError::AliasesNotATable {
+                    key: format!("aliases.{name}"),
+                })?;
+            aliases[name.as_str()] = toml_edit::value(value);
+        }
+    }
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    std::fs::write(path, doc.to_string())?;
+    Ok(())
+}
+
+/// Remove `key` from the TOML file at `path`. Idempotent: a missing file or
+/// an absent key is a no-op (and never creates the file). Removing the last
+/// alias also removes the then-empty `[aliases]` table.
+pub fn unset_in_file(path: &Path, key: &Key) -> Result<(), ConfigError> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let mut doc = load_document(path)?;
+    match key {
+        Key::Trunk => {
+            doc.remove("trunk");
+        }
+        Key::Remote => {
+            doc.remove("remote");
+        }
+        Key::Alias(name) => {
+            if let Some(aliases) = doc.get_mut("aliases").and_then(toml_edit::Item::as_table_mut)
+            {
+                aliases.remove(name);
+                if aliases.is_empty() {
+                    doc.remove("aliases");
+                }
+            }
+        }
+    }
+    std::fs::write(path, doc.to_string())?;
+    Ok(())
+}
+
+/// Parse `path` as an editable TOML document; a missing file is an empty one.
+fn load_document(path: &Path) -> Result<toml_edit::DocumentMut, ConfigError> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(err) => return Err(err.into()),
+    };
+    Ok(text.parse()?)
 }
 
 /// The user-global stacc config path, conventionally at
@@ -211,5 +320,122 @@ mod tests {
         let overrides = read_file(&path).unwrap();
         assert_eq!(overrides.trunk.as_deref(), Some("main"));
         assert_eq!(overrides.remote.as_deref(), Some("origin"));
+    }
+
+    #[test]
+    fn key_parse_accepts_the_full_namespace_and_nothing_else() {
+        assert_eq!(Key::parse("trunk"), Some(Key::Trunk));
+        assert_eq!(Key::parse("remote"), Some(Key::Remote));
+        assert_eq!(Key::parse("aliases.co"), Some(Key::Alias("co".into())));
+        assert_eq!(Key::parse("aliases."), None);
+        assert_eq!(Key::parse("aliases.a.b"), None);
+        assert_eq!(Key::parse("aliases"), None);
+        assert_eq!(Key::parse("bogus"), None);
+        assert_eq!(Key::Alias("co".into()).to_string(), "aliases.co");
+    }
+
+    #[test]
+    fn set_in_file_creates_the_file_and_parent_dirs() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("nested/dir/config.toml");
+        set_in_file(&path, &Key::Trunk, "main").unwrap();
+        let overrides = read_file(&path).unwrap();
+        assert_eq!(overrides.trunk.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn set_in_file_preserves_unrelated_keys_and_comments() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "# my settings\nremote = \"origin\" # keep me\n\n[aliases]\nco = \"checkout\"\n",
+        )
+        .unwrap();
+
+        set_in_file(&path, &Key::Trunk, "develop").unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# my settings"), "got: {text}");
+        assert!(text.contains("# keep me"), "got: {text}");
+        assert!(text.contains("co = \"checkout\""), "got: {text}");
+
+        let overrides = read_file(&path).unwrap();
+        assert_eq!(overrides.trunk.as_deref(), Some("develop"));
+        assert_eq!(overrides.remote.as_deref(), Some("origin"));
+    }
+
+    #[test]
+    fn set_in_file_overwrites_an_existing_value() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        set_in_file(&path, &Key::Remote, "origin").unwrap();
+        set_in_file(&path, &Key::Remote, "upstream").unwrap();
+        assert_eq!(read_file(&path).unwrap().remote.as_deref(), Some("upstream"));
+    }
+
+    #[test]
+    fn set_alias_creates_the_table_and_the_loader_reads_it_back() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        set_in_file(&path, &Key::Alias("co".into()), "checkout").unwrap();
+        set_in_file(&path, &Key::Alias("ll".into()), "log long").unwrap();
+
+        let aliases = aliases_from_file(&path);
+        assert_eq!(aliases.get("co").map(String::as_str), Some("checkout"));
+        assert_eq!(aliases.get("ll").map(String::as_str), Some("log long"));
+    }
+
+    #[test]
+    fn set_alias_on_a_non_table_aliases_key_errors() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(&path, "aliases = \"oops\"\n").unwrap();
+        let err = set_in_file(&path, &Key::Alias("co".into()), "checkout").unwrap_err();
+        assert!(matches!(err, ConfigError::AliasesNotATable { .. }));
+    }
+
+    #[test]
+    fn unset_in_file_removes_the_key_and_keeps_the_rest() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        // A comment attached to a surviving key stays; one attached to the
+        // removed key leaves with it (toml_edit ties comments to their key).
+        std::fs::write(
+            &path,
+            "trunk = \"main\"\n# keep\nremote = \"origin\" # inline\n",
+        )
+        .unwrap();
+
+        unset_in_file(&path, &Key::Trunk).unwrap();
+        let overrides = read_file(&path).unwrap();
+        assert_eq!(overrides.trunk, None);
+        assert_eq!(overrides.remote.as_deref(), Some("origin"));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# keep"), "got: {text}");
+        assert!(text.contains("# inline"), "got: {text}");
+    }
+
+    #[test]
+    fn unset_last_alias_removes_the_empty_table() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        set_in_file(&path, &Key::Alias("co".into()), "checkout").unwrap();
+        unset_in_file(&path, &Key::Alias("co".into())).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("[aliases]"), "got: {text}");
+        assert!(aliases_from_file(&path).is_empty());
+    }
+
+    #[test]
+    fn unset_in_file_is_a_no_op_on_a_missing_file_or_key() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        unset_in_file(&path, &Key::Trunk).unwrap();
+        assert!(!path.exists(), "unset must not create the file");
+
+        std::fs::write(&path, "remote = \"origin\"\n").unwrap();
+        unset_in_file(&path, &Key::Alias("co".into())).unwrap();
+        assert_eq!(read_file(&path).unwrap().remote.as_deref(), Some("origin"));
     }
 }
