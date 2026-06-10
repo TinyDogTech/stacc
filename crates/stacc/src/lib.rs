@@ -20,7 +20,7 @@ use error::Error;
 const BUILTINS: &[&str] = &[
     "init", "track", "untrack", "create", "modify", "log", "status", "submit", "sync", "restack",
     "move", "absorb", "squash", "fold", "split", "reorder", "delete", "pop", "rename", "merge",
-    "continue", "abort", "undo", "up", "down", "top", "bottom", "checkout", "pr", "auth",
+    "continue", "abort", "undo", "up", "down", "top", "bottom", "checkout", "pr", "auth", "info",
 ];
 
 /// Short aliases stacc ships with, seeded at the lowest precedence so a user or
@@ -84,6 +84,7 @@ fn dispatch(cli: &Cli) -> Result<(), Error> {
         Command::Modify(args) => commands::modify(args, cli.global.format),
         Command::Log(args) => commands::log(args, cli.global.format, cli.global.color),
         Command::Status => commands::status(cli.global.format),
+        Command::Info(args) => commands::info(args, cli.global.format),
         Command::Pr => commands::pr(cli.global.format),
         Command::Submit(args) => commands::submit(args, cli.global.format),
         Command::Sync(args) => commands::sync(args, cli.global.format),

@@ -25,6 +25,16 @@ pub struct CommitInfo {
     pub age: String,
 }
 
+/// Aggregate diff statistics between two trees, as `git diff --numstat` counts
+/// them: the number of changed files and the total inserted and deleted lines.
+/// A binary change counts as a changed file with no line counts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DiffStat {
+    pub files: usize,
+    pub insertions: usize,
+    pub deletions: usize,
+}
+
 /// A registered git worktree: its working-tree path and the branch checked out
 /// there. `branch` is `None` for a detached-HEAD or bare worktree.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -722,6 +732,27 @@ impl Git {
         Ok((ahead, behind))
     }
 
+    /// Aggregate diff statistics from `from` to `to` (`git diff --numstat`):
+    /// changed-file count plus total inserted and deleted lines. A binary
+    /// change counts as a changed file with zero line counts.
+    pub fn diffstat(&self, from: &str, to: &str) -> Result<DiffStat, GitError> {
+        let out = self.run(&["diff", "--numstat", from, to])?;
+        Ok(parse_numstat(&out))
+    }
+
+    /// The full diff text from `from` to `to` (`git diff`), uncolored. Empty
+    /// when the two trees match.
+    pub fn diff_text(&self, from: &str, to: &str) -> Result<String, GitError> {
+        self.run(&["diff", "--no-color", from, to])
+    }
+
+    /// The per-commit patches of `base..tip`, oldest-first (the `git log -p`
+    /// view of a branch's own commits), uncolored. Empty for an empty range.
+    pub fn log_patch(&self, base: &str, tip: &str) -> Result<String, GitError> {
+        let range = format!("{base}..{tip}");
+        self.run(&["log", "-p", "--reverse", "--no-color", &range])
+    }
+
     /// Git's own graph history for the given branch `tips`, excluding the
     /// trunk's history (`git log --graph --oneline --decorate <tips> --not
     /// <trunk>`). Backs `stacc log long`.
@@ -1071,6 +1102,26 @@ fn parse_range(spec: &str) -> Option<LineRange> {
         None => 1,
     };
     Some(LineRange { start, count })
+}
+
+/// Parse `git diff --numstat` output: one `<insertions>\t<deletions>\t<path>`
+/// record per file. A binary change reports `-` for both counts; it still
+/// counts as a changed file, with the unparseable counts read as zero.
+fn parse_numstat(out: &str) -> DiffStat {
+    let mut stat = DiffStat::default();
+    for line in out.lines() {
+        let mut fields = line.split('\t');
+        let (Some(insertions), Some(deletions)) = (fields.next(), fields.next()) else {
+            continue;
+        };
+        if fields.next().is_none() {
+            continue; // no path field: not a numstat record
+        }
+        stat.files += 1;
+        stat.insertions += insertions.parse::<usize>().unwrap_or(0);
+        stat.deletions += deletions.parse::<usize>().unwrap_or(0);
+    }
+    stat
 }
 
 /// Parse `git blame --porcelain` output into a per-line SHA vector. Every line
@@ -1787,6 +1838,72 @@ mod tests {
         assert_eq!(repo.rev_list(&base, &c2).unwrap(), vec![c1, c2]);
         // An empty range yields nothing.
         assert!(repo.rev_list(&base, &base).unwrap().is_empty());
+    }
+
+    // --- U8: diffstat / diff / patch plumbing ---
+
+    #[test]
+    fn diffstat_counts_files_insertions_and_deletions() {
+        let (tmp, repo) = init_repo();
+        let path = tmp.path();
+        write_commit(path, "a.txt", "one\ntwo\n", "seed");
+        let base = repo.rev_parse("HEAD").unwrap();
+        // a.txt: one line replaced by two (+2 -1); b.txt: one new line (+1).
+        std::fs::write(path.join("a.txt"), "one\nthree\nfour\n").unwrap();
+        std::fs::write(path.join("b.txt"), "new\n").unwrap();
+        run_git(path, &["add", "."]);
+        run_git(path, &["commit", "-q", "-m", "edit"]);
+
+        let stat = repo.diffstat(&base, "HEAD").unwrap();
+        assert_eq!(
+            stat,
+            DiffStat {
+                files: 2,
+                insertions: 3,
+                deletions: 1
+            }
+        );
+        // An empty range is all zeroes.
+        assert_eq!(repo.diffstat("HEAD", "HEAD").unwrap(), DiffStat::default());
+    }
+
+    #[test]
+    fn diffstat_counts_a_binary_file_without_line_counts() {
+        let (tmp, repo) = init_repo();
+        let base = repo.rev_parse("HEAD").unwrap();
+        // A NUL byte makes git treat the file as binary (`-` numstat counts).
+        std::fs::write(tmp.path().join("bin.dat"), [0u8, 159, 146, 150]).unwrap();
+        run_git(tmp.path(), &["add", "bin.dat"]);
+        run_git(tmp.path(), &["commit", "-q", "-m", "binary"]);
+
+        let stat = repo.diffstat(&base, "HEAD").unwrap();
+        assert_eq!(
+            stat,
+            DiffStat {
+                files: 1,
+                insertions: 0,
+                deletions: 0
+            }
+        );
+    }
+
+    #[test]
+    fn diff_text_and_log_patch_carry_the_change() {
+        let (tmp, repo) = init_repo();
+        let path = tmp.path();
+        write_commit(path, "a.txt", "one\n", "seed");
+        let base = repo.rev_parse("HEAD").unwrap();
+        write_commit(path, "a.txt", "one\ntwo\n", "feat: add two");
+
+        let diff = repo.diff_text(&base, "HEAD").unwrap();
+        assert!(diff.contains("+two"), "got: {diff}");
+        // The patch view carries the commit message AND the diff body.
+        let patch_text = repo.log_patch(&base, "HEAD").unwrap();
+        assert!(patch_text.contains("feat: add two"), "got: {patch_text}");
+        assert!(patch_text.contains("+two"), "got: {patch_text}");
+        // Empty ranges are empty text, not errors.
+        assert!(repo.diff_text("HEAD", "HEAD").unwrap().is_empty());
+        assert!(repo.log_patch("HEAD", "HEAD").unwrap().is_empty());
     }
 
     #[test]
