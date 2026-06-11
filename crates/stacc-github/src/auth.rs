@@ -377,10 +377,18 @@ mod tests {
     fn gh_token_returns_trimmed_stdout() {
         let dir = tempfile::TempDir::new().unwrap();
         let gh = fake_gh(dir.path(), "#!/bin/sh\necho '  gho_faketoken  '\n");
-        assert_eq!(
-            run_gh_token(gh.to_str().unwrap()),
-            Some("gho_faketoken".to_string())
-        );
+        // Exec of a freshly-written script can transiently fail with ETXTBSY on
+        // a loaded runner, which makes `run_gh_token` return None. The script is
+        // deterministic, so retry until it runs (production never execs a
+        // freshly-written gh, so the retry is test-only).
+        let mut got = None;
+        for _ in 0..10 {
+            got = run_gh_token(gh.to_str().unwrap());
+            if got.is_some() {
+                break;
+            }
+        }
+        assert_eq!(got, Some("gho_faketoken".to_string()));
     }
 
     #[cfg(unix)]
