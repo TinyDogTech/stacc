@@ -81,7 +81,22 @@ fn env_or(key: &str, fallback: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| fallback.to_string())
 }
 
+/// Whether `id` is a usable OAuth client ID: not empty/whitespace and not the
+/// unregistered placeholder.
+fn client_id_is_configured(id: &str) -> bool {
+    let id = id.trim();
+    !id.is_empty() && id != DEFAULT_OAUTH_CLIENT_ID
+}
+
 impl DeviceFlow {
+    /// Whether this flow has a usable OAuth client ID. False when the client ID
+    /// is still the unregistered placeholder or empty/whitespace (a stray
+    /// `STACC_OAUTH_CLIENT_ID=` leaves it empty), in which case the device flow
+    /// would only fail with a confusing GitHub error.
+    pub fn is_configured(&self) -> bool {
+        client_id_is_configured(&self.client_id)
+    }
+
     /// Step 1: ask GitHub for a device + user code.
     pub fn request_code(&self) -> Result<DeviceCode, GitHubError> {
         let resp = self
@@ -332,6 +347,14 @@ mod tests {
         let resp = TokenResponse::Error { error: "what_even".into() };
         let err = advance_poll(resp, &mut interval).unwrap_err();
         assert!(matches!(err, GitHubError::Unexpected(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn client_id_configured_rejects_placeholder_and_empty() {
+        assert!(!client_id_is_configured(DEFAULT_OAUTH_CLIENT_ID), "placeholder");
+        assert!(!client_id_is_configured(""), "empty");
+        assert!(!client_id_is_configured("   "), "whitespace");
+        assert!(client_id_is_configured("Iv1.realclientid0000"), "real id");
     }
 
     #[test]

@@ -17,6 +17,17 @@ pub fn auth(args: &AuthArgs, format: OutputFormat) -> Result<(), Error> {
 
 fn auth_login(format: OutputFormat) -> Result<(), Error> {
     let flow = stacc_github::DeviceFlow::default();
+    // Fail fast instead of starting a device flow that GitHub will reject: this
+    // build ships no registered OAuth app (the client ID is the placeholder, or
+    // a stray `STACC_OAUTH_CLIENT_ID=` left it empty).
+    if !flow.is_configured() {
+        return Err(Error::Usage(
+            "stacc auth login is unavailable: this build ships no registered GitHub \
+             OAuth app. Log in with `gh` (stacc falls back to `gh auth token`) or set \
+             GITHUB_TOKEN to a personal access token with `repo` scope."
+                .into(),
+        ));
+    }
     let code = flow.request_code()?;
 
     // Surface the user code before polling starts, the user has to type this
@@ -26,6 +37,7 @@ fn auth_login(format: OutputFormat) -> Result<(), Error> {
             println!();
             println!("To authorize stacc, open: {}", code.verification_uri);
             println!("And enter the code: {}", code.user_code);
+            println!("Authorize only the app shown as \"stacc\"; never enter this code for a login you did not start.");
             println!();
             println!(
                 "Waiting for authorization (expires in {} seconds)...",
