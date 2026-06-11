@@ -286,6 +286,7 @@ fn remove_and_restack_children(
         |remaining| recovery::Operation::Restack { remaining },
         &apply_removal,
         &force,
+        false,
     )?;
     clear_conflict_artifacts(git);
     Ok((children, restacked))

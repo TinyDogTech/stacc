@@ -1082,7 +1082,9 @@ pub fn sync(args: &SyncArgs, format: OutputFormat) -> Result<(), Error> {
         missing_ref_branches(&git, &state)
     };
     let drop: BTreeSet<String> = merged.union(&pruned).cloned().collect();
-    let outcome = reconcile_with(&git, &store, &mut state, &repo, drop, args.offline)?;
+    // tree_guard = true: sync's restack pass skips branches whose tree already
+    // matches their base (the squash-merge backstop). Merge passes false.
+    let outcome = reconcile_with(&git, &store, &mut state, &repo, drop, args.offline, true)?;
     // The merged branches landed and their children are restacked off them:
     // delete their local refs, unless the user asked to keep merged branches.
     // (The pruned set's refs are already gone, nothing to clean there.)
@@ -1308,6 +1310,7 @@ fn reconcile_with(
     repo: &RepoConfig,
     dropped: BTreeSet<String>,
     offline: bool,
+    tree_guard: bool,
 ) -> Result<SyncOutcome, Error> {
     // Re-parent children of dropped branches onto the nearest surviving base.
     let mut reparented: Vec<(String, String)> = Vec::new();
@@ -1366,7 +1369,7 @@ fn reconcile_with(
 
     // Pull-and-restack the remaining branches bottom-up onto their bases.
     let order = ops::topo_order(&state.branches, &repo.trunk);
-    let restacked = restack_with_recovery(
+    let restacked = restack_with_recovery_forced(
         git,
         store,
         state,
@@ -1374,6 +1377,8 @@ fn reconcile_with(
         &order,
         |remaining| recovery::Operation::Sync { remaining },
         &apply_drops,
+        &BTreeSet::new(),
+        tree_guard,
     )?;
 
     finish_sync(git, store, repo);
@@ -1751,7 +1756,9 @@ fn merge_stack(
         // of the next iteration). Online fetches the trunk; offline restacks
         // against the local trunk.
         let drop: BTreeSet<String> = std::iter::once(branch.clone()).collect();
-        match reconcile_with(git, store, state, repo, drop, offline) {
+        // tree_guard = false: merge reconciles via the API, so it needs no
+        // squash-merge restack backstop (that is sync's pass).
+        match reconcile_with(git, store, state, repo, drop, offline, false) {
             Ok(outcome) => {
                 reparented_all.extend(outcome.reparented);
                 restacked_all.extend(outcome.restacked);
@@ -2435,6 +2442,10 @@ fn continue_op(
         recovery::Operation::Reorder { order, .. } => order.iter().cloned().collect(),
         _ => BTreeSet::new(),
     };
+    // A resumed sync keeps sync's tree-identical guard on for the rest of the
+    // queue, so a squash-merged branch later in the chain is skipped, not
+    // rebased into the phantom conflict the guard exists to prevent.
+    let tree_guard = matches!(op, recovery::Operation::Sync { .. });
 
     let rest: Vec<String> = remaining.into_iter().skip(1).collect();
     restacked.extend(restack_with_recovery_forced(
@@ -2446,6 +2457,7 @@ fn continue_op(
         |r| op.with_remaining(r),
         &apply_resumed,
         &force,
+        tree_guard,
     )?);
 
     clear_conflict_artifacts(git);
@@ -2551,6 +2563,7 @@ pub(crate) fn restack_with_recovery(
         make_op,
         command_deltas,
         &BTreeSet::new(),
+        false,
     )
 }
 
@@ -2570,9 +2583,10 @@ pub(crate) fn restack_with_recovery_forced(
     make_op: impl Fn(Vec<String>) -> recovery::Operation,
     command_deltas: &dyn Fn(&mut State),
     force: &BTreeSet<String>,
+    tree_guard: bool,
 ) -> Result<Vec<String>, Error> {
     let mut applied: Vec<(String, String)> = Vec::new();
-    match ops::restack_forced(git, state, order, &mut applied, force) {
+    match ops::restack_forced(git, state, order, &mut applied, force, tree_guard) {
         Ok(outcome) => {
             persist_restack(store, command_deltas, &applied)?;
             if !outcome.skipped.is_empty() {
@@ -2592,6 +2606,13 @@ pub(crate) fn restack_with_recovery_forced(
                 eprintln!(
                     "warning: skipped {} branch(es) checked out in another worktree: {list}. Restack them from there, or finish and remove the worktree.",
                     outcome.worktree_skipped.len()
+                );
+            }
+            if !outcome.tree_identical_skipped.is_empty() {
+                eprintln!(
+                    "note: skipped {} branch(es) whose tree already matches their base (they look squash-merged): {}. Run `stacc sync` online to confirm and clean up, or `stacc delete <branch>`.",
+                    outcome.tree_identical_skipped.len(),
+                    outcome.tree_identical_skipped.join(", ")
                 );
             }
             Ok(outcome.restacked)
