@@ -424,7 +424,7 @@ pub struct SyncArgs {
     /// Resume a sync that stopped on a conflict, after resolving it.
     #[arg(long = "continue")]
     pub continue_: bool,
-    /// Skip the upstream fetch and restack on local refs only.
+    /// Skip the upstream fetch and merged-PR detection; restack local refs only.
     #[arg(long)]
     pub offline: bool,
     /// Keep tracked branches whose git ref is gone instead of pruning them.

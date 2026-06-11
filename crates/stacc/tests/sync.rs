@@ -112,6 +112,12 @@ fn stacc(dir: &std::path::Path, args: &[&str]) -> Output {
     )
 }
 
+/// Like `stacc` but with no GitHub token at all (the harness already disables
+/// the keychain and gh fallback), exercising the missing-credential paths.
+fn stacc_no_token(dir: &std::path::Path, args: &[&str]) -> Output {
+    stacc_env(dir, args, &[])
+}
+
 // A nonexistent GitHub URL: parses to an owner/repo, but `git fetch`/`push`
 // fail fast (GIT_TERMINAL_PROMPT=0), exercising sync's best-effort network path.
 const ORIGIN: &str = "https://github.com/stacc-sandbox/example.git";
@@ -356,9 +362,10 @@ fn sync_requires_init() {
 
 #[test]
 fn sync_errors_when_remote_is_unreachable_without_offline() {
-    // The repo()'s `origin` points at a sandbox URL that 404s, without
-    // --offline, sync's fetch must surface that as a hard error (and the
-    // stderr hint tells the user to retry with --offline).
+    // With a tracked branch and no --offline, sync reaches the GitHub API (here
+    // a dead URL) and surfaces the failure as a hard error, with a stderr hint
+    // pointing at --offline. Adoption now runs before the git fetch, so the
+    // unreachable API is what fails first (a `github` error, not `git`).
     let tmp = repo();
     assert!(stacc(tmp.path(), &["init"]).status.success());
     run_git(tmp.path(), &["checkout", "-q", "-b", "feature"]);
@@ -367,7 +374,7 @@ fn sync_errors_when_remote_is_unreachable_without_offline() {
     let out = stacc(tmp.path(), &["sync", "--format", "json"]);
     assert!(!out.status.success());
     let s = String::from_utf8_lossy(&out.stdout);
-    assert!(s.contains(r#""error":"git""#), "got: {s}");
+    assert!(s.contains(r#""error":"github""#), "got: {s}");
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("--offline"), "stderr: {err}");
 }
@@ -844,4 +851,199 @@ fn sync_adoption_leaves_a_branch_without_any_pr_alone() {
 
     let state = StateStore::new(Git::open(p)).load().unwrap();
     assert!(state.branches["feature"].pr.is_none(), "state untouched");
+}
+
+#[test]
+fn sync_without_credentials_errors_loudly() {
+    let tmp = repo();
+    let p = tmp.path();
+    assert!(stacc(p, &["init"]).status.success());
+    run_git(p, &["checkout", "-q", "-b", "feature"]);
+    commit_file(p, "f.txt", "1", "feature");
+    assert!(stacc(p, &["track"]).status.success());
+    let before = git_out(p, &["rev-parse", "feature"]);
+
+    let out = stacc_no_token(p, &["sync", "--format", "json"]);
+    assert!(!out.status.success(), "sync must fail without credentials");
+    let s = String::from_utf8_lossy(&out.stdout);
+    // The error message names the auth remedies...
+    assert!(
+        s.contains("auth login") && s.contains("GITHUB_TOKEN") && s.contains("`gh`"),
+        "names auth remedies: {s}"
+    );
+    // ...and the stderr hint adds --offline.
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("--offline"), "stderr names --offline: {err}");
+    // No rebase happened: the branch tip is untouched.
+    assert_eq!(git_out(p, &["rev-parse", "feature"]), before, "feature tip unchanged");
+}
+
+#[test]
+fn sync_errors_on_a_non_github_remote() {
+    let tmp = repo();
+    let p = tmp.path();
+    assert!(stacc(p, &["init"]).status.success());
+    run_git(p, &["remote", "set-url", "origin", "https://gitlab.com/owner/repo.git"]);
+    run_git(p, &["checkout", "-q", "-b", "feature"]);
+    assert!(stacc(p, &["track"]).status.success());
+
+    let out = stacc(p, &["sync", "--format", "json"]);
+    assert!(!out.status.success(), "a non-GitHub remote must error");
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains(r#""error":"usage""#), "usage error: {s}");
+    assert!(
+        s.contains("GitHub-only") && s.contains("origin"),
+        "names v1 GitHub-only and the remote: {s}"
+    );
+
+    // --offline restacks local refs without parsing the remote at all.
+    let off = stacc(p, &["sync", "--offline", "--format", "json"]);
+    assert!(
+        off.status.success(),
+        "offline works on a non-GitHub remote: {}",
+        String::from_utf8_lossy(&off.stderr)
+    );
+}
+
+#[test]
+fn sync_error_does_not_leak_a_credentialed_remote_url() {
+    let tmp = repo();
+    let p = tmp.path();
+    assert!(stacc(p, &["init"]).status.success());
+    // The standard CI remote shape carries a token in the URL. It fails the
+    // strict remote parse and must route to the GitHub-only error WITHOUT the
+    // URL appearing in the message.
+    run_git(
+        p,
+        &["remote", "set-url", "origin", "https://x-access-token:SECRET@github.com/owner/repo.git"],
+    );
+    run_git(p, &["checkout", "-q", "-b", "feature"]);
+    assert!(stacc(p, &["track"]).status.success());
+
+    let out = stacc(p, &["sync", "--format", "json"]);
+    assert!(!out.status.success());
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!combined.contains("SECRET"), "must not echo the credentialed URL: {combined}");
+    assert!(combined.contains("origin"), "names the remote: {combined}");
+}
+
+#[test]
+fn sync_offline_marks_detection_skipped() {
+    let tmp = repo();
+    let p = tmp.path();
+    assert!(stacc(p, &["init"]).status.success());
+    run_git(p, &["checkout", "-q", "-b", "feature"]);
+    commit_file(p, "f.txt", "1", "feature");
+    assert!(stacc(p, &["track"]).status.success());
+
+    let out = stacc_no_token(p, &["sync", "--offline", "--format", "json"]);
+    assert!(
+        out.status.success(),
+        "offline succeeds without credentials: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains(r#""detection_skipped":true"#), "JSON marks the skip: {s}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("skipped merged-PR detection"), "stderr notes the skip: {err}");
+}
+
+#[test]
+fn sync_empty_stack_succeeds_without_credentials() {
+    let (tmp, _bare) = online_repo();
+    let p = tmp.path();
+    // No tracked branches: nothing needs the API, even without a token.
+    let out = stacc_no_token(p, &["sync", "--format", "json"]);
+    assert!(
+        out.status.success(),
+        "an empty sync needs no credentials: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        s.contains(r#""merged":[]"#) && s.contains(r#""detection_skipped":false"#),
+        "got: {s}"
+    );
+}
+
+#[test]
+fn sync_aborts_when_an_adoption_lookup_fails_and_persists_partial() {
+    let tmp = repo();
+    let p = tmp.path();
+    assert!(stacc(p, &["init"]).status.success());
+    tracked_branch_without_pr(p, "feature-a");
+    tracked_branch_without_pr(p, "feature-b");
+
+    let server = MockServer::start();
+    // feature-a (queried first, sorted) adopts cleanly...
+    mock_pr_by_head(
+        &server,
+        "feature-a",
+        serde_json::json!([{
+            "number": 5, "html_url": "https://github.com/stacc-sandbox/example/pull/5",
+            "state": "open", "merged_at": null,
+        }]),
+    );
+    // ...feature-b's lookup 500s, which must abort the whole sync.
+    server.mock(|when, then| {
+        when.method(httpmock::Method::GET)
+            .path("/repos/stacc-sandbox/example/pulls")
+            .query_param("head", "stacc-sandbox:feature-b");
+        then.status(500);
+    });
+
+    let out = stacc_env(
+        p,
+        &["sync", "--format", "json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(!out.status.success(), "a failed lookup must abort the sync");
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains(r#""error":"github""#), "github error: {s}");
+
+    // feature-a's PR, adopted before the failing lookup, is persisted.
+    let state = StateStore::new(Git::open(p)).load().unwrap();
+    assert_eq!(
+        state.branches["feature-a"].pr.as_ref().map(|pr| pr.number),
+        Some(5),
+        "partial adoption persisted despite the later failure"
+    );
+}
+
+#[test]
+fn sync_continue_needs_no_credentials() {
+    let tmp = repo();
+    let p = tmp.path();
+    assert!(stacc(p, &["init"]).status.success());
+    run_git(p, &["checkout", "-q", "-b", "feature"]);
+    commit_file(p, "conflict.txt", "feature\n", "feature edit");
+    assert!(stacc(p, &["track"]).status.success());
+    run_git(p, &["checkout", "-q", "main"]);
+    commit_file(p, "conflict.txt", "main\n", "trunk edit");
+    run_git(p, &["checkout", "-q", "feature"]);
+
+    // Offline sync conflicts (no credentials needed to reach the restack).
+    let out = stacc_no_token(p, &["sync", "--offline", "--format", "json"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains(r#""error":"conflict""#));
+
+    // Resolve, then continue with no token: the resume must not need credentials.
+    write(p, "conflict.txt", "resolved\n");
+    run_git(p, &["add", "conflict.txt"]);
+    let out2 = stacc_no_token(p, &["sync", "--continue", "--format", "json"]);
+    assert!(
+        out2.status.success(),
+        "continue resumes without credentials: {}",
+        String::from_utf8_lossy(&out2.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out2.stdout).contains(r#""restacked":["feature"]"#));
+    // The offline detection-skipped note is not printed on the continue path.
+    assert!(
+        !String::from_utf8_lossy(&out2.stderr).contains("skipped merged-PR detection"),
+        "no offline note on continue"
+    );
 }

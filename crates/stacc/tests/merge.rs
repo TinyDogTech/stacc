@@ -1048,6 +1048,35 @@ fn merge_adopts_a_gh_created_open_pr_and_merges_it() {
 }
 
 #[test]
+fn merge_aborts_when_an_adoption_lookup_fails() {
+    let tmp = repo();
+    let p = tmp.path();
+    // `feature` is tracked with no recorded PR, so merge runs its adoption pass.
+    run_git(p, &["checkout", "-q", "-b", "feature"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "f1"]);
+    track_no_pr(p, "feature", "main");
+
+    // The adoption lookup 500s. Merge shares sync's adoption core, so it too must
+    // abort rather than silently skip the lookup.
+    let server = MockServer::start();
+    server.mock(|w, t| {
+        w.method(Method::GET)
+            .path("/repos/stacc-sandbox/example/pulls")
+            .query_param("head", "stacc-sandbox:feature");
+        t.status(500);
+    });
+
+    let out = stacc_env(
+        p,
+        &["merge", "--offline", "--format", "json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(!out.status.success(), "a failed adoption lookup must abort merge");
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains(r#""error":"github""#), "github error: {s}");
+}
+
+#[test]
 fn merge_retargets_an_adopted_mid_chain_pr_to_the_trunk() {
     let tmp = repo();
     let p = tmp.path();
