@@ -119,6 +119,28 @@ fn repo() -> TempDir {
     tmp
 }
 
+/// A working repo whose `origin` is a GitHub-shaped URL (so `parse_remote`
+/// works) but is rewritten via `insteadOf` to a local bare repo, so an online
+/// sync's trunk fetch and state push actually succeed. Returns (work tree, bare
+/// remote); keep the bare handle bound for the test's duration. Already
+/// `stacc init`ed, like `repo()` callers expect after their own init.
+fn online_repo() -> (TempDir, TempDir) {
+    let bare = TempDir::new().expect("bare");
+    run_git(bare.path(), &["init", "-q", "--bare", "-b", "main"]);
+    let tmp = TempDir::new().expect("work");
+    let p = tmp.path();
+    run_git(p, &["init", "-q", "-b", "main"]);
+    run_git(p, &["config", "user.name", "Test"]);
+    run_git(p, &["config", "user.email", "test@example.com"]);
+    let insteadof = format!("url.{}.insteadOf", bare.path().display());
+    run_git(p, &["config", &insteadof, ORIGIN]);
+    run_git(p, &["remote", "add", "origin", ORIGIN]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "first"]);
+    run_git(p, &["push", "-q", "origin", "main"]);
+    assert!(stacc(p, &["init"]).status.success());
+    (tmp, bare)
+}
+
 fn show(dir: &std::path::Path, spec: &str) -> Output {
     Command::new("git")
         .arg("-C")
@@ -192,9 +214,8 @@ fn sync_no_prune_keeps_a_branch_whose_git_ref_is_gone() {
 
 #[test]
 fn sync_keeps_a_missing_ref_branch_with_an_open_pr() {
-    let tmp = repo();
+    let (tmp, _bare) = online_repo();
     let p = tmp.path();
-    assert!(stacc(p, &["init"]).status.success());
     run_git(p, &["checkout", "-q", "-b", "feature"]);
     run_git(p, &["commit", "-q", "--allow-empty", "-m", "f1"]);
     // Seed a PR, then delete the git ref: a missing ref but a recorded PR.
@@ -223,7 +244,7 @@ fn sync_keeps_a_missing_ref_branch_with_an_open_pr() {
 
     let out = stacc_env(
         p,
-        &["sync", "--offline", "--format", "json"],
+        &["sync", "--format", "json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
@@ -261,9 +282,8 @@ fn sync_prunes_multiple_missing_ref_branches() {
 
 #[test]
 fn sync_reports_a_merged_and_gone_branch_as_merged_not_pruned() {
-    let tmp = repo();
+    let (tmp, _bare) = online_repo();
     let p = tmp.path();
-    assert!(stacc(p, &["init"]).status.success());
     run_git(p, &["checkout", "-q", "-b", "feature"]);
     run_git(p, &["commit", "-q", "--allow-empty", "-m", "f1"]);
     // Seed a PR, then delete the git ref: a merged PR whose branch ref is gone.
@@ -291,7 +311,7 @@ fn sync_reports_a_merged_and_gone_branch_as_merged_not_pruned() {
 
     let out = stacc_env(
         p,
-        &["sync", "--offline", "--format", "json"],
+        &["sync", "--format", "json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
@@ -347,8 +367,7 @@ fn sync_errors_when_remote_is_unreachable_without_offline() {
 
 #[test]
 fn sync_detects_merged_and_reparents_children() {
-    let tmp = repo();
-    assert!(stacc(tmp.path(), &["init"]).status.success());
+    let (tmp, _bare) = online_repo();
 
     // Real branches: feature-1 off main, feature-2 off feature-1.
     run_git(tmp.path(), &["checkout", "-q", "-b", "feature-1"]);
@@ -394,7 +413,7 @@ fn sync_detects_merged_and_reparents_children() {
 
     let out = stacc_env(
         tmp.path(),
-        &["sync", "--offline", "--format", "json"],
+        &["sync", "--format", "json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
@@ -519,9 +538,8 @@ fn sync_conflict_writes_context_then_continue_completes() {
 
 #[test]
 fn sync_deletes_the_merged_branchs_ref_and_keeps_unmerged_ones() {
-    let tmp = repo();
+    let (tmp, _bare) = online_repo();
     let p = tmp.path();
-    assert!(stacc(p, &["init"]).status.success());
     run_git(p, &["checkout", "-q", "-b", "feature-1"]);
     run_git(p, &["commit", "-q", "--allow-empty", "-m", "f1"]);
     track_pr(p, "feature-1", "main", 1);
@@ -537,7 +555,7 @@ fn sync_deletes_the_merged_branchs_ref_and_keeps_unmerged_ones() {
 
     let out = stacc_env(
         p,
-        &["sync", "--offline", "--format", "json"],
+        &["sync", "--format", "json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
@@ -552,9 +570,8 @@ fn sync_deletes_the_merged_branchs_ref_and_keeps_unmerged_ones() {
 
 #[test]
 fn sync_keep_branches_keeps_the_merged_ref() {
-    let tmp = repo();
+    let (tmp, _bare) = online_repo();
     let p = tmp.path();
-    assert!(stacc(p, &["init"]).status.success());
     run_git(p, &["checkout", "-q", "-b", "feature"]);
     run_git(p, &["commit", "-q", "--allow-empty", "-m", "f1"]);
     track_pr(p, "feature", "main", 1);
@@ -565,7 +582,7 @@ fn sync_keep_branches_keeps_the_merged_ref() {
 
     let out = stacc_env(
         p,
-        &["sync", "--offline", "--keep-branches", "--format", "json"],
+        &["sync", "--keep-branches", "--format", "json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
@@ -577,9 +594,8 @@ fn sync_keep_branches_keeps_the_merged_ref() {
 
 #[test]
 fn sync_keeps_a_merged_branch_checked_out_in_another_worktree() {
-    let tmp = repo();
+    let (tmp, _bare) = online_repo();
     let p = tmp.path();
-    assert!(stacc(p, &["init"]).status.success());
     run_git(p, &["checkout", "-q", "-b", "feature"]);
     run_git(p, &["commit", "-q", "--allow-empty", "-m", "f1"]);
     track_pr(p, "feature", "main", 1);
@@ -595,7 +611,7 @@ fn sync_keeps_a_merged_branch_checked_out_in_another_worktree() {
 
     let out = stacc_env(
         p,
-        &["sync", "--offline", "--format", "json"],
+        &["sync", "--format", "json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
@@ -608,9 +624,8 @@ fn sync_keeps_a_merged_branch_checked_out_in_another_worktree() {
 
 #[test]
 fn sync_on_the_merged_branch_ends_on_the_trunk_with_the_ref_gone() {
-    let tmp = repo();
+    let (tmp, _bare) = online_repo();
     let p = tmp.path();
-    assert!(stacc(p, &["init"]).status.success());
     run_git(p, &["checkout", "-q", "-b", "feature"]);
     run_git(p, &["commit", "-q", "--allow-empty", "-m", "f1"]);
     track_pr(p, "feature", "main", 1);
@@ -621,7 +636,7 @@ fn sync_on_the_merged_branch_ends_on_the_trunk_with_the_ref_gone() {
 
     let out = stacc_env(
         p,
-        &["sync", "--offline", "--format", "json"],
+        &["sync", "--format", "json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
@@ -672,9 +687,8 @@ fn tracked_branch_without_pr(p: &std::path::Path, branch: &str) {
 
 #[test]
 fn sync_adopts_a_merged_pr_created_outside_stacc_and_cleans_up() {
-    let tmp = repo();
+    let (tmp, _bare) = online_repo();
     let p = tmp.path();
-    assert!(stacc(p, &["init"]).status.success());
     tracked_branch_without_pr(p, "feature");
 
     // The PR exists on GitHub (created via gh) and already merged; stacc state
@@ -691,7 +705,7 @@ fn sync_adopts_a_merged_pr_created_outside_stacc_and_cleans_up() {
 
     let out = stacc_env(
         p,
-        &["sync", "--offline", "--format", "json"],
+        &["sync", "--format", "json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
@@ -707,9 +721,8 @@ fn sync_adopts_a_merged_pr_created_outside_stacc_and_cleans_up() {
 
 #[test]
 fn sync_adopts_an_open_pr_and_records_it() {
-    let tmp = repo();
+    let (tmp, _bare) = online_repo();
     let p = tmp.path();
-    assert!(stacc(p, &["init"]).status.success());
     tracked_branch_without_pr(p, "feature");
 
     let server = MockServer::start();
@@ -724,7 +737,7 @@ fn sync_adopts_an_open_pr_and_records_it() {
 
     let out = stacc_env(
         p,
-        &["sync", "--offline", "--format", "json"],
+        &["sync", "--format", "json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
@@ -743,9 +756,8 @@ fn sync_adopts_an_open_pr_and_records_it() {
 
 #[test]
 fn sync_pretty_reports_adoption() {
-    let tmp = repo();
+    let (tmp, _bare) = online_repo();
     let p = tmp.path();
-    assert!(stacc(p, &["init"]).status.success());
     tracked_branch_without_pr(p, "feature");
 
     let server = MockServer::start();
@@ -760,7 +772,7 @@ fn sync_pretty_reports_adoption() {
 
     let out = stacc_env(
         p,
-        &["sync", "--offline"],
+        &["sync"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
@@ -774,9 +786,8 @@ fn sync_pretty_reports_adoption() {
 
 #[test]
 fn sync_does_not_adopt_a_closed_unmerged_pr() {
-    let tmp = repo();
+    let (tmp, _bare) = online_repo();
     let p = tmp.path();
-    assert!(stacc(p, &["init"]).status.success());
     tracked_branch_without_pr(p, "feature");
 
     // Closed without merging: submit should open a fresh PR for this head
@@ -792,7 +803,7 @@ fn sync_does_not_adopt_a_closed_unmerged_pr() {
 
     let out = stacc_env(
         p,
-        &["sync", "--offline", "--format", "json"],
+        &["sync", "--format", "json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
@@ -807,9 +818,8 @@ fn sync_does_not_adopt_a_closed_unmerged_pr() {
 
 #[test]
 fn sync_adoption_leaves_a_branch_without_any_pr_alone() {
-    let tmp = repo();
+    let (tmp, _bare) = online_repo();
     let p = tmp.path();
-    assert!(stacc(p, &["init"]).status.success());
     tracked_branch_without_pr(p, "feature");
 
     let server = MockServer::start();
@@ -817,7 +827,7 @@ fn sync_adoption_leaves_a_branch_without_any_pr_alone() {
 
     let out = stacc_env(
         p,
-        &["sync", "--offline", "--format", "json"],
+        &["sync", "--format", "json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
