@@ -1047,3 +1047,69 @@ fn sync_continue_needs_no_credentials() {
         "no offline note on continue"
     );
 }
+
+/// Give `feature` a tip whose tree matches `main`'s tip but is not an ancestor
+/// of it: the squash-merge shape. Leaves the checkout on `feature`.
+fn squash_feature_onto_main(p: &std::path::Path) {
+    run_git(p, &["checkout", "-q", "main"]);
+    run_git(p, &["checkout", "feature", "--", "f.txt"]);
+    run_git(p, &["commit", "-q", "-m", "squash of feature"]);
+    run_git(p, &["checkout", "-q", "feature"]);
+}
+
+#[test]
+fn sync_skips_a_tree_identical_branch_instead_of_rebasing() {
+    let tmp = repo();
+    let p = tmp.path();
+    assert!(stacc(p, &["init"]).status.success());
+    run_git(p, &["checkout", "-q", "-b", "feature"]);
+    commit_file(p, "f.txt", "content\n", "feature work");
+    assert!(stacc(p, &["track"]).status.success());
+    let feature_tip = git_out(p, &["rev-parse", "feature"]);
+
+    squash_feature_onto_main(p);
+
+    let out = stacc_no_token(p, &["sync", "--offline", "--format", "json"]);
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("look squash-merged"), "notice surfaced: {err}");
+    // The branch was skipped, not rebased: its tip is unchanged...
+    assert_eq!(git_out(p, &["rev-parse", "feature"]), feature_tip, "feature not rebased");
+    // ...and it is still tracked (the guard skips, it does not drop state).
+    let state = StateStore::new(Git::open(p)).load().unwrap();
+    assert!(state.branches.contains_key("feature"), "feature still tracked");
+}
+
+#[test]
+fn sync_does_not_flag_a_branch_already_on_its_base() {
+    let tmp = repo();
+    let p = tmp.path();
+    assert!(stacc(p, &["init"]).status.success());
+    // A fresh branch on the trunk tip is tree-identical AND an ancestor of its
+    // base, so the existing "already on base" skip handles it, not the guard.
+    run_git(p, &["checkout", "-q", "-b", "feature"]);
+    assert!(stacc(p, &["track"]).status.success());
+
+    let out = stacc_no_token(p, &["sync", "--offline", "--format", "json"]);
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!err.contains("squash-merged"), "an ancestor branch must not be flagged: {err}");
+}
+
+#[test]
+fn explicit_restack_does_not_apply_the_squash_merge_guard() {
+    let tmp = repo();
+    let p = tmp.path();
+    assert!(stacc(p, &["init"]).status.success());
+    run_git(p, &["checkout", "-q", "-b", "feature"]);
+    commit_file(p, "f.txt", "content\n", "feature work");
+    assert!(stacc(p, &["track"]).status.success());
+    squash_feature_onto_main(p);
+
+    // `stacc restack` is an explicit op: the sync-only guard must stay off, so
+    // the branch is restacked normally rather than skipped as squash-merged.
+    let out = stacc(p, &["restack", "--format", "json"]);
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!err.contains("squash-merged"), "restack must not apply the sync-only guard: {err}");
+}

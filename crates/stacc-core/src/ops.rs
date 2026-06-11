@@ -186,6 +186,10 @@ pub struct RestackOutcome {
     /// `(branch, other worktree path)` for branches skipped because they are
     /// checked out elsewhere.
     pub worktree_skipped: Vec<(String, String)>,
+    /// Branches skipped because their tree already matches their base's tip
+    /// (they look squash-merged). Populated only when the caller enables the
+    /// tree-identical guard (sync's restack pass).
+    pub tree_identical_skipped: Vec<String>,
 }
 
 /// Restack `order` bottom-up, rebasing each branch onto its base's current tip
@@ -207,7 +211,7 @@ pub fn restack(
     order: &[String],
     applied: &mut Vec<(String, String)>,
 ) -> Result<RestackOutcome, OpsError> {
-    restack_forced(git, state, order, applied, &BTreeSet::new())
+    restack_forced(git, state, order, applied, &BTreeSet::new(), false)
 }
 
 /// Like [`restack`], but rebases the branches named in `force` even when they
@@ -217,16 +221,22 @@ pub fn restack(
 /// moved out from under it. The forced rebase replays exactly the branch's own
 /// commits (`base.hash..branch`) onto the base's live tip; when nothing
 /// actually changed, git's own up-to-date check makes it a no-op.
+///
+/// With `tree_guard` set (sync's restack pass), a branch whose tip tree already
+/// matches its base's tip, yet is not an ancestor of that base, is skipped as
+/// "looks squash-merged" instead of being rebased into a phantom conflict.
 pub fn restack_forced(
     git: &Git,
     state: &mut State,
     order: &[String],
     applied: &mut Vec<(String, String)>,
     force: &BTreeSet<String>,
+    tree_guard: bool,
 ) -> Result<RestackOutcome, OpsError> {
     let mut restacked = Vec::new();
     let mut skipped = Vec::new();
     let mut worktree_skipped = Vec::new();
+    let mut tree_identical_skipped = Vec::new();
     for (idx, branch) in order.iter().enumerate() {
         let Some(base) = state.branches.get(branch).map(|b| b.base.clone()) else {
             continue;
@@ -246,6 +256,14 @@ pub fn restack_forced(
         let base_tip = git.rev_parse(&base.name)?;
         if !force.contains(branch) && git.is_ancestor(&base_tip, branch)? {
             continue; // already on top of its base
+        }
+        // Tree-identical guard (sync's restack pass only): a branch whose tip
+        // tree already matches its base tip's tree, yet is not an ancestor of
+        // that base (handled above), looks squash-merged. Rebasing it replays an
+        // empty diff and can only conflict (the STA-90 shape), so skip it.
+        if tree_guard && !force.contains(branch) && git.same_tree(branch, &base_tip)? {
+            tree_identical_skipped.push(branch.clone());
+            continue;
         }
         // Prefer the recorded base hash if it's still reachable from the branch;
         // otherwise (stale, force-pushed away, or invalid) recover via
@@ -282,6 +300,7 @@ pub fn restack_forced(
         restacked,
         skipped,
         worktree_skipped,
+        tree_identical_skipped,
     })
 }
 

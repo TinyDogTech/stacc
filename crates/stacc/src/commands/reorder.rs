@@ -154,6 +154,7 @@ pub fn reorder(args: &ReorderArgs, format: OutputFormat) -> Result<(), Error> {
         },
         &apply_reorder,
         &force,
+        false,
     )?;
     clear_conflict_artifacts(&git);
     // Best-effort: the reorder is already saved, so a failure to switch back to

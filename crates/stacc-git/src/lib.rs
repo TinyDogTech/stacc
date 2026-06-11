@@ -190,6 +190,13 @@ impl Git {
         self.run(&["merge-base", a, b])
     }
 
+    /// Whether `a` and `b` resolve to commits with identical trees (the same
+    /// content), even when the commits themselves differ. Used to spot a branch
+    /// already contained in its base (e.g. squash-merged) without a rebase.
+    pub fn same_tree(&self, a: &str, b: &str) -> Result<bool, GitError> {
+        Ok(self.rev_parse(&format!("{a}^{{tree}}"))? == self.rev_parse(&format!("{b}^{{tree}}"))?)
+    }
+
     /// Whether `ancestor` is an ancestor of `descendant`.
     pub fn is_ancestor(&self, ancestor: &str, descendant: &str) -> Result<bool, GitError> {
         // `git merge-base --is-ancestor` reports the answer via its exit code:
@@ -1259,6 +1266,30 @@ mod tests {
         write_commit(path, "conflict.txt", "main\n", "main change");
         let main_tip = repo.rev_parse("HEAD").unwrap();
         (tmp, repo, base, main_tip)
+    }
+
+    #[test]
+    fn same_tree_detects_identical_content_across_different_commits() {
+        let (tmp, repo) = init_repo();
+        let path = tmp.path();
+        run_git(path, &["checkout", "-q", "-b", "feature"]);
+        write_commit(path, "f.txt", "content\n", "feature add");
+        run_git(path, &["checkout", "-q", "main"]);
+        write_commit(path, "f.txt", "content\n", "main add (same content)");
+        // Different commits, identical trees (the squash-merge shape).
+        assert_ne!(repo.rev_parse("feature").unwrap(), repo.rev_parse("main").unwrap());
+        assert!(repo.same_tree("feature", "main").unwrap(), "identical trees");
+    }
+
+    #[test]
+    fn same_tree_is_false_for_different_content() {
+        let (tmp, repo) = init_repo();
+        let path = tmp.path();
+        run_git(path, &["checkout", "-q", "-b", "feature"]);
+        write_commit(path, "f.txt", "feature\n", "feature add");
+        run_git(path, &["checkout", "-q", "main"]);
+        write_commit(path, "f.txt", "main\n", "main add");
+        assert!(!repo.same_tree("feature", "main").unwrap(), "different trees");
     }
 
     #[test]
