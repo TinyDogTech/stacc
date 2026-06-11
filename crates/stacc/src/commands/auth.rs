@@ -79,13 +79,20 @@ fn auth_logout(format: OutputFormat) -> Result<(), Error> {
 // though no failure path is observable here.
 #[allow(clippy::unnecessary_wraps)]
 fn auth_status(format: OutputFormat) -> Result<(), Error> {
-    let env_set =
-        std::env::var("GITHUB_TOKEN").is_ok() || std::env::var("GH_TOKEN").is_ok();
-    let keyring_set = stacc_github::load_token().is_some();
+    let base_url = stacc_github::api_base_url();
+    let env_set = stacc_github::env_token("GH_TOKEN").is_some()
+        || stacc_github::env_token("GITHUB_TOKEN").is_some();
+    let keyring_set = stacc_github::keychain_token().is_some();
+    // gh is only a usable source for github.com; on a custom host `from_env`
+    // never consults it, so don't report it as a source there.
+    let gh_set =
+        stacc_github::is_github_dot_com(&base_url) && stacc_github::gh_token().is_some();
     let source = if env_set {
         "env"
     } else if keyring_set {
         "keyring"
+    } else if gh_set {
+        "gh"
     } else {
         "none"
     };
@@ -100,12 +107,12 @@ fn auth_status(format: OutputFormat) -> Result<(), Error> {
     match format {
         OutputFormat::Pretty => match source {
             "env" => {
-                println!("Authenticated via GITHUB_TOKEN");
+                println!("Authenticated via environment variable");
                 if let Some(u) = &user {
                     println!("Logged in as {u}");
                 }
                 if keyring_set {
-                    println!("(a stored token also exists; env var takes precedence)");
+                    println!("(a stored token also exists; the env var takes precedence)");
                 }
             }
             "keyring" => {
@@ -114,7 +121,13 @@ fn auth_status(format: OutputFormat) -> Result<(), Error> {
                     println!("Logged in as {u}");
                 }
             }
-            _ => println!("Not authenticated. Run `stacc auth login` or set GITHUB_TOKEN."),
+            "gh" => {
+                println!("Authenticated via the gh CLI");
+                if let Some(u) = &user {
+                    println!("Logged in as {u}");
+                }
+            }
+            _ => println!("Not authenticated. Run `stacc auth login`, set GITHUB_TOKEN, or log in with `gh`."),
         },
         OutputFormat::Json => println!(
             "{}",
@@ -123,6 +136,7 @@ fn auth_status(format: OutputFormat) -> Result<(), Error> {
                 "user": user,
                 "env_set": env_set,
                 "keyring_set": keyring_set,
+                "gh_set": gh_set,
             })
         ),
     }

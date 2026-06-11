@@ -5,6 +5,10 @@
 //! [`DeviceFlow::poll_token`] to block until GitHub returns an access token.
 //! The token lands in the platform keychain via [`store_token`].
 
+use std::io::Read;
+use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
@@ -28,6 +32,11 @@ const OAUTH_SCOPE: &str = "repo";
 /// One slot per stacc install: service = "stacc", username = "github.com".
 const KEYRING_SERVICE: &str = "stacc";
 const KEYRING_USER: &str = "github.com";
+
+/// Bound on `gh auth token`: it is a local read, so a slow run means a wedged
+/// credential helper. Kill it and treat the run as "no token" rather than let
+/// it block the CLI.
+const GH_TOKEN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Response from `POST /login/device/code`, the user code is what the user
 /// types into GitHub, the device code is what we poll with.
@@ -197,6 +206,79 @@ pub fn clear_token() -> Result<(), GitHubError> {
     }
 }
 
+/// An env var read with empty (or whitespace-only) treated as unset, so a
+/// stray `GITHUB_TOKEN=` does not resolve to an empty bearer token.
+pub fn env_token(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+/// The OS keychain token, unless `STACC_KEYCHAIN` is set to an empty value.
+/// That empty-disables knob keeps the integration suite hermetic on a machine
+/// that has run `stacc auth login`; production leaves it unset and reads the
+/// keychain normally.
+pub fn keychain_token() -> Option<String> {
+    if matches!(std::env::var("STACC_KEYCHAIN"), Ok(v) if v.is_empty()) {
+        return None;
+    }
+    load_token()
+}
+
+/// Resolve a token from `gh auth token`. The binary is `STACC_GH_BIN` when set
+/// (the test hook); an empty value disables the fallback (the kill switch), an
+/// unset value uses `gh` from `PATH`. A missing binary, non-zero exit, empty
+/// output, or a timeout all read as "no token".
+pub fn gh_token() -> Option<String> {
+    let bin = match std::env::var("STACC_GH_BIN") {
+        Ok(v) if v.is_empty() => return None,
+        Ok(v) => v,
+        Err(_) => "gh".to_string(),
+    };
+    run_gh_token(&bin)
+}
+
+/// Spawn `<bin> auth token --hostname github.com` and return the trimmed stdout
+/// when it is non-empty and the process exits 0. The captured stdout *is* the
+/// token, so it never appears in an error; spawn and exit failures map to None.
+/// A wedged `gh` is killed after [`GH_TOKEN_TIMEOUT`] so it cannot wedge the CLI.
+fn run_gh_token(bin: &str) -> Option<String> {
+    let mut child = Command::new(bin)
+        .args(["auth", "token", "--hostname", "github.com"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+
+    // Read stdout on a worker thread so the wait is bounded: a hung credential
+    // helper must not wedge the CLI. On timeout, kill the child.
+    let mut stdout = child.stdout.take()?;
+    let (tx, rx) = mpsc::channel();
+    let reader = thread::spawn(move || {
+        let mut buf = String::new();
+        let _ = stdout.read_to_string(&mut buf);
+        let _ = tx.send(buf);
+    });
+
+    let Ok(buf) = rx.recv_timeout(GH_TOKEN_TIMEOUT) else {
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = reader.join();
+        return None;
+    };
+    let _ = reader.join();
+
+    match child.wait() {
+        Ok(status) if status.success() => {
+            let token = buf.trim();
+            (!token.is_empty()).then(|| token.to_string())
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,5 +332,48 @@ mod tests {
         let resp = TokenResponse::Error { error: "what_even".into() };
         let err = advance_poll(resp, &mut interval).unwrap_err();
         assert!(matches!(err, GitHubError::Unexpected(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn gh_token_none_when_binary_is_missing() {
+        // A spawn failure (no such binary) reads as "no token", never an error.
+        assert_eq!(run_gh_token("/no/such/stacc-gh-binary"), None);
+    }
+
+    #[cfg(unix)]
+    fn fake_gh(dir: &std::path::Path, script: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("gh");
+        std::fs::write(&path, script).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gh_token_returns_trimmed_stdout() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let gh = fake_gh(dir.path(), "#!/bin/sh\necho '  gho_faketoken  '\n");
+        assert_eq!(
+            run_gh_token(gh.to_str().unwrap()),
+            Some("gho_faketoken".to_string())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gh_token_none_on_nonzero_exit() {
+        // gh writes "no oauth token found" to stderr and exits 1 when logged out.
+        let dir = tempfile::TempDir::new().unwrap();
+        let gh = fake_gh(dir.path(), "#!/bin/sh\necho 'no oauth token' >&2\nexit 1\n");
+        assert_eq!(run_gh_token(gh.to_str().unwrap()), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gh_token_none_on_empty_stdout() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let gh = fake_gh(dir.path(), "#!/bin/sh\nexit 0\n");
+        assert_eq!(run_gh_token(gh.to_str().unwrap()), None);
     }
 }

@@ -16,6 +16,7 @@ ureq = { workspace = true }
 
 [dev-dependencies]
 httpmock = "0.7"
+tempfile = { workspace = true }
 
 [lints]
 workspace = true
