@@ -87,6 +87,13 @@ fn commit_file(dir: &std::path::Path, name: &str, contents: &str, message: &str)
 fn stacc_env(dir: &std::path::Path, args: &[&str], envs: &[(&str, &str)]) -> Output {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_stacc"));
     cmd.current_dir(dir).args(args);
+    // Hermetic credentials: never let a test reach the developer's ambient
+    // GitHub token, OS keychain entry, or `gh` login. Per-call `envs` below
+    // re-add a token (or a mock API URL) for the tests that need one.
+    cmd.env_remove("GITHUB_TOKEN");
+    cmd.env_remove("GH_TOKEN");
+    cmd.env("STACC_GH_BIN", ""); // disable the gh auth token fallback
+    cmd.env("STACC_KEYCHAIN", ""); // disable the OS keychain source
     for (key, value) in envs {
         cmd.env(key, value);
     }

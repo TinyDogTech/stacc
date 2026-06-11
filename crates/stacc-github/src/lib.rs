@@ -3,7 +3,10 @@
 pub mod auth;
 mod error;
 
-pub use auth::{clear_token, load_token, store_token, DeviceCode, DeviceFlow};
+pub use auth::{
+    clear_token, env_token, gh_token, keychain_token, load_token, store_token, DeviceCode,
+    DeviceFlow,
+};
 pub use error::GitHubError;
 
 use std::collections::BTreeMap;
@@ -18,6 +21,19 @@ const USER_AGENT: &str = concat!("stacc/", env!("CARGO_PKG_VERSION"));
 /// Overall per-request deadline, so a slow or hung GitHub endpoint can't wedge
 /// the CLI (ureq's default read timeout is unbounded).
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The GitHub API base URL: `GITHUB_API_URL` when set, else github.com.
+pub fn api_base_url() -> String {
+    std::env::var("GITHUB_API_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string())
+}
+
+/// Whether `base_url` is the public github.com API. The `gh auth token`
+/// fallback is gated on this: an ambient gh credential must never be sent to a
+/// custom host (GitHub Enterprise, a mock) the user did not opt into with an
+/// explicit env token.
+pub fn is_github_dot_com(base_url: &str) -> bool {
+    base_url == DEFAULT_BASE_URL
+}
 
 /// The lifecycle state of a pull request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -180,17 +196,17 @@ impl GitHub {
         }
     }
 
-    /// Resolve the access token from `GITHUB_TOKEN`/`GH_TOKEN`, falling back
-    /// to the OS keychain entry written by `stacc auth login`.
-    /// `GITHUB_API_URL` overrides the base URL (for GitHub Enterprise or tests).
+    /// Resolve the access token, in order: `GH_TOKEN`, `GITHUB_TOKEN` (empty
+    /// treated as unset), the OS keychain (`stacc auth login`), then
+    /// `gh auth token` for github.com. `GITHUB_API_URL` overrides the base URL
+    /// (GitHub Enterprise or tests) and gates off the gh fallback.
     pub fn from_env() -> Result<Self, GitHubError> {
-        let token = std::env::var("GITHUB_TOKEN")
-            .ok()
-            .or_else(|| std::env::var("GH_TOKEN").ok())
-            .or_else(auth::load_token)
+        let base_url = api_base_url();
+        let token = auth::env_token("GH_TOKEN")
+            .or_else(|| auth::env_token("GITHUB_TOKEN"))
+            .or_else(auth::keychain_token)
+            .or_else(|| is_github_dot_com(&base_url).then(auth::gh_token).flatten())
             .ok_or(GitHubError::MissingToken)?;
-        let base_url =
-            std::env::var("GITHUB_API_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
         Ok(Self::with_base_url(token, base_url))
     }
 
