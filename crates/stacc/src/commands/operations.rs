@@ -1044,13 +1044,28 @@ pub fn sync(args: &SyncArgs, format: OutputFormat) -> Result<(), Error> {
         return continue_op(&git, &store, &mut state, &repo, format);
     }
 
-    // Adopt PRs created outside stacc (gh, the web UI): a tracked branch with
-    // no recorded PR may still have one on GitHub. Open PRs are recorded so
-    // later submit/merge see them; merged ones join merge-detection's drop set.
-    let (adopted, adopted_merged) = adopt_prs(&git, &store, &mut state, &repo)?;
-    let adopted_names: BTreeSet<String> = adopted.iter().map(|a| a.branch.clone()).collect();
-    let mut merged = detect_merged(&git, &state, &repo, &adopted_names)?;
-    merged.extend(adopted_merged.into_keys());
+    // Adoption + merged-PR detection need the GitHub API. Skip them under
+    // `--offline`; otherwise build the client ONCE and run them. A missing
+    // token or non-GitHub remote is a hard error: no silent degradation, which
+    // is exactly what rebased a squash-merged branch into a phantom conflict
+    // (STA-90). The `--continue` resume above returns before here, so it never
+    // needs a token.
+    let has_tracked = !state.branches.is_empty();
+    let detection_skipped = args.offline && has_tracked;
+    if detection_skipped {
+        eprintln!(
+            "note: --offline skipped merged-PR detection; run `stacc sync` online to reconcile merged PRs."
+        );
+    }
+    let (adopted, merged) = if args.offline || !has_tracked {
+        (Vec::new(), BTreeSet::new())
+    } else {
+        detect_and_adopt(&git, &store, &mut state, &repo).inspect_err(|_| {
+            eprintln!(
+                "hint: `stacc sync --offline` restacks local refs without merged-PR detection."
+            );
+        })?
+    };
     // Snapshot the merged branches' tips NOW, the leases for the ref cleanup
     // after the reconcile: a branch that moves mid-sync is kept, not destroyed.
     let leases: Vec<(String, String)> = merged
@@ -1086,6 +1101,7 @@ pub fn sync(args: &SyncArgs, format: OutputFormat) -> Result<(), Error> {
         &outcome.restacked,
         &cleaned,
         &cleanup_skipped,
+        detection_skipped,
     );
     Ok(())
 }
@@ -1111,13 +1127,48 @@ struct SyncOutcome {
     restacked: Vec<String>,
 }
 
+/// Build the GitHub client for sync's API work, or a hard error. A non-GitHub
+/// remote and a missing token are both fatal: stacc v1 is GitHub-only and ships
+/// no degraded path (one would rebase squash-merged branches into phantom
+/// conflicts). The error names the remote, never its URL, which can carry
+/// `user:token@` credentials.
+fn github_client(git: &Git, repo: &RepoConfig) -> Result<(GitHub, String, String), Error> {
+    let (owner, repo_name) = stacc_github::parse_remote(&git.remote_url(&repo.remote)?)
+        .ok_or_else(|| {
+            Error::Usage(format!(
+                "remote `{}` is not a GitHub URL; stacc v1 is GitHub-only (use `--offline` to restack local refs without merged-PR detection)",
+                repo.remote
+            ))
+        })?;
+    let github = GitHub::from_env()?;
+    Ok((github, owner, repo_name))
+}
+
+/// Build the client and run sync's adoption + merged-PR detection, returning
+/// the adopted PRs and the set of merged branch names. Any failure here is
+/// fatal so sync never silently degrades into a phantom-conflict rebase.
+fn detect_and_adopt(
+    git: &Git,
+    store: &StateStore,
+    state: &mut State,
+    repo: &RepoConfig,
+) -> Result<(Vec<AdoptedPr>, BTreeSet<String>), Error> {
+    let (github, owner, repo_name) = github_client(git, repo)?;
+    let (adopted, adopted_merged) = adopt_prs(&github, &owner, &repo_name, store, state)?;
+    let adopted_names: BTreeSet<String> = adopted.iter().map(|a| a.branch.clone()).collect();
+    let mut merged = detect_merged(&github, &owner, &repo_name, state, &adopted_names)?;
+    merged.extend(adopted_merged.into_keys());
+    Ok((adopted, merged))
+}
+
 /// Ask GitHub which recorded PRs have merged, returning their branch names.
 /// `skip` names branches whose PR state this sync already fetched (the ones
 /// just adopted, known open), so they are not queried a second time.
 fn detect_merged(
-    git: &Git,
+    github: &GitHub,
+    owner: &str,
+    repo_name: &str,
     state: &State,
-    repo: &RepoConfig,
     skip: &BTreeSet<String>,
 ) -> Result<BTreeSet<String>, Error> {
     let with_prs: Vec<(String, u64)> = state
@@ -1127,14 +1178,9 @@ fn detect_merged(
         .filter_map(|(name, b)| b.pr.as_ref().map(|pr| (name.clone(), pr.number)))
         .collect();
     let mut merged: BTreeSet<String> = BTreeSet::new();
-    if !with_prs.is_empty() {
-        let (owner, repo_name) = stacc_github::parse_remote(&git.remote_url(&repo.remote)?)
-            .ok_or_else(|| Error::Usage(format!("remote `{}` is not a GitHub URL", repo.remote)))?;
-        let github = GitHub::from_env()?;
-        for (name, number) in &with_prs {
-            if github.get_pull_request(&owner, &repo_name, *number)?.state == PrState::Merged {
-                merged.insert(name.clone());
-            }
+    for (name, number) in &with_prs {
+        if github.get_pull_request(owner, repo_name, *number)?.state == PrState::Merged {
+            merged.insert(name.clone());
         }
     }
     Ok(merged)
@@ -1158,8 +1204,11 @@ struct AdoptedPr {
 /// order to update the PR, where merged and closed heads must fall through to
 /// create.)
 ///
-/// A failed lookup reads as no PR: best-effort, never fatal (a branch with no
-/// PR anywhere is the common WIP case, not an error).
+/// A failed lookup is fatal: a broken token or unreachable network is an error,
+/// not "no PR", so callers never silently skip merged-PR reconciliation (the
+/// STA-90 phantom-conflict bug). Adoptions found before the failing lookup are
+/// persisted first. `Ok(None)` (no PR anywhere) is the common WIP case and is
+/// skipped, not an error.
 fn adopt_prs_among(
     github: &GitHub,
     owner: &str,
@@ -1171,58 +1220,69 @@ fn adopt_prs_among(
     let mut adopted: Vec<AdoptedPr> = Vec::new();
     let mut merged: BTreeMap<String, u64> = BTreeMap::new();
     for name in candidates {
-        let Ok(Some(pr)) = github.pull_request_for_branch_any_state(owner, repo_name, name) else {
-            continue;
-        };
-        match pr.state {
-            PrState::Merged => {
-                merged.insert(name.clone(), pr.number);
-            }
-            PrState::Open => {
-                let record = PullRequest {
-                    number: pr.number,
-                    url: Some(pr.url.clone()),
-                };
-                if let Some(branch) = state.branches.get_mut(name) {
-                    branch.pr = Some(record);
+        match github.pull_request_for_branch_any_state(owner, repo_name, name) {
+            Ok(Some(pr)) => match pr.state {
+                PrState::Merged => {
+                    merged.insert(name.clone(), pr.number);
                 }
-                adopted.push(AdoptedPr {
-                    branch: name.clone(),
-                    number: pr.number,
-                    url: pr.url,
-                });
-            }
-            PrState::Closed => {}
-        }
-    }
-
-    // Persist the open adoptions before the caller's fallible work (sync's
-    // fetch and restack, merge's walk), so a failure later does not lose what
-    // GitHub already told us.
-    if !adopted.is_empty() {
-        store.update(|s| {
-            for a in &adopted {
-                if let Some(branch) = s.branches.get_mut(&a.branch) {
-                    branch.pr = Some(PullRequest {
-                        number: a.number,
-                        url: Some(a.url.clone()),
+                PrState::Open => {
+                    if let Some(branch) = state.branches.get_mut(name) {
+                        branch.pr = Some(PullRequest {
+                            number: pr.number,
+                            url: Some(pr.url.clone()),
+                        });
+                    }
+                    adopted.push(AdoptedPr {
+                        branch: name.clone(),
+                        number: pr.number,
+                        url: pr.url,
                     });
                 }
+                PrState::Closed => {}
+            },
+            Ok(None) => {}
+            Err(e) => {
+                // Persist what we adopted before surfacing the failure, so a
+                // mid-loop error does not lose PRs GitHub already confirmed.
+                let _ = persist_adopted(store, &adopted);
+                return Err(e.into());
             }
-            Ok(())
-        })?;
+        }
     }
+    persist_adopted(store, &adopted)?;
     Ok((adopted, merged))
 }
 
+/// Persist adopted open PRs into state before the caller's fallible work
+/// (sync's fetch and restack, merge's walk), so a later failure does not lose
+/// what GitHub already told us.
+fn persist_adopted(store: &StateStore, adopted: &[AdoptedPr]) -> Result<(), Error> {
+    if adopted.is_empty() {
+        return Ok(());
+    }
+    store.update(|s| {
+        for a in adopted {
+            if let Some(branch) = s.branches.get_mut(&a.branch) {
+                branch.pr = Some(PullRequest {
+                    number: a.number,
+                    url: Some(a.url.clone()),
+                });
+            }
+        }
+        Ok(())
+    })?;
+    Ok(())
+}
+
 /// `sync`'s adoption pass: every tracked branch with no recorded PR is a
-/// candidate. Best-effort like submit's adoption: a missing token or a
-/// non-GitHub remote skips adoption rather than failing the sync.
+/// candidate, looked up by head branch with the client built once by the
+/// caller. A lookup failure is fatal (see [`adopt_prs_among`]).
 fn adopt_prs(
-    git: &Git,
+    github: &GitHub,
+    owner: &str,
+    repo_name: &str,
     store: &StateStore,
     state: &mut State,
-    repo: &RepoConfig,
 ) -> Result<(Vec<AdoptedPr>, BTreeMap<String, u64>), Error> {
     let candidates: Vec<String> = state
         .branches
@@ -1233,17 +1293,7 @@ fn adopt_prs(
     if candidates.is_empty() {
         return Ok((Vec::new(), BTreeMap::new()));
     }
-    let Some((owner, repo_name)) = git
-        .remote_url(&repo.remote)
-        .ok()
-        .and_then(|url| stacc_github::parse_remote(&url))
-    else {
-        return Ok((Vec::new(), BTreeMap::new()));
-    };
-    let Ok(github) = GitHub::from_env() else {
-        return Ok((Vec::new(), BTreeMap::new()));
-    };
-    adopt_prs_among(&github, &owner, &repo_name, store, state, &candidates)
+    adopt_prs_among(github, owner, repo_name, store, state, &candidates)
 }
 
 /// Reconcile a caller-supplied drop set and restack the stack, the shared core
@@ -2407,6 +2457,8 @@ fn continue_op(
 
     match &op {
         recovery::Operation::Sync { .. } => {
+            // A resumed sync only finishes the interrupted restack; it runs no
+            // detection, so the offline detection-skipped marker stays false.
             report_sync(
                 format,
                 op.tag(),
@@ -2417,6 +2469,7 @@ fn continue_op(
                 &restacked,
                 &[],
                 &[],
+                false,
             );
         }
         // A resumed modify carries its branch, so JSON gets the same
@@ -2750,6 +2803,7 @@ fn report_sync(
     restacked: &[String],
     cleaned: &[String],
     cleanup_skipped: &[CleanupSkip],
+    detection_skipped: bool,
 ) {
     match format {
         OutputFormat::Json => {
@@ -2774,6 +2828,7 @@ fn report_sync(
                     "restacked": restacked,
                     "cleaned": cleaned,
                     "cleanup_skipped": cleanup_skipped_json(cleanup_skipped),
+                    "detection_skipped": detection_skipped,
                 })
             );
         }

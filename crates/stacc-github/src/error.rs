@@ -2,7 +2,7 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum GitHubError {
-    #[error("no GitHub token found; run `stacc auth login` or set GITHUB_TOKEN")]
+    #[error("no GitHub token found; run `stacc auth login`, set GITHUB_TOKEN, or log in with `gh`")]
     MissingToken,
 
     #[error("GitHub API returned status {status}: {body}")]
