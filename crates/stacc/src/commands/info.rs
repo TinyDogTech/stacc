@@ -10,7 +10,7 @@
 use serde_json::json;
 use stacc_core::ops;
 use stacc_git::{CommitInfo, DiffStat, Git};
-use stacc_github::GitHub;
+use stacc_github::{GitHub, PrState};
 use stacc_state::{BranchState, RepoConfig, StateStore};
 
 use crate::cli::{InfoArgs, OutputFormat};
@@ -170,6 +170,8 @@ fn render_json(d: &Details) {
             obj["title"] = json!(live.title);
             obj["state"] = json!(super::pr_state_str(live.state));
             obj["body"] = json!(live.body);
+            obj["draft"] = json!(live.draft);
+            obj["mergeable_state"] = json!(live.mergeable_state);
         }
         obj
     });
@@ -226,8 +228,18 @@ fn render_pretty(d: &Details) {
     if let Some(pr) = &d.pr {
         let mut line = format!("  PR:       #{}", pr.number);
         if let Some(live) = &d.pr_live {
+            let mut tags = vec![super::pr_state_str(live.state)];
+            // Draft and mergeable hints only mean something on an open PR.
+            if live.state == PrState::Open {
+                if live.draft {
+                    tags.push("draft");
+                }
+                if let Some(hint) = super::mergeable_hint(live.mergeable_state.as_deref()) {
+                    tags.push(hint);
+                }
+            }
             line.push_str(" (");
-            line.push_str(super::pr_state_str(live.state));
+            line.push_str(&tags.join(", "));
             line.push(')');
         }
         if let Some(url) = &pr.url {

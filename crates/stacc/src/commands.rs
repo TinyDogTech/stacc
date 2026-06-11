@@ -477,6 +477,13 @@ pub(crate) fn pr_state_str(state: PrState) -> &'static str {
     }
 }
 
+/// The actionable `mergeable_state` values worth surfacing: blocked on
+/// reviews/checks, behind its base, or conflicting. `clean`/`unknown`/absent
+/// show no hint.
+pub(crate) fn mergeable_hint(state: Option<&str>) -> Option<&str> {
+    state.filter(|state| matches!(*state, "blocked" | "behind" | "dirty"))
+}
+
 /// `stacc pr`: print the current branch's recorded PR URL, and open it in a
 /// browser when run on a terminal. Errors when the branch has no recorded PR.
 pub fn pr(format: OutputFormat) -> Result<(), Error> {
