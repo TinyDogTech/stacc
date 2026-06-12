@@ -1,7 +1,7 @@
 ---
 title: "feat: forge-less local floor (slice 1)"
 type: feat
-status: active
+status: completed
 date: 2026-06-11
 issue: STA-TBD
 origin: docs/brainstorms/2026-06-11-seamless-local-multi-forge-requirements.md
