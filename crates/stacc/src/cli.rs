@@ -96,6 +96,8 @@ pub enum Command {
     Log(LogArgs),
     /// Squash-merge the ready PRs from the trunk up to the current branch, then sync.
     Merge(MergeArgs),
+    /// Reconcile a branch already merged into trunk: drop it, re-parent its children, keep its tip.
+    Merged(MergedArgs),
     /// Fold staged changes into the current branch, then restack its upstack.
     Modify(ModifyArgs),
     /// Re-parent the current branch (and its upstack) onto a new base.
@@ -519,6 +521,18 @@ pub struct DeleteArgs {
     /// failure to close is reported, not fatal).
     #[arg(long)]
     pub close: bool,
+}
+
+/// Arguments for `stacc merged`.
+#[derive(Debug, clap::Args)]
+pub struct MergedArgs {
+    /// Branch to reconcile (must be tracked; never the trunk).
+    pub branch: String,
+    /// Drop the branch even when stacc cannot prove it merged (its diff only
+    /// looks already on trunk, or no signal at all). Acts only on this one
+    /// named branch, never a flagged set.
+    #[arg(long = "assume-merged")]
+    pub assume_merged: bool,
 }
 
 /// Arguments for `stacc split`.

@@ -134,6 +134,44 @@ pub struct TreeEntry {
     pub sha: String,
 }
 
+/// Evidence that a branch's changes already live in a trunk, returned by
+/// [`Git::merge_equivalence`]. Ordered by strength: the first two variants are
+/// deterministic proofs that the branch is contained in trunk; the third is a
+/// heuristic, propose-only signal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeEquivalence {
+    /// The branch tip is an ancestor of trunk: every branch commit is already
+    /// reachable from trunk (a plain or fast-forward merge).
+    Ancestor,
+    /// The branch tip's tree equals trunk's tree: the branch produced exactly
+    /// trunk's current content (a squash where trunk has not advanced since).
+    SameTree,
+    /// The branch's net diff matches the patch-id of a commit already on trunk
+    /// (a squash, even after trunk advanced on other files). Propose-only: it
+    /// has known false positives (a reverted-then-overwritten change, an
+    /// independent backport of the same diff), so a caller must not treat it as
+    /// proof for a destructive drop.
+    NetDiff,
+    /// No evidence that the branch is contained in trunk.
+    NotFound,
+}
+
+/// Diff options pinned for patch-id comparability. Both sides of a comparison
+/// must use identical options for their ids to match: the `--no-*` flags strip
+/// rename detection and config- or environment-dependent filters, and `-U0`
+/// drops context lines so an unrelated trunk change on a neighbouring line does
+/// not perturb the hash.
+const PATCH_ID_DIFF_OPTS: &[&str] = &["--no-renames", "--no-ext-diff", "--no-textconv", "-U0"];
+
+/// One ref mutation for an atomic [`update_refs`](Git::update_refs) batch.
+pub enum RefUpdate {
+    /// Create `name` at `new`; the transaction fails if `name` already exists.
+    Create { name: String, new: String },
+    /// Delete `name`; when `old` is set, only if it currently equals `old` (a
+    /// compare-and-swap delete).
+    Delete { name: String, old: Option<String> },
+}
+
 impl Git {
     pub fn open(dir: impl Into<PathBuf>) -> Self {
         Self { dir: dir.into() }
@@ -230,6 +268,78 @@ impl Git {
             Some(1) => Ok(None),
             _ => Err(self.command_error(&args, &output)),
         }
+    }
+
+    /// Report the strongest evidence that `branch`'s changes already appear in
+    /// `trunk`. Checks in order of strength: [`is_ancestor`](Git::is_ancestor)
+    /// (a plain merge), [`same_tree`](Git::same_tree) (a squash where trunk has
+    /// not advanced), then a net-diff patch-id scan of the commits trunk gained
+    /// since the fork point (a squash after trunk advanced). The scan is bounded
+    /// to `merge_base(trunk, branch)..trunk`, never all of trunk.
+    ///
+    /// [`MergeEquivalence::NetDiff`] is propose-only and must not authorize a
+    /// destructive drop on its own; the two deterministic signals can.
+    pub fn merge_equivalence(
+        &self,
+        trunk: &str,
+        branch: &str,
+    ) -> Result<MergeEquivalence, GitError> {
+        if self.is_ancestor(branch, trunk)? {
+            return Ok(MergeEquivalence::Ancestor);
+        }
+        if self.same_tree(branch, trunk)? {
+            return Ok(MergeEquivalence::SameTree);
+        }
+        let base = self.merge_base(trunk, branch)?;
+        let Some(branch_patch) = self.net_diff_patch_id(&base, branch)? else {
+            // An empty net diff means the branch carries no changes of its own,
+            // so there is nothing for trunk to contain.
+            return Ok(MergeEquivalence::NotFound);
+        };
+        if self.range_patch_ids(&base, trunk)?.contains(&branch_patch) {
+            Ok(MergeEquivalence::NetDiff)
+        } else {
+            Ok(MergeEquivalence::NotFound)
+        }
+    }
+
+    /// The `git patch-id --stable` id of the net diff `from..to`, or `None` when
+    /// that diff is empty.
+    fn net_diff_patch_id(&self, from: &str, to: &str) -> Result<Option<String>, GitError> {
+        let range = format!("{from}..{to}");
+        let mut args = vec!["diff"];
+        args.extend_from_slice(PATCH_ID_DIFF_OPTS);
+        args.push(range.as_str());
+        let diff = self.run(&args)?;
+        if diff.is_empty() {
+            return Ok(None);
+        }
+        let out = self.run_with_stdin(&["patch-id", "--stable"], diff.as_bytes())?;
+        Ok(out.split_whitespace().next().map(ToString::to_string))
+    }
+
+    /// The set of per-commit patch-ids for the commits in `from..to`.
+    fn range_patch_ids(
+        &self,
+        from: &str,
+        to: &str,
+    ) -> Result<std::collections::HashSet<String>, GitError> {
+        let range = format!("{from}..{to}");
+        let mut args = vec!["log", "-p", "--no-merges"];
+        args.extend_from_slice(PATCH_ID_DIFF_OPTS);
+        args.push(range.as_str());
+        let patches = self.run(&args)?;
+        if patches.is_empty() {
+            return Ok(std::collections::HashSet::new());
+        }
+        let out = self.run_with_stdin(&["patch-id", "--stable"], patches.as_bytes())?;
+        // `git patch-id --stable` emits one `<patch-id> <commit-id>` line per
+        // commit in the stream; keep the patch-id.
+        Ok(out
+            .lines()
+            .filter_map(|line| line.split_whitespace().next())
+            .map(ToString::to_string)
+            .collect())
     }
 
     /// Rebase `branch` onto `onto`, replaying the commits after `upstream`.
@@ -649,6 +759,51 @@ impl Git {
             args.push(old);
         }
         self.run(&args).map(|_| ())
+    }
+
+    /// Apply `updates` as one atomic `git update-ref --stdin` transaction: every
+    /// update lands or none do (git locks all refs first), and `old`-value
+    /// guards make each a compare-and-swap. Used to create a keep-alive ref and
+    /// delete a branch ref as a single unit, so a dropped branch's commits are
+    /// never left unreachable by a partial failure.
+    pub fn update_refs(&self, updates: &[RefUpdate]) -> Result<(), GitError> {
+        use std::fmt::Write as _;
+        // Writing to a String is infallible, so the writeln! results are ignored.
+        let mut input = String::new();
+        for update in updates {
+            match update {
+                RefUpdate::Create { name, new } => {
+                    let _ = writeln!(input, "create {name} {new}");
+                }
+                RefUpdate::Delete {
+                    name,
+                    old: Some(old),
+                } => {
+                    let _ = writeln!(input, "delete {name} {old}");
+                }
+                RefUpdate::Delete { name, old: None } => {
+                    let _ = writeln!(input, "delete {name}");
+                }
+            }
+        }
+        self.run_with_stdin(&["update-ref", "--stdin"], input.as_bytes())
+            .map(|_| ())
+    }
+
+    /// Ref names under `prefix`, newest-committed first
+    /// (`git for-each-ref --sort=-committerdate`). Empty when none match.
+    pub fn list_refs(&self, prefix: &str) -> Result<Vec<String>, GitError> {
+        let out = self.run(&[
+            "for-each-ref",
+            "--format=%(refname)",
+            "--sort=-committerdate",
+            prefix,
+        ])?;
+        Ok(out
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(ToString::to_string)
+            .collect())
     }
 
     /// The commit a ref points at, or `None` if the ref does not exist.
@@ -1321,6 +1476,221 @@ mod tests {
         let second = repo.rev_parse("HEAD").unwrap();
         assert!(repo.is_ancestor(&first, &second).unwrap());
         assert!(!repo.is_ancestor(&second, &first).unwrap());
+    }
+
+    #[test]
+    fn merge_equivalence_ancestor_for_fast_forward_merge() {
+        let (tmp, repo) = init_repo();
+        let path = tmp.path();
+        run_git(path, &["checkout", "-q", "-b", "feature"]);
+        write_commit(path, "f.txt", "feature\n", "feature add");
+        run_git(path, &["checkout", "-q", "main"]);
+        run_git(path, &["merge", "-q", "--ff-only", "feature"]);
+        // feature's commits are now reachable from main.
+        assert_eq!(
+            repo.merge_equivalence("main", "feature").unwrap(),
+            MergeEquivalence::Ancestor
+        );
+    }
+
+    #[test]
+    fn merge_equivalence_same_tree_for_squash_without_advance() {
+        let (tmp, repo) = init_repo();
+        let path = tmp.path();
+        write_commit(path, "a.txt", "base\n", "base");
+        run_git(path, &["checkout", "-q", "-b", "feature"]);
+        write_commit(path, "a.txt", "base\nfeat\n", "feature change");
+        run_git(path, &["checkout", "-q", "main"]);
+        // Squash the same content onto main; trunk has not advanced otherwise,
+        // so the trees match even though the commits differ.
+        write_commit(path, "a.txt", "base\nfeat\n", "squash feature");
+        assert_eq!(
+            repo.merge_equivalence("main", "feature").unwrap(),
+            MergeEquivalence::SameTree
+        );
+    }
+
+    #[test]
+    fn merge_equivalence_netdiff_for_single_commit_squash_after_advance() {
+        let (tmp, repo) = init_repo();
+        let path = tmp.path();
+        write_commit(path, "a.txt", "base\n", "base");
+        run_git(path, &["checkout", "-q", "-b", "feature"]);
+        write_commit(path, "a.txt", "base\nfeat\n", "feature change");
+        run_git(path, &["checkout", "-q", "main"]);
+        // Trunk advances on an unrelated file, then the feature lands squashed.
+        write_commit(path, "b.txt", "other\n", "unrelated trunk advance");
+        write_commit(path, "a.txt", "base\nfeat\n", "squash feature");
+        // Not an ancestor, and trees differ (main has b.txt), but the squash
+        // commit's patch matches the branch's net diff.
+        assert_eq!(
+            repo.merge_equivalence("main", "feature").unwrap(),
+            MergeEquivalence::NetDiff
+        );
+    }
+
+    #[test]
+    fn merge_equivalence_netdiff_for_multi_commit_squash() {
+        let (tmp, repo) = init_repo();
+        let path = tmp.path();
+        write_commit(path, "a.txt", "l1\n", "base");
+        run_git(path, &["checkout", "-q", "-b", "feature"]);
+        write_commit(path, "a.txt", "l1\nl2\n", "feature c1");
+        write_commit(path, "a.txt", "l1\nl2\nl3\n", "feature c2");
+        run_git(path, &["checkout", "-q", "main"]);
+        write_commit(path, "b.txt", "other\n", "unrelated trunk advance");
+        // The two feature commits land as one squashed commit; the branch's net
+        // diff equals the squash's diff even though no single per-commit patch
+        // would (the `git cherry` failure mode).
+        write_commit(path, "a.txt", "l1\nl2\nl3\n", "squash feature");
+        assert_eq!(
+            repo.merge_equivalence("main", "feature").unwrap(),
+            MergeEquivalence::NetDiff
+        );
+    }
+
+    #[test]
+    fn merge_equivalence_not_found_for_unmerged_branch() {
+        let (tmp, repo) = init_repo();
+        let path = tmp.path();
+        write_commit(path, "a.txt", "base\n", "base");
+        run_git(path, &["checkout", "-q", "-b", "feature"]);
+        write_commit(path, "a.txt", "base\nfeat\n", "feature change");
+        run_git(path, &["checkout", "-q", "main"]);
+        write_commit(path, "b.txt", "other\n", "unrelated trunk advance");
+        // Feature's change never lands on main.
+        assert_eq!(
+            repo.merge_equivalence("main", "feature").unwrap(),
+            MergeEquivalence::NotFound
+        );
+    }
+
+    #[test]
+    fn merge_equivalence_not_found_when_landed_as_separate_commits() {
+        let (tmp, repo) = init_repo();
+        let path = tmp.path();
+        write_commit(path, "a.txt", "l1\n", "base");
+        run_git(path, &["checkout", "-q", "-b", "feature"]);
+        write_commit(path, "a.txt", "l1\nl2\n", "feature c1");
+        write_commit(path, "a.txt", "l1\nl2\nl3\n", "feature c2");
+        run_git(path, &["checkout", "-q", "main"]);
+        // Trunk advances on an unrelated file so the trees differ (otherwise
+        // same_tree would correctly short-circuit), then the two changes land as
+        // two separate commits, not one squash. No single trunk commit's patch
+        // matches the branch's combined net diff, so the heuristic reads
+        // not-found (the conceded false negative).
+        write_commit(path, "b.txt", "other\n", "unrelated trunk advance");
+        write_commit(path, "a.txt", "l1\nl2\n", "land c1");
+        write_commit(path, "a.txt", "l1\nl2\nl3\n", "land c2");
+        assert_eq!(
+            repo.merge_equivalence("main", "feature").unwrap(),
+            MergeEquivalence::NotFound
+        );
+    }
+
+    #[test]
+    fn merge_equivalence_netdiff_false_positive_after_revert() {
+        let (tmp, repo) = init_repo();
+        let path = tmp.path();
+        write_commit(path, "a.txt", "base\n", "base");
+        run_git(path, &["checkout", "-q", "-b", "feature"]);
+        write_commit(path, "a.txt", "base\nfeat\n", "feature change");
+        run_git(path, &["checkout", "-q", "main"]);
+        // Feature lands squashed, then is reverted: the net effect on trunk is
+        // gone, but the original landing commit's patch is still in history, so
+        // the heuristic reports NetDiff. This is the safe false positive the
+        // propose-only contract exists for.
+        write_commit(path, "a.txt", "base\nfeat\n", "squash feature");
+        write_commit(path, "a.txt", "base\n", "revert feature");
+        assert_eq!(
+            repo.merge_equivalence("main", "feature").unwrap(),
+            MergeEquivalence::NetDiff
+        );
+    }
+
+    #[test]
+    fn update_refs_creates_and_guard_deletes_atomically() {
+        let (tmp, repo) = init_repo();
+        let path = tmp.path();
+        run_git(path, &["checkout", "-q", "-b", "feature"]);
+        write_commit(path, "f.txt", "x\n", "feature");
+        let tip = repo.rev_parse("feature").unwrap();
+        run_git(path, &["checkout", "-q", "main"]);
+
+        repo.update_refs(&[
+            RefUpdate::Create {
+                name: "refs/stacc/dropped/feature-keep".into(),
+                new: tip.clone(),
+            },
+            RefUpdate::Delete {
+                name: "refs/heads/feature".into(),
+                old: Some(tip.clone()),
+            },
+        ])
+        .unwrap();
+
+        assert!(repo.ref_missing("refs/heads/feature"), "branch deleted");
+        assert_eq!(
+            repo.ref_commit("refs/stacc/dropped/feature-keep")
+                .unwrap()
+                .as_deref(),
+            Some(tip.as_str()),
+            "keep-alive ref preserves the tip"
+        );
+    }
+
+    #[test]
+    fn update_refs_aborts_every_update_on_a_failed_guard() {
+        let (tmp, repo) = init_repo();
+        let path = tmp.path();
+        run_git(path, &["checkout", "-q", "-b", "feature"]);
+        write_commit(path, "f.txt", "x\n", "feature");
+        let tip = repo.rev_parse("feature").unwrap();
+        run_git(path, &["checkout", "-q", "main"]);
+
+        // The delete guard names the wrong old OID, so the whole transaction must
+        // roll back: neither the create nor the delete lands.
+        let result = repo.update_refs(&[
+            RefUpdate::Create {
+                name: "refs/stacc/dropped/feature-keep".into(),
+                new: tip.clone(),
+            },
+            RefUpdate::Delete {
+                name: "refs/heads/feature".into(),
+                old: Some("0".repeat(40)),
+            },
+        ]);
+        assert!(result.is_err(), "a failed guard fails the transaction");
+        assert_eq!(
+            repo.ref_commit("refs/heads/feature").unwrap().as_deref(),
+            Some(tip.as_str()),
+            "branch ref survives the aborted transaction"
+        );
+        assert!(
+            repo.ref_missing("refs/stacc/dropped/feature-keep"),
+            "the create rolled back too"
+        );
+    }
+
+    #[test]
+    fn list_refs_returns_matching_refs_only() {
+        let (_tmp, repo) = init_repo();
+        let head = repo.rev_parse("HEAD").unwrap();
+        repo.update_refs(&[
+            RefUpdate::Create {
+                name: "refs/stacc/dropped/a".into(),
+                new: head.clone(),
+            },
+            RefUpdate::Create {
+                name: "refs/stacc/dropped/b".into(),
+                new: head.clone(),
+            },
+        ])
+        .unwrap();
+        let mut refs = repo.list_refs("refs/stacc/dropped/").unwrap();
+        refs.sort();
+        assert_eq!(refs, vec!["refs/stacc/dropped/a", "refs/stacc/dropped/b"]);
+        assert!(repo.list_refs("refs/stacc/nonesuch/").unwrap().is_empty());
     }
 
     #[test]

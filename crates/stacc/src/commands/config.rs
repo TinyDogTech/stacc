@@ -36,7 +36,7 @@ pub fn config(args: &ConfigArgs, format: OutputFormat) -> Result<(), Error> {
 fn parse_key(key: &str) -> Result<Key, Error> {
     Key::parse(key).ok_or_else(|| {
         Error::Usage(format!(
-            "unknown config key `{key}`; valid keys: trunk, remote, aliases.<name>"
+            "unknown config key `{key}`; valid keys: trunk, remote, local, aliases.<name>"
         ))
     })
 }
@@ -120,6 +120,19 @@ impl Sources {
                 self.detected.remote.as_ref(),
                 "detected",
             ),
+            // `local` has no detected or default fallback: a repo or global file
+            // sets it, or it is unset (the consumer reads it as off). This key
+            // (with non-GitHub auto-detection) is how the forge-less floor is
+            // selected; there is deliberately no per-command flag for it (R11).
+            Key::Local => {
+                if let Some(on) = self.repo.local {
+                    Resolved::new(on.to_string(), "repo")
+                } else if let Some(on) = self.global.local {
+                    Resolved::new(on.to_string(), "global")
+                } else {
+                    Resolved::UNSET
+                }
+            }
             Key::Alias(name) => Self::layered(
                 self.repo_aliases.get(name),
                 self.global_aliases.get(name),
@@ -231,6 +244,7 @@ fn list(format: OutputFormat) -> Result<(), Error> {
     let mut rows: Vec<(String, Resolved)> = vec![
         ("trunk".to_string(), sources.resolve(&Key::Trunk)),
         ("remote".to_string(), sources.resolve(&Key::Remote)),
+        ("local".to_string(), sources.resolve(&Key::Local)),
     ];
     let aliases: Vec<(String, Resolved)> = sources
         .alias_names()

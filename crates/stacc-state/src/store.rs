@@ -2,12 +2,17 @@
 
 use std::collections::BTreeMap;
 
-use stacc_git::{Git, GitError};
+use stacc_git::{Git, GitError, RefUpdate};
 use thiserror::Error;
 
-use crate::model::{BranchState, RepoConfig};
+use crate::model::{BranchState, Disposal, RepoConfig};
 
 const STATE_REF: &str = "refs/stacc/data";
+/// Ref namespace for keep-alive refs: a dropped branch's tip is preserved at
+/// `refs/stacc/dropped/<branch>-<tip>` so its commits are not GC-eligible until
+/// pruned. Local-only: the push refspec ([`StateStore::push`]) covers
+/// `refs/stacc/data` alone, so these never leave the machine.
+const DROPPED_REF_PREFIX: &str = "refs/stacc/dropped/";
 const ZERO_OID: &str = "0000000000000000000000000000000000000000";
 // Retry budget for a compare-and-swap on the state ref. Paired with jittered
 // backoff (see `backoff`) so a burst of concurrent writers de-synchronizes
@@ -43,6 +48,8 @@ pub enum StateError {
 pub struct State {
     pub repo: Option<RepoConfig>,
     pub branches: BTreeMap<String, BranchState>,
+    /// Records of branches dropped by `stacc merged`, keyed by branch and tip.
+    pub disposals: BTreeMap<String, Disposal>,
 }
 
 /// Reads and writes [`State`] to a git ref as a tree of JSON blobs.
@@ -95,7 +102,18 @@ impl StateStore {
             }
         }
 
-        Ok(State { repo, branches })
+        // The disposals blob is absent in state written before this slice, which
+        // reads back as an empty map (back-compatible).
+        let disposals = match self.git.read_blob(rev, "disposals")? {
+            Some(json) => serde_json::from_str(&json)?,
+            None => BTreeMap::new(),
+        };
+
+        Ok(State {
+            repo,
+            branches,
+            disposals,
+        })
     }
 
     /// Read-modify-write the state under compare-and-swap, re-applying the
@@ -180,6 +198,16 @@ impl StateStore {
             ));
         }
 
+        // Disposal records, omitted when empty so unrelated state stays clean and
+        // old readers that don't know the blob see no change.
+        if !state.disposals.is_empty() {
+            let json = serde_json::to_string_pretty(&state.disposals)?;
+            blobs.push((
+                "disposals".to_string(),
+                self.git.hash_object(json.as_bytes())?,
+            ));
+        }
+
         // Snapshot each tracked branch's tip so `undo` can restore it. A branch
         // with no git ref is recorded absent (omitted from the map).
         let mut tips: BTreeMap<String, String> = BTreeMap::new();
@@ -235,6 +263,70 @@ impl StateStore {
         self.git.fetch(remote, &format!("{0}:{0}", self.git_ref))?;
         Ok(())
     }
+
+    /// Atomically preserve `branch`'s dropped `tip` at its keep-alive ref and
+    /// delete `refs/heads/<branch>` (guarded by `tip`) as one ref transaction:
+    /// the branch ref is never removed without the keep-alive landing, so the
+    /// dropped commits stay reachable. Meant to run *after* the disposal record
+    /// is written to state, so a failure here leaves the branch ref intact and
+    /// re-trackable rather than losing it.
+    pub fn keep_alive_and_delete(&self, branch: &str, tip: &str) -> Result<(), StateError> {
+        self.git.update_refs(&[
+            RefUpdate::Create {
+                name: dropped_ref(branch, tip),
+                new: tip.to_string(),
+            },
+            RefUpdate::Delete {
+                name: format!("refs/heads/{branch}"),
+                old: Some(tip.to_string()),
+            },
+        ])?;
+        Ok(())
+    }
+
+    /// Idempotently write `branch`'s keep-alive ref at `tip` WITHOUT touching the
+    /// branch ref. Used on the conflict path of a dispose, where the children
+    /// restack stops before the branch ref can be removed: the dropped tip is
+    /// preserved immediately so recovery works even though `refs/heads/<branch>`
+    /// lingers until the user removes it. Setting the ref to `tip` (which it
+    /// always points at) is idempotent, so a retry or a re-drop is safe.
+    pub fn preserve_tip(&self, branch: &str, tip: &str) -> Result<(), StateError> {
+        self.git.update_ref(&dropped_ref(branch, tip), tip, None)?;
+        Ok(())
+    }
+
+    /// Delete keep-alive refs beyond the [`UNDO_RETENTION`] cap, oldest *drop*
+    /// first, so `refs/stacc/dropped/*` cannot grow without bound. Ordered by each
+    /// disposal's recorded drop time, NOT the dropped tip's commit date: a
+    /// long-lived branch can have an old tip, and ordering by commit date could
+    /// prune the just-dropped ref while keeping stale ones. Refs with no disposal
+    /// record (orphans, or pre-slice drops) have drop time 0 and sort oldest.
+    pub fn prune_dropped(&self) -> Result<(), StateError> {
+        let state = self.load()?;
+        let mut refs = self.git.list_refs(DROPPED_REF_PREFIX)?;
+        refs.sort_by_key(|r| std::cmp::Reverse(drop_time(&state, r)));
+        for stale in refs.iter().skip(UNDO_RETENTION) {
+            self.git.delete_ref(stale, None)?;
+        }
+        Ok(())
+    }
+}
+
+/// The recorded drop time (unix millis) of the disposal whose keep-alive ref is
+/// `ref_name`, or 0 when no disposal matches (an orphan or a pre-slice ref), so
+/// such refs sort oldest under retention.
+fn drop_time(state: &State, ref_name: &str) -> u64 {
+    state
+        .disposals
+        .values()
+        .find(|d| dropped_ref(&d.branch, &d.tip) == ref_name)
+        .map_or(0, |d| d.dropped_at)
+}
+
+/// The keep-alive ref name for `branch` dropped at `tip`. Recovery re-creates
+/// the branch at this ref.
+pub fn dropped_ref(branch: &str, tip: &str) -> String {
+    format!("{DROPPED_REF_PREFIX}{branch}-{tip}")
 }
 
 /// Exponential backoff with a few ms of jitter between lost compare-and-swap
@@ -252,7 +344,7 @@ fn backoff(attempt: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Base, PullRequest};
+    use crate::model::{Base, Disposal, PullRequest};
     use tempfile::TempDir;
 
     fn run_git(dir: &std::path::Path, args: &[&str]) {
@@ -296,6 +388,7 @@ mod tests {
                 remote: "origin".into(),
             }),
             branches,
+            ..State::default()
         }
     }
 
@@ -578,5 +671,225 @@ mod tests {
             store.version_back(UNDO_RETENTION + 1),
             Err(StateError::BeyondRetention { bound }) if bound == UNDO_RETENTION
         ));
+    }
+
+    #[test]
+    fn disposals_blob_roundtrips_and_absent_reads_empty() {
+        let (_tmp, store) = init_repo();
+        // Old-shape state (no disposals) loads with an empty map (back-compat).
+        store.save(&sample_state()).unwrap();
+        assert!(store.load().unwrap().disposals.is_empty());
+
+        // A disposal record survives a save/load round-trip.
+        let mut state = sample_state();
+        state.disposals.insert(
+            "feature@abc".into(),
+            Disposal {
+                branch: "feature".into(),
+                tip: "abc".into(),
+                base: "main".into(),
+                children: vec!["child".into()],
+                evidence: "net_diff".into(),
+                dropped_at: 1234,
+            },
+        );
+        store.save(&state).unwrap();
+        assert_eq!(store.load().unwrap(), state);
+    }
+
+    #[test]
+    fn keep_alive_and_delete_preserves_the_tip_and_removes_the_branch() {
+        let (tmp, store) = init_repo();
+        let git = Git::open(tmp.path());
+        run_git(tmp.path(), &["checkout", "-q", "-b", "feature"]);
+        run_git(tmp.path(), &["commit", "-q", "--allow-empty", "-m", "f1"]);
+        let tip = rev(tmp.path(), "feature");
+        run_git(tmp.path(), &["checkout", "-q", "main"]);
+
+        store.keep_alive_and_delete("feature", &tip).unwrap();
+
+        assert!(git.ref_missing("refs/heads/feature"), "branch removed");
+        let keep = dropped_ref("feature", &tip);
+        assert_eq!(git.ref_commit(&keep).unwrap().as_deref(), Some(tip.as_str()));
+    }
+
+    #[test]
+    fn keep_alive_with_a_stale_tip_leaves_the_branch() {
+        let (tmp, store) = init_repo();
+        let git = Git::open(tmp.path());
+        run_git(tmp.path(), &["checkout", "-q", "-b", "feature"]);
+        run_git(tmp.path(), &["commit", "-q", "--allow-empty", "-m", "f1"]);
+        let tip = rev(tmp.path(), "feature");
+        run_git(tmp.path(), &["checkout", "-q", "main"]);
+
+        // A wrong tip is the moved-between-check-and-drop case; the guard aborts
+        // and the branch ref survives.
+        let result = store.keep_alive_and_delete("feature", &"0".repeat(40));
+        assert!(result.is_err());
+        assert_eq!(
+            git.ref_commit("refs/heads/feature").unwrap().as_deref(),
+            Some(tip.as_str())
+        );
+    }
+
+    #[test]
+    fn reused_branch_name_gets_distinct_keep_alive_refs() {
+        let (tmp, store) = init_repo();
+        let git = Git::open(tmp.path());
+        // Drop `foo` at one tip, recreate `foo` at a different tip, drop again:
+        // the SHA suffix keeps both keep-alive refs distinct.
+        run_git(tmp.path(), &["checkout", "-q", "-b", "foo"]);
+        run_git(tmp.path(), &["commit", "-q", "--allow-empty", "-m", "one"]);
+        let tip1 = rev(tmp.path(), "foo");
+        run_git(tmp.path(), &["checkout", "-q", "main"]);
+        store.keep_alive_and_delete("foo", &tip1).unwrap();
+
+        run_git(tmp.path(), &["checkout", "-q", "-b", "foo"]);
+        run_git(tmp.path(), &["commit", "-q", "--allow-empty", "-m", "two"]);
+        let tip2 = rev(tmp.path(), "foo");
+        run_git(tmp.path(), &["checkout", "-q", "main"]);
+        store.keep_alive_and_delete("foo", &tip2).unwrap();
+
+        assert_ne!(tip1, tip2);
+        assert_eq!(
+            git.ref_commit(&dropped_ref("foo", &tip1)).unwrap().as_deref(),
+            Some(tip1.as_str())
+        );
+        assert_eq!(
+            git.ref_commit(&dropped_ref("foo", &tip2)).unwrap().as_deref(),
+            Some(tip2.as_str())
+        );
+    }
+
+    #[test]
+    fn prune_dropped_caps_the_namespace() {
+        let (tmp, store) = init_repo();
+        let git = Git::open(tmp.path());
+        let head = rev(tmp.path(), "HEAD");
+        // More keep-alive refs than the retention cap, all on the same commit;
+        // prune keeps exactly the cap.
+        let creates: Vec<RefUpdate> = (0..UNDO_RETENTION + 3)
+            .map(|i| RefUpdate::Create {
+                name: format!("{DROPPED_REF_PREFIX}b{i}-{head}"),
+                new: head.clone(),
+            })
+            .collect();
+        git.update_refs(&creates).unwrap();
+        assert_eq!(
+            git.list_refs(DROPPED_REF_PREFIX).unwrap().len(),
+            UNDO_RETENTION + 3
+        );
+
+        store.prune_dropped().unwrap();
+        assert_eq!(git.list_refs(DROPPED_REF_PREFIX).unwrap().len(), UNDO_RETENTION);
+    }
+
+    #[test]
+    fn prune_dropped_keeps_the_newest_drops_not_the_newest_commits() {
+        let (tmp, store) = init_repo();
+        let git = Git::open(tmp.path());
+        // `recent` is committed now; `old` carries an old committer date, so
+        // commit-date order disagrees with drop order.
+        let recent = rev(tmp.path(), "HEAD");
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(tmp.path())
+            .args(["commit", "-q", "--allow-empty", "-m", "old"])
+            .env("GIT_COMMITTER_DATE", "2001-01-01T00:00:00")
+            .env("GIT_AUTHOR_DATE", "2001-01-01T00:00:00")
+            .status()
+            .expect("spawn git");
+        let old = rev(tmp.path(), "HEAD");
+
+        // Fill the retention window with keep-alive refs on the RECENT commit,
+        // each recorded as an OLDER drop (dropped_at 1..=UNDO_RETENTION).
+        let mut state = State::default();
+        let mut creates = Vec::new();
+        for i in 0..UNDO_RETENTION {
+            let branch = format!("r{i}");
+            creates.push(RefUpdate::Create {
+                name: dropped_ref(&branch, &recent),
+                new: recent.clone(),
+            });
+            state.disposals.insert(
+                format!("{branch}@{recent}"),
+                Disposal {
+                    branch,
+                    tip: recent.clone(),
+                    base: "main".into(),
+                    children: vec![],
+                    evidence: "ancestor".into(),
+                    dropped_at: u64::try_from(i).unwrap() + 1,
+                },
+            );
+        }
+        // The just-dropped branch: the NEWEST drop, but its tip is the OLD commit.
+        creates.push(RefUpdate::Create {
+            name: dropped_ref("survivor", &old),
+            new: old.clone(),
+        });
+        state.disposals.insert(
+            format!("survivor@{old}"),
+            Disposal {
+                branch: "survivor".into(),
+                tip: old.clone(),
+                base: "main".into(),
+                children: vec![],
+                evidence: "ancestor".into(),
+                dropped_at: 9_999,
+            },
+        );
+        git.update_refs(&creates).unwrap();
+        store.save(&state).unwrap();
+        assert_eq!(git.list_refs(DROPPED_REF_PREFIX).unwrap().len(), UNDO_RETENTION + 1);
+
+        store.prune_dropped().unwrap();
+
+        let kept = git.list_refs(DROPPED_REF_PREFIX).unwrap();
+        assert_eq!(kept.len(), UNDO_RETENTION, "prune caps at the retention window");
+        // The newest DROP survives even though its tip is the oldest COMMIT: prune
+        // orders by drop time, not commit date.
+        assert!(
+            kept.contains(&dropped_ref("survivor", &old)),
+            "the just-dropped ref is kept, not pruned by its old commit date"
+        );
+        // The oldest drop (r0, dropped_at = 1) is the one evicted.
+        assert!(
+            !kept.contains(&dropped_ref("r0", &recent)),
+            "the oldest drop is pruned"
+        );
+    }
+
+    #[test]
+    fn dropped_refs_are_local_only_and_not_pushed() {
+        let (tmp, store) = init_repo();
+        run_git(tmp.path(), &["checkout", "-q", "-b", "feature"]);
+        run_git(tmp.path(), &["commit", "-q", "--allow-empty", "-m", "f1"]);
+        let tip = rev(tmp.path(), "feature");
+        run_git(tmp.path(), &["checkout", "-q", "main"]);
+        store.save(&sample_state()).unwrap();
+        store.keep_alive_and_delete("feature", &tip).unwrap();
+
+        let remote = TempDir::new().unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q", "--bare"])
+            .arg(remote.path())
+            .status()
+            .expect("init bare");
+        run_git(
+            tmp.path(),
+            &["remote", "add", "origin", remote.path().to_str().unwrap()],
+        );
+        store.push("origin").unwrap();
+
+        let remote_git = Git::open(remote.path());
+        assert!(
+            remote_git.ref_commit("refs/stacc/data").unwrap().is_some(),
+            "the data ref is pushed"
+        );
+        assert!(
+            remote_git.list_refs(DROPPED_REF_PREFIX).unwrap().is_empty(),
+            "keep-alive refs are local-only"
+        );
     }
 }

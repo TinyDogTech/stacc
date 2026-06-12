@@ -3,5 +3,5 @@
 mod model;
 mod store;
 
-pub use model::{Base, BranchState, PullRequest, RepoConfig};
-pub use store::{State, StateError, StateStore};
+pub use model::{Base, BranchState, Disposal, PullRequest, RepoConfig};
+pub use store::{dropped_ref, State, StateError, StateStore};

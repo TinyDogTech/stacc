@@ -33,7 +33,7 @@ pub use info::info;
 pub use log::log;
 pub use navigation::{bottom, checkout, children, down, parent, top, up};
 pub use operations::{
-    abort_cmd, continue_cmd, fold, merge, modify, move_cmd, restack, squash, sync, undo,
+    abort_cmd, continue_cmd, fold, merge, merged, modify, move_cmd, restack, squash, sync, undo,
 };
 pub use removal::{delete, pop};
 pub use reorder::reorder;
@@ -54,6 +54,7 @@ pub fn init(args: &InitArgs, format: OutputFormat) -> Result<(), Error> {
     let flags = Overrides {
         trunk: args.trunk.clone(),
         remote: args.remote.clone(),
+        local: None,
     };
     let config = resolve(detected, file, flags)?;
     let repo = RepoConfig {
@@ -588,9 +589,7 @@ pub fn submit(args: &SubmitArgs, format: OutputFormat) -> Result<(), Error> {
         );
     }
 
-    let (owner, repo_name) = stacc_github::parse_remote(&git.remote_url(&repo.remote)?)
-        .ok_or_else(|| Error::Usage(format!("remote `{}` is not a GitHub URL", repo.remote)))?;
-    let github = GitHub::from_env()?;
+    let (github, owner, repo_name) = operations::require_github_forge(&git, &repo, "submit")?;
 
     // (branch, action, number, url) for each branch we acted on.
     let mut results: Vec<(String, PrAction, u64, String)> = Vec::new();

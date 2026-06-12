@@ -2,18 +2,21 @@
 //! (continue/abort) lifecycle they share.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 use serde_json::{json, Value};
 use stacc_core::{ops, recovery};
-use stacc_git::{Git, Hunk, HunkKind, RebaseError};
-use stacc_github::{GitHub, PrState, PullRequestUpdate};
-use stacc_state::{Base, BranchState, PullRequest, RepoConfig, State, StateError, StateStore};
+use stacc_git::{Git, Hunk, HunkKind, MergeEquivalence, RebaseError};
+use stacc_github::{GitHub, GitHubError, PrState, PullRequestUpdate};
+use stacc_state::{
+    Base, BranchState, Disposal, PullRequest, RepoConfig, State, StateError, StateStore,
+};
 
 use super::absorb;
 use super::split::spec_matches;
 use crate::cli::{
-    FoldArgs, MergeArgs, ModifyArgs, MoveArgs, OutputFormat, RestackArgs, SquashArgs, SyncArgs,
-    UndoArgs,
+    FoldArgs, MergeArgs, MergedArgs, ModifyArgs, MoveArgs, OutputFormat, RestackArgs, SquashArgs,
+    SyncArgs, UndoArgs,
 };
 use crate::error::Error;
 
@@ -1051,20 +1054,33 @@ pub fn sync(args: &SyncArgs, format: OutputFormat) -> Result<(), Error> {
     // (STA-90). The `--continue` resume above returns before here, so it never
     // needs a token.
     let has_tracked = !state.branches.is_empty();
-    let detection_skipped = args.offline && has_tracked;
-    if detection_skipped {
-        eprintln!(
-            "note: --offline skipped merged-PR detection; run `stacc sync` online to reconcile merged PRs."
-        );
-    }
-    let (adopted, merged) = if args.offline || !has_tracked {
-        (Vec::new(), BTreeSet::new())
-    } else {
-        detect_and_adopt(&git, &store, &mut state, &repo).inspect_err(|_| {
+    let local_mode = stacc_config::local_mode(Path::new(".stacc.toml"));
+    // `--offline` skips the fetch and detection both. Otherwise classify the
+    // merge-detection path: reachable GitHub uses the authoritative API; a
+    // forge-less repo (local-mode key, a non-GitHub remote, a missing token, or
+    // an unreachable API) fetches trunk but only PROPOSES likely-merged branches
+    // via the local heuristic and never drops on it (KTD-4/6). `detection_skipped`
+    // marks a run that emitted the skipped note (the JSON contract), as for
+    // `--offline`.
+    let (adopted, merged, likely_merged, detection_skipped) = if args.offline || !has_tracked {
+        if args.offline && has_tracked {
             eprintln!(
-                "hint: `stacc sync --offline` restacks local refs without merged-PR detection."
+                "note: --offline skipped merged-PR detection; run `stacc sync` online to reconcile merged PRs."
             );
-        })?
+        }
+        (Vec::new(), BTreeSet::new(), Vec::new(), args.offline && has_tracked)
+    } else {
+        match reconcile_detection(&git, &store, &mut state, &repo, local_mode)? {
+            Detection::Api { adopted, merged } => (adopted, merged, Vec::new(), false),
+            Detection::ForgeLess { likely, note } => {
+                if note {
+                    eprintln!(
+                        "note: skipped merged-PR detection (no reachable forge); proposing likely-merged branches from local history, reconcile one with `stacc merged <branch>`."
+                    );
+                }
+                (Vec::new(), BTreeSet::new(), likely, note)
+            }
+        }
     };
     // Snapshot the merged branches' tips NOW, the leases for the ref cleanup
     // after the reconcile: a branch that moves mid-sync is kept, not destroyed.
@@ -1084,7 +1100,7 @@ pub fn sync(args: &SyncArgs, format: OutputFormat) -> Result<(), Error> {
     let drop: BTreeSet<String> = merged.union(&pruned).cloned().collect();
     // tree_guard = true: sync's restack pass skips branches whose tree already
     // matches their base (the squash-merge backstop). Merge passes false.
-    let outcome = reconcile_with(&git, &store, &mut state, &repo, drop, args.offline, true)?;
+    let outcome = reconcile_with(&git, &store, &mut state, &repo, drop, Vec::new(), args.offline, true)?;
     // The merged branches landed and their children are restacked off them:
     // delete their local refs, unless the user asked to keep merged branches.
     // (The pruned set's refs are already gone, nothing to clean there.)
@@ -1104,6 +1120,7 @@ pub fn sync(args: &SyncArgs, format: OutputFormat) -> Result<(), Error> {
         &cleaned,
         &cleanup_skipped,
         detection_skipped,
+        &likely_merged,
     );
     Ok(())
 }
@@ -1146,6 +1163,37 @@ fn github_client(git: &Git, repo: &RepoConfig) -> Result<(GitHub, String, String
     Ok((github, owner, repo_name))
 }
 
+/// The forge boundary for `submit` and `merge`. stacc v1 opens pull requests on
+/// GitHub only, so when the user has opted into local mode or the remote is not a
+/// github.com URL the operation is unavailable: return a forge-generic message
+/// (it names the remote, never echoes its URL, and never detects or names a
+/// specific forge) instead of attempting the API. On a reachable github.com
+/// remote it resolves the owner/repo and builds the client.
+///
+/// The forge-less mode is selected by the local-mode config key and the remote
+/// shape, never a per-command flag (R11): there is deliberately no `--local` or
+/// `--no-forge` override to keep the flag surface from multiplying.
+pub(super) fn require_github_forge(
+    git: &Git,
+    repo: &RepoConfig,
+    op: &str,
+) -> Result<(GitHub, String, String), Error> {
+    if stacc_config::local_mode(Path::new(".stacc.toml")) {
+        return Err(Error::Usage(format!(
+            "local mode is on, so `stacc {op}` is unavailable; stacc v1 opens pull requests on GitHub only. Push your branch and open a change through your forge directly."
+        )));
+    }
+    let (owner, repo_name) = stacc_github::parse_remote(&git.remote_url(&repo.remote)?)
+        .ok_or_else(|| {
+            Error::Usage(format!(
+                "remote `{}` is not a GitHub URL, so `stacc {op}` is unavailable; stacc v1 opens pull requests on GitHub only. Push your branch and open a change through your forge directly.",
+                repo.remote
+            ))
+        })?;
+    let github = GitHub::from_env()?;
+    Ok((github, owner, repo_name))
+}
+
 /// Build the client and run sync's adoption + merged-PR detection, returning
 /// the adopted PRs and the set of merged branch names. Any failure here is
 /// fatal so sync never silently degrades into a phantom-conflict rebase.
@@ -1161,6 +1209,66 @@ fn detect_and_adopt(
     let mut merged = detect_merged(&github, &owner, &repo_name, state, &adopted_names)?;
     merged.extend(adopted_merged.into_keys());
     Ok((adopted, merged))
+}
+
+/// How `sync` resolves merges this run.
+enum Detection {
+    /// Reachable GitHub: the authoritative API result (adopted PRs, merged set).
+    Api {
+        adopted: Vec<AdoptedPr>,
+        merged: BTreeSet<String>,
+    },
+    /// Forge-less (local-mode key, a non-GitHub remote, a missing token, or an
+    /// unreachable API): the local heuristic's propose-only list. `note` is false
+    /// only when the user explicitly opted in via the local-mode key.
+    ForgeLess {
+        likely: Vec<ops::LikelyMerged>,
+        note: bool,
+    },
+}
+
+/// Classify how to reconcile merges and run it. Forge-less engages when the
+/// per-repo local-mode key is set, the remote is not a `github.com` URL, the
+/// GitHub token is missing, or the first API call cannot reach GitHub; otherwise
+/// the authoritative API runs. The local heuristic only PROPOSES (KTD-4/6):
+/// nothing is dropped on a forge-less run.
+fn reconcile_detection(
+    git: &Git,
+    store: &StateStore,
+    state: &mut State,
+    repo: &RepoConfig,
+    local_mode: bool,
+) -> Result<Detection, Error> {
+    if local_mode {
+        let likely = ops::detect_merged_local(git, state, &repo.trunk)?;
+        return Ok(Detection::ForgeLess { likely, note: false });
+    }
+    // A non-`github.com` remote (GitLab, Bitbucket, GitHub Enterprise) cannot be
+    // told apart by URL, so it auto-engages forge-less WITH a note, so it can
+    // never silently skip detection (the STA-94 contract).
+    if stacc_github::parse_remote(&git.remote_url(&repo.remote)?).is_none() {
+        let likely = ops::detect_merged_local(git, state, &repo.trunk)?;
+        return Ok(Detection::ForgeLess { likely, note: true });
+    }
+    // `github.com`: the authoritative API. A missing token or an unreachable API
+    // falls back to forge-less with a note rather than hard-erroring.
+    match detect_and_adopt(git, store, state, repo) {
+        Ok((adopted, merged)) => Ok(Detection::Api { adopted, merged }),
+        Err(err) if is_forge_unreachable(&err) => {
+            let likely = ops::detect_merged_local(git, state, &repo.trunk)?;
+            Ok(Detection::ForgeLess { likely, note: true })
+        }
+        Err(err) => Err(err),
+    }
+}
+
+/// Whether an error means the GitHub API is simply unreachable (no token, or a
+/// transport failure), as opposed to a real API error the user must see.
+fn is_forge_unreachable(err: &Error) -> bool {
+    matches!(
+        err,
+        Error::Github(GitHubError::MissingToken | GitHubError::Transport(_))
+    )
 }
 
 /// Ask GitHub which recorded PRs have merged, returning their branch names.
@@ -1303,12 +1411,17 @@ fn adopt_prs(
 /// merged): re-parent the dropped branches' children onto the nearest surviving
 /// base, drop them, fast-forward the trunk (unless `offline`), then restack the
 /// remainder bottom-up. Persists state and best-effort pushes it.
+// One shared sync/merge/merged reconcile core threads the drop set, disposal
+// records, and two mode flags; a parameter struct would only move this lint
+// without helping the three callers.
+#[allow(clippy::too_many_arguments)]
 fn reconcile_with(
     git: &Git,
     store: &StateStore,
     state: &mut State,
     repo: &RepoConfig,
     dropped: BTreeSet<String>,
+    disposals: Vec<(String, Disposal)>,
     offline: bool,
     tree_guard: bool,
 ) -> Result<SyncOutcome, Error> {
@@ -1331,13 +1444,18 @@ fn reconcile_with(
     for name in &dropped {
         state.branches.remove(name);
     }
+    for (key, record) in &disposals {
+        state.disposals.insert(key.clone(), record.clone());
+    }
 
     // The command's own state change, re-applied onto fresh state whenever the
-    // transactional save retries: drop the merged/pruned branches and re-parent
-    // their children. Both operations are idempotent, so re-applying after a CAS
-    // miss is safe.
+    // transactional save retries: drop the merged/pruned branches, re-parent
+    // their children, and append any disposal records. All are idempotent
+    // (removes, base-repoints, and keyed inserts), so re-applying after a CAS
+    // miss is safe, and the disposal record lands in the same commit as the drop.
     let dropped_delta = dropped.clone();
     let reparented_delta = reparented.clone();
+    let has_disposals = !disposals.is_empty();
     let apply_drops = move |s: &mut State| {
         for (name, new_base) in &reparented_delta {
             if let Some(b) = s.branches.get_mut(name) {
@@ -1347,13 +1465,16 @@ fn reconcile_with(
         for name in &dropped_delta {
             s.branches.remove(name);
         }
+        for (key, record) in &disposals {
+            s.disposals.insert(key.clone(), record.clone());
+        }
     };
 
     // Persist the dropped/re-parented branches transactionally before the
     // fallible fetch and restack, so PRs already merged on GitHub are not
     // stranded in local state if the fetch or restack then fails (a re-run
     // reconciles from here).
-    if !dropped.is_empty() {
+    if !dropped.is_empty() || has_disposals {
         persist_restack(store, &apply_drops, &[])?;
     }
 
@@ -1387,6 +1508,156 @@ fn reconcile_with(
         reparented,
         restacked,
     })
+}
+
+/// `stacc merged <branch>`: reconcile a branch whose changes already landed in
+/// trunk without a forge. Drops it, re-parents its children, records the
+/// disposal, and keeps the dropped tip reachable. Disposes only on a
+/// deterministic merge proof (`is_ancestor` / `same_tree`); a propose-only
+/// patch-id match refuses unless `--assume-merged` overrides it (KTD-4).
+/// State-first: the drop and the record land in one compare-and-swap, then the
+/// keep-alive ref transaction (KTD-5). Local-only: no forge call.
+pub fn merged(args: &MergedArgs, format: OutputFormat) -> Result<(), Error> {
+    let git = Git::open(".");
+    let store = StateStore::new(git.clone());
+    let mut state = store.load()?;
+    let repo = state
+        .repo
+        .clone()
+        .ok_or_else(|| Error::Usage("stacc is not initialized; run `stacc init` first".into()))?;
+
+    if git.rebase_in_progress() {
+        return Err(Error::Usage(
+            "a rebase is already in progress; run `stacc continue` to resume it or `stacc abort` to undo".into(),
+        ));
+    }
+
+    let branch = args.branch.clone();
+    if branch == repo.trunk {
+        return Err(Error::Usage(format!(
+            "cannot reconcile the trunk branch `{}`",
+            repo.trunk
+        )));
+    }
+    let branch_state = state.branches.get(&branch).cloned().ok_or_else(|| {
+        Error::Usage(format!(
+            "branch `{branch}` is not tracked; stacc only reconciles branches it manages"
+        ))
+    })?;
+
+    let tip = git
+        .rev_parse(&branch)
+        .map_err(|_| Error::Usage(format!("branch `{branch}` has no git ref to reconcile")))?;
+
+    // Verify the merge. A deterministic proof disposes; a propose-only patch-id
+    // match (or no match at all) needs `--assume-merged` (KTD-4).
+    let evidence = match (git.merge_equivalence(&repo.trunk, &branch)?, args.assume_merged) {
+        (MergeEquivalence::Ancestor, _) => "ancestor",
+        (MergeEquivalence::SameTree, _) => "same_tree",
+        (MergeEquivalence::NetDiff, true) => "net_diff",
+        (MergeEquivalence::NotFound, true) => "assume_merged",
+        (MergeEquivalence::NetDiff, false) => {
+            return Err(Error::Usage(format!(
+                "`{branch}`'s changes look already on `{}` but stacc cannot prove it merged; pass `--assume-merged` to drop it",
+                repo.trunk
+            )));
+        }
+        (MergeEquivalence::NotFound, false) => {
+            return Err(Error::Usage(format!(
+                "`{branch}` does not look merged into `{}`; pass `--assume-merged` if you have confirmed it merged out of band",
+                repo.trunk
+            )));
+        }
+    };
+
+    // Guards (mirroring delete): never delete or rebase a ref checked out in
+    // another worktree, and move off the branch before it is dropped.
+    guard_worktree(&git, &ops::upstack_order(&state.branches, &branch))?;
+    if git.current_branch().ok().as_deref() == Some(branch.as_str()) {
+        git.checkout(&repo.trunk).map_err(|e| {
+            Error::Usage(format!(
+                "`{branch}` is checked out; switching to the trunk `{}` before dropping it failed ({e})",
+                repo.trunk
+            ))
+        })?;
+    }
+    let here = git.current_branch().ok();
+
+    // Capture the stack shape for the record before reconcile mutates state.
+    let dropped: BTreeSet<String> = std::iter::once(branch.clone()).collect();
+    let base = ops::resolve_base(&state.branches, &dropped, branch_state.base.name.clone());
+    let children = ops::children(&state.branches, &branch);
+    // Stamp the drop time so retention prunes keep-alive refs by when they were
+    // dropped, not by the dropped tip's commit date (a long-lived branch can have
+    // an old tip). Best-effort: a clock failure records 0, which sorts oldest.
+    let dropped_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|d| u64::try_from(d.as_millis()).ok())
+        .unwrap_or(0);
+    let record = Disposal {
+        branch: branch.clone(),
+        tip: tip.clone(),
+        base,
+        children,
+        evidence: evidence.to_string(),
+        dropped_at,
+    };
+    let disposals = vec![(format!("{branch}@{tip}"), record)];
+
+    // Drop + reparent + record in one CAS (state-first), restacking children
+    // against the local trunk (offline: a dispose makes no forge call).
+    match reconcile_with(&git, &store, &mut state, &repo, dropped, disposals, true, false) {
+        Ok(_) => {}
+        Err(err @ Error::Conflict { .. }) => {
+            // State landed (drop + disposal record), but the children restack
+            // stopped before the branch ref could be removed. Preserve the dropped
+            // tip now so the recorded keep-alive ref exists and the `git branch -D`
+            // below is safe; the branch ref lingers until the user removes it.
+            store.preserve_tip(&branch, &tip)?;
+            eprintln!(
+                "note: `{branch}` is dropped from the stack and its tip is preserved at `refs/stacc/dropped/{branch}-{tip}`; after resolving and `stacc continue`, remove its git ref with `git branch -D {branch}`"
+            );
+            return Err(err);
+        }
+        Err(err) => return Err(err),
+    }
+
+    // The children's restack may have left HEAD on the last rebased branch; put
+    // the user back where they started.
+    if let Some(here) = &here {
+        if git.current_branch().ok().as_deref() != Some(here.as_str()) {
+            if let Err(err) = git.checkout(here) {
+                eprintln!("warning: could not switch back to `{here}`: {err}");
+            }
+        }
+    }
+
+    // State landed; now the git refs. The keep-alive ref preserves the dropped
+    // tip and the branch ref is deleted under its OID in one transaction, so a
+    // failure here leaves the branch re-trackable (KTD-5).
+    store.keep_alive_and_delete(&branch, &tip)?;
+    store.prune_dropped()?;
+
+    report_merged(format, &branch, evidence, &tip);
+    Ok(())
+}
+
+fn report_merged(format: OutputFormat, branch: &str, evidence: &str, tip: &str) {
+    match format {
+        OutputFormat::Json => println!(
+            "{}",
+            json!({
+                "op": "merged",
+                "branch": branch,
+                "evidence": evidence,
+                "dropped_tip": tip,
+            })
+        ),
+        OutputFormat::Pretty => println!(
+            "Dropped `{branch}` (merged: {evidence}); its tip is kept at `refs/stacc/dropped/{branch}-{tip}`"
+        ),
+    }
 }
 
 /// A PR `merge` resolved: the branch, its number, the squash commit SHA when we
@@ -1443,9 +1714,7 @@ pub fn merge(args: &MergeArgs, format: OutputFormat) -> Result<(), Error> {
         ));
     }
 
-    let (owner, repo_name) = stacc_github::parse_remote(&git.remote_url(&repo.remote)?)
-        .ok_or_else(|| Error::Usage(format!("remote `{}` is not a GitHub URL", repo.remote)))?;
-    let github = GitHub::from_env()?;
+    let (github, owner, repo_name) = require_github_forge(&git, &repo, "merge")?;
 
     // Build the downstack chain ONCE: merged branches leave state, which would
     // make a re-derived `downstack_chain` error mid-loop.
@@ -1758,7 +2027,7 @@ fn merge_stack(
         let drop: BTreeSet<String> = std::iter::once(branch.clone()).collect();
         // tree_guard = false: merge reconciles via the API, so it needs no
         // squash-merge restack backstop (that is sync's pass).
-        match reconcile_with(git, store, state, repo, drop, offline, false) {
+        match reconcile_with(git, store, state, repo, drop, Vec::new(), offline, false) {
             Ok(outcome) => {
                 reparented_all.extend(outcome.reparented);
                 restacked_all.extend(outcome.restacked);
@@ -2482,6 +2751,7 @@ fn continue_op(
                 &[],
                 &[],
                 false,
+                &[],
             );
         }
         // A resumed modify carries its branch, so JSON gets the same
@@ -2610,7 +2880,7 @@ pub(crate) fn restack_with_recovery_forced(
             }
             if !outcome.tree_identical_skipped.is_empty() {
                 eprintln!(
-                    "note: skipped {} branch(es) whose tree already matches their base (they look squash-merged): {}. Run `stacc sync` online to confirm and clean up, or `stacc delete <branch>`.",
+                    "note: skipped {} branch(es) whose tree already matches their base (they look squash-merged): {}. Run `stacc sync` online to confirm and clean up, or `stacc merged <branch>` to reconcile one locally.",
                     outcome.tree_identical_skipped.len(),
                     outcome.tree_identical_skipped.join(", ")
                 );
@@ -2813,6 +3083,16 @@ fn report_restacked(format: OutputFormat, op: &str, restacked: &[String]) {
     }
 }
 
+/// The local merge-equivalence signal as a stable JSON/pretty label.
+fn evidence_str(e: MergeEquivalence) -> &'static str {
+    match e {
+        MergeEquivalence::Ancestor => "ancestor",
+        MergeEquivalence::SameTree => "same_tree",
+        MergeEquivalence::NetDiff => "net_diff",
+        MergeEquivalence::NotFound => "not_found",
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn report_sync(
     format: OutputFormat,
@@ -2825,6 +3105,7 @@ fn report_sync(
     cleaned: &[String],
     cleanup_skipped: &[CleanupSkip],
     detection_skipped: bool,
+    likely_merged: &[ops::LikelyMerged],
 ) {
     match format {
         OutputFormat::Json => {
@@ -2838,6 +3119,10 @@ fn report_sync(
                 .iter()
                 .map(|(branch, base)| json!({ "branch": branch, "base": base }))
                 .collect();
+            let likely_list: Vec<Value> = likely_merged
+                .iter()
+                .map(|l| json!({ "branch": l.branch, "evidence": evidence_str(l.evidence) }))
+                .collect();
             println!(
                 "{}",
                 json!({
@@ -2850,6 +3135,7 @@ fn report_sync(
                     "cleaned": cleaned,
                     "cleanup_skipped": cleanup_skipped_json(cleanup_skipped),
                     "detection_skipped": detection_skipped,
+                    "likely_merged": likely_list,
                 })
             );
         }
@@ -2859,6 +3145,7 @@ fn report_sync(
                 && adopted.is_empty()
                 && reparented.is_empty()
                 && restacked.is_empty()
+                && likely_merged.is_empty()
             {
                 println!("Already up to date.");
             } else {
@@ -2876,6 +3163,14 @@ fn report_sync(
                 }
                 for name in restacked {
                     println!("Restacked {name}");
+                }
+                for l in likely_merged {
+                    println!(
+                        "Likely merged: {} ({}); run `stacc merged {}` to reconcile",
+                        l.branch,
+                        evidence_str(l.evidence),
+                        l.branch
+                    );
                 }
             }
             report_cleanup_pretty(cleaned, cleanup_skipped);
