@@ -1163,6 +1163,37 @@ fn github_client(git: &Git, repo: &RepoConfig) -> Result<(GitHub, String, String
     Ok((github, owner, repo_name))
 }
 
+/// The forge boundary for `submit` and `merge`. stacc v1 opens pull requests on
+/// GitHub only, so when the user has opted into local mode or the remote is not a
+/// github.com URL the operation is unavailable: return a forge-generic message
+/// (it names the remote, never echoes its URL, and never detects or names a
+/// specific forge) instead of attempting the API. On a reachable github.com
+/// remote it resolves the owner/repo and builds the client.
+///
+/// The forge-less mode is selected by the local-mode config key and the remote
+/// shape, never a per-command flag (R11): there is deliberately no `--local` or
+/// `--no-forge` override to keep the flag surface from multiplying.
+pub(super) fn require_github_forge(
+    git: &Git,
+    repo: &RepoConfig,
+    op: &str,
+) -> Result<(GitHub, String, String), Error> {
+    if stacc_config::local_from_file(Path::new(".stacc.toml")) {
+        return Err(Error::Usage(format!(
+            "local mode is on, so `stacc {op}` is unavailable; stacc v1 opens pull requests on GitHub only. Push your branch and open a change through your forge directly."
+        )));
+    }
+    let (owner, repo_name) = stacc_github::parse_remote(&git.remote_url(&repo.remote)?)
+        .ok_or_else(|| {
+            Error::Usage(format!(
+                "remote `{}` is not a GitHub URL, so `stacc {op}` is unavailable; stacc v1 opens pull requests on GitHub only. Push your branch and open a change through your forge directly.",
+                repo.remote
+            ))
+        })?;
+    let github = GitHub::from_env()?;
+    Ok((github, owner, repo_name))
+}
+
 /// Build the client and run sync's adoption + merged-PR detection, returning
 /// the adopted PRs and the set of merged branch names. Any failure here is
 /// fatal so sync never silently degrades into a phantom-conflict rebase.
@@ -1669,9 +1700,7 @@ pub fn merge(args: &MergeArgs, format: OutputFormat) -> Result<(), Error> {
         ));
     }
 
-    let (owner, repo_name) = stacc_github::parse_remote(&git.remote_url(&repo.remote)?)
-        .ok_or_else(|| Error::Usage(format!("remote `{}` is not a GitHub URL", repo.remote)))?;
-    let github = GitHub::from_env()?;
+    let (github, owner, repo_name) = require_github_forge(&git, &repo, "merge")?;
 
     // Build the downstack chain ONCE: merged branches leave state, which would
     // make a re-derived `downstack_chain` error mid-loop.

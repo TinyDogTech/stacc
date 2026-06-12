@@ -589,9 +589,7 @@ pub fn submit(args: &SubmitArgs, format: OutputFormat) -> Result<(), Error> {
         );
     }
 
-    let (owner, repo_name) = stacc_github::parse_remote(&git.remote_url(&repo.remote)?)
-        .ok_or_else(|| Error::Usage(format!("remote `{}` is not a GitHub URL", repo.remote)))?;
-    let github = GitHub::from_env()?;
+    let (github, owner, repo_name) = operations::require_github_forge(&git, &repo, "submit")?;
 
     // (branch, action, number, url) for each branch we acted on.
     let mut results: Vec<(String, PrAction, u64, String)> = Vec::new();

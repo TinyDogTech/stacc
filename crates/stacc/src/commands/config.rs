@@ -121,7 +121,9 @@ impl Sources {
                 "detected",
             ),
             // `local` has no detected or default fallback: a repo or global file
-            // sets it, or it is unset (the consumer reads it as off).
+            // sets it, or it is unset (the consumer reads it as off). This key
+            // (with non-GitHub auto-detection) is how the forge-less floor is
+            // selected; there is deliberately no per-command flag for it (R11).
             Key::Local => {
                 if let Some(on) = self.repo.local {
                     Resolved::new(on.to_string(), "repo")

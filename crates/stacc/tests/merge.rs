@@ -1266,3 +1266,47 @@ fn merge_does_not_adopt_a_closed_unmerged_pr() {
     let state = StateStore::new(Git::open(p)).load().unwrap();
     assert!(state.branches["feature"].pr.is_none(), "no PR recorded for a closed PR");
 }
+
+// F3: the GitHub-only boundary. In forge-less or local mode, `merge` is
+// unavailable with a forge-generic message, a non-zero exit, no crash, and never
+// a raw remote URL (R9/R10). Asserted on `--format json` so the single-line,
+// unwrapped message is matched verbatim.
+
+#[test]
+fn merge_on_a_non_github_remote_is_unavailable_with_a_forge_generic_message() {
+    let tmp = repo();
+    let p = tmp.path();
+    // Repoint origin at a non-GitHub forge. The boundary refuses before any
+    // network, so the dead URL is never contacted.
+    run_git(p, &["remote", "set-url", "origin", "https://gitlab.com/acme/widgets.git"]);
+    run_git(p, &["checkout", "-q", "-b", "feature"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "f1"]);
+    assert!(stacc(p, &["track", "--base", "main"]).status.success());
+
+    let out = stacc(p, &["merge", "--format", "json"]);
+    assert!(!out.status.success(), "merge on a non-GitHub remote is unavailable");
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains(r#""error":"usage""#), "usage error, not a crash: {s}");
+    assert!(s.contains("open a change through your forge"), "forge-generic guidance: {s}");
+    assert!(s.contains("origin"), "names the remote: {s}");
+    assert!(!s.contains("gitlab.com"), "no raw remote URL: {s}");
+    assert!(!s.contains("widgets"), "no raw remote URL: {s}");
+}
+
+#[test]
+fn merge_in_local_mode_is_unavailable_even_on_a_github_remote() {
+    let tmp = repo();
+    let p = tmp.path();
+    run_git(p, &["checkout", "-q", "-b", "feature"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "f1"]);
+    assert!(stacc(p, &["track", "--base", "main"]).status.success());
+    // Opting into local mode makes merge unavailable even though origin is a
+    // github.com URL.
+    assert!(stacc(p, &["config", "set", "local", "true"]).status.success());
+
+    let out = stacc(p, &["merge", "--format", "json"]);
+    assert!(!out.status.success(), "local mode makes merge unavailable");
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("local mode is on"), "names local mode: {s}");
+    assert!(s.contains("open a change through your forge"), "forge-generic guidance: {s}");
+}
