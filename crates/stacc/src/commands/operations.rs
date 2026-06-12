@@ -1054,7 +1054,7 @@ pub fn sync(args: &SyncArgs, format: OutputFormat) -> Result<(), Error> {
     // (STA-90). The `--continue` resume above returns before here, so it never
     // needs a token.
     let has_tracked = !state.branches.is_empty();
-    let local_mode = stacc_config::local_from_file(Path::new(".stacc.toml"));
+    let local_mode = stacc_config::local_mode(Path::new(".stacc.toml"));
     // `--offline` skips the fetch and detection both. Otherwise classify the
     // merge-detection path: reachable GitHub uses the authoritative API; a
     // forge-less repo (local-mode key, a non-GitHub remote, a missing token, or
@@ -1178,7 +1178,7 @@ pub(super) fn require_github_forge(
     repo: &RepoConfig,
     op: &str,
 ) -> Result<(GitHub, String, String), Error> {
-    if stacc_config::local_from_file(Path::new(".stacc.toml")) {
+    if stacc_config::local_mode(Path::new(".stacc.toml")) {
         return Err(Error::Usage(format!(
             "local mode is on, so `stacc {op}` is unavailable; stacc v1 opens pull requests on GitHub only. Push your branch and open a change through your forge directly."
         )));
@@ -1587,12 +1587,21 @@ pub fn merged(args: &MergedArgs, format: OutputFormat) -> Result<(), Error> {
     let dropped: BTreeSet<String> = std::iter::once(branch.clone()).collect();
     let base = ops::resolve_base(&state.branches, &dropped, branch_state.base.name.clone());
     let children = ops::children(&state.branches, &branch);
+    // Stamp the drop time so retention prunes keep-alive refs by when they were
+    // dropped, not by the dropped tip's commit date (a long-lived branch can have
+    // an old tip). Best-effort: a clock failure records 0, which sorts oldest.
+    let dropped_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|d| u64::try_from(d.as_millis()).ok())
+        .unwrap_or(0);
     let record = Disposal {
         branch: branch.clone(),
         tip: tip.clone(),
         base,
         children,
         evidence: evidence.to_string(),
+        dropped_at,
     };
     let disposals = vec![(format!("{branch}@{tip}"), record)];
 
@@ -1601,8 +1610,13 @@ pub fn merged(args: &MergedArgs, format: OutputFormat) -> Result<(), Error> {
     match reconcile_with(&git, &store, &mut state, &repo, dropped, disposals, true, false) {
         Ok(_) => {}
         Err(err @ Error::Conflict { .. }) => {
+            // State landed (drop + disposal record), but the children restack
+            // stopped before the branch ref could be removed. Preserve the dropped
+            // tip now so the recorded keep-alive ref exists and the `git branch -D`
+            // below is safe; the branch ref lingers until the user removes it.
+            store.preserve_tip(&branch, &tip)?;
             eprintln!(
-                "note: `{branch}` is dropped from the stack and its tip is recorded; after resolving and `stacc continue`, its git ref still exists (remove it with `git branch -D {branch}`)"
+                "note: `{branch}` is dropped from the stack and its tip is preserved at `refs/stacc/dropped/{branch}-{tip}`; after resolving and `stacc continue`, remove its git ref with `git branch -D {branch}`"
             );
             return Err(err);
         }

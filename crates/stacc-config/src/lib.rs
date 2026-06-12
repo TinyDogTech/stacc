@@ -139,6 +139,24 @@ pub fn local_from_file(path: &Path) -> bool {
     toml::from_str::<Wrap>(&text).unwrap_or_default().local
 }
 
+/// Resolve forge-less local mode the way `stacc config` reports it: the repo
+/// `.stacc.toml` at `repo_config` takes precedence over the user-global config,
+/// and an unset key in both is `false`. Consumers (sync, the submit/merge
+/// boundary) call this so a `config --global set local true` opt-in is actually
+/// honored, not just displayed. Best-effort, like [`local_from_file`]: an
+/// unreadable or invalid file contributes no opinion (treated as unset).
+pub fn local_mode(repo_config: &Path) -> bool {
+    resolve_local(repo_config, &user_config_path())
+}
+
+/// The repo-over-global resolution behind [`local_mode`], split out so the
+/// precedence is testable without touching the process-global `HOME`.
+fn resolve_local(repo_config: &Path, global_config: &Path) -> bool {
+    let repo = read_file(repo_config).unwrap_or_default().local;
+    let global = read_file(global_config).unwrap_or_default().local;
+    repo.or(global).unwrap_or(false)
+}
+
 /// Set `key` to `value` in the TOML file at `path`, creating the file (and
 /// its parent directories) when missing. The edit is format-preserving:
 /// unrelated keys, comments, and layout survive the round-trip.
@@ -398,6 +416,28 @@ mod tests {
         assert!(!local_from_file(&path), "missing file is off");
         std::fs::write(&path, "remote = \"origin\"\n").unwrap();
         assert!(!local_from_file(&path), "absent key is off");
+    }
+
+    #[test]
+    fn local_mode_resolves_repo_over_global() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo.toml");
+        let global = tmp.path().join("global.toml");
+
+        // Neither file sets it: off.
+        assert!(!resolve_local(&repo, &global), "unset in both is off");
+
+        // Global on, repo silent: the global opt-in is honored.
+        std::fs::write(&global, "local = true\n").unwrap();
+        assert!(resolve_local(&repo, &global), "global on wins when repo is silent");
+
+        // Repo overrides global (repo false beats global true).
+        std::fs::write(&repo, "local = false\n").unwrap();
+        assert!(!resolve_local(&repo, &global), "repo false overrides global true");
+
+        // Repo on.
+        std::fs::write(&repo, "local = true\n").unwrap();
+        assert!(resolve_local(&repo, &global));
     }
 
     #[test]

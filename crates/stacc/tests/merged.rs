@@ -185,6 +185,39 @@ fn merged_refuses_the_trunk_and_untracked_branches() {
 }
 
 #[test]
+fn merged_preserves_the_tip_when_the_children_restack_conflicts() {
+    let tmp = repo_init();
+    let p = tmp.path();
+
+    // main <- a <- b, all editing the same line of x.txt.
+    write_commit(p, "x.txt", "base\n", "base");
+    run_git(p, &["checkout", "-q", "-b", "a"]);
+    write_commit(p, "x.txt", "a\n", "a1");
+    track(p, "main");
+    run_git(p, &["checkout", "-q", "-b", "b"]);
+    write_commit(p, "x.txt", "b\n", "b1");
+    track(p, "a");
+
+    // Advance main to a conflicting value, then capture a's tip before the drop.
+    run_git(p, &["checkout", "-q", "main"]);
+    write_commit(p, "x.txt", "trunk\n", "trunk advance");
+    let a_tip = rev(p, "a");
+
+    // a is not provably merged, so force the drop. Reparenting b onto the advanced
+    // main then conflicts during the restack, exercising the conflict path.
+    let out = stacc(p, &["merged", "a", "--assume-merged"]);
+    assert!(!out.status.success(), "the children restack must conflict");
+
+    // Even though the dispose stopped on a conflict, a's tip is preserved at its
+    // keep-alive ref, so the documented recovery path still works (no data loss).
+    assert_eq!(
+        rev(p, &format!("refs/stacc/dropped/a-{a_tip}")),
+        a_tip,
+        "the dropped tip is preserved despite the restack conflict"
+    );
+}
+
+#[test]
 fn merged_json_reports_the_branch_and_evidence() {
     let tmp = repo_init();
     let p = tmp.path();

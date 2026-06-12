@@ -49,6 +49,12 @@ pub struct Disposal {
     /// The merge signal that authorized the drop: `ancestor`, `same_tree`,
     /// `net_diff`, or `assume_merged`.
     pub evidence: String,
+    /// Unix-millis when the branch was dropped. Retention prunes keep-alive refs
+    /// by this drop time, never by the dropped tip's commit date (a long-lived
+    /// branch can have an old tip). `#[serde(default)]` => 0 for pre-slice records,
+    /// which sort oldest. Best-effort: 0 if the clock is unavailable.
+    #[serde(default)]
+    pub dropped_at: u64,
 }
 
 #[cfg(test)]

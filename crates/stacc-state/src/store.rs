@@ -284,16 +284,43 @@ impl StateStore {
         Ok(())
     }
 
-    /// Delete keep-alive refs beyond the [`UNDO_RETENTION`] cap, oldest first, so
-    /// `refs/stacc/dropped/*` cannot grow without bound. A coarse bound, ordered
-    /// by the dropped commit's date, matching undo's retention window.
+    /// Idempotently write `branch`'s keep-alive ref at `tip` WITHOUT touching the
+    /// branch ref. Used on the conflict path of a dispose, where the children
+    /// restack stops before the branch ref can be removed: the dropped tip is
+    /// preserved immediately so recovery works even though `refs/heads/<branch>`
+    /// lingers until the user removes it. Setting the ref to `tip` (which it
+    /// always points at) is idempotent, so a retry or a re-drop is safe.
+    pub fn preserve_tip(&self, branch: &str, tip: &str) -> Result<(), StateError> {
+        self.git.update_ref(&dropped_ref(branch, tip), tip, None)?;
+        Ok(())
+    }
+
+    /// Delete keep-alive refs beyond the [`UNDO_RETENTION`] cap, oldest *drop*
+    /// first, so `refs/stacc/dropped/*` cannot grow without bound. Ordered by each
+    /// disposal's recorded drop time, NOT the dropped tip's commit date: a
+    /// long-lived branch can have an old tip, and ordering by commit date could
+    /// prune the just-dropped ref while keeping stale ones. Refs with no disposal
+    /// record (orphans, or pre-slice drops) have drop time 0 and sort oldest.
     pub fn prune_dropped(&self) -> Result<(), StateError> {
-        let refs = self.git.list_refs(DROPPED_REF_PREFIX)?; // newest first
+        let state = self.load()?;
+        let mut refs = self.git.list_refs(DROPPED_REF_PREFIX)?;
+        refs.sort_by_key(|r| std::cmp::Reverse(drop_time(&state, r)));
         for stale in refs.iter().skip(UNDO_RETENTION) {
             self.git.delete_ref(stale, None)?;
         }
         Ok(())
     }
+}
+
+/// The recorded drop time (unix millis) of the disposal whose keep-alive ref is
+/// `ref_name`, or 0 when no disposal matches (an orphan or a pre-slice ref), so
+/// such refs sort oldest under retention.
+fn drop_time(state: &State, ref_name: &str) -> u64 {
+    state
+        .disposals
+        .values()
+        .find(|d| dropped_ref(&d.branch, &d.tip) == ref_name)
+        .map_or(0, |d| d.dropped_at)
 }
 
 /// The keep-alive ref name for `branch` dropped at `tip`. Recovery re-creates
@@ -663,6 +690,7 @@ mod tests {
                 base: "main".into(),
                 children: vec!["child".into()],
                 evidence: "net_diff".into(),
+                dropped_at: 1234,
             },
         );
         store.save(&state).unwrap();
@@ -754,6 +782,82 @@ mod tests {
 
         store.prune_dropped().unwrap();
         assert_eq!(git.list_refs(DROPPED_REF_PREFIX).unwrap().len(), UNDO_RETENTION);
+    }
+
+    #[test]
+    fn prune_dropped_keeps_the_newest_drops_not_the_newest_commits() {
+        let (tmp, store) = init_repo();
+        let git = Git::open(tmp.path());
+        // `recent` is committed now; `old` carries an old committer date, so
+        // commit-date order disagrees with drop order.
+        let recent = rev(tmp.path(), "HEAD");
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(tmp.path())
+            .args(["commit", "-q", "--allow-empty", "-m", "old"])
+            .env("GIT_COMMITTER_DATE", "2001-01-01T00:00:00")
+            .env("GIT_AUTHOR_DATE", "2001-01-01T00:00:00")
+            .status()
+            .expect("spawn git");
+        let old = rev(tmp.path(), "HEAD");
+
+        // Fill the retention window with keep-alive refs on the RECENT commit,
+        // each recorded as an OLDER drop (dropped_at 1..=UNDO_RETENTION).
+        let mut state = State::default();
+        let mut creates = Vec::new();
+        for i in 0..UNDO_RETENTION {
+            let branch = format!("r{i}");
+            creates.push(RefUpdate::Create {
+                name: dropped_ref(&branch, &recent),
+                new: recent.clone(),
+            });
+            state.disposals.insert(
+                format!("{branch}@{recent}"),
+                Disposal {
+                    branch,
+                    tip: recent.clone(),
+                    base: "main".into(),
+                    children: vec![],
+                    evidence: "ancestor".into(),
+                    dropped_at: u64::try_from(i).unwrap() + 1,
+                },
+            );
+        }
+        // The just-dropped branch: the NEWEST drop, but its tip is the OLD commit.
+        creates.push(RefUpdate::Create {
+            name: dropped_ref("survivor", &old),
+            new: old.clone(),
+        });
+        state.disposals.insert(
+            format!("survivor@{old}"),
+            Disposal {
+                branch: "survivor".into(),
+                tip: old.clone(),
+                base: "main".into(),
+                children: vec![],
+                evidence: "ancestor".into(),
+                dropped_at: 9_999,
+            },
+        );
+        git.update_refs(&creates).unwrap();
+        store.save(&state).unwrap();
+        assert_eq!(git.list_refs(DROPPED_REF_PREFIX).unwrap().len(), UNDO_RETENTION + 1);
+
+        store.prune_dropped().unwrap();
+
+        let kept = git.list_refs(DROPPED_REF_PREFIX).unwrap();
+        assert_eq!(kept.len(), UNDO_RETENTION, "prune caps at the retention window");
+        // The newest DROP survives even though its tip is the oldest COMMIT: prune
+        // orders by drop time, not commit date.
+        assert!(
+            kept.contains(&dropped_ref("survivor", &old)),
+            "the just-dropped ref is kept, not pruned by its old commit date"
+        );
+        // The oldest drop (r0, dropped_at = 1) is the one evicted.
+        assert!(
+            !kept.contains(&dropped_ref("r0", &recent)),
+            "the oldest drop is pruned"
+        );
     }
 
     #[test]
