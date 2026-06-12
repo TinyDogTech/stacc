@@ -33,7 +33,7 @@ pub use info::info;
 pub use log::log;
 pub use navigation::{bottom, checkout, children, down, parent, top, up};
 pub use operations::{
-    abort_cmd, continue_cmd, fold, merge, modify, move_cmd, restack, squash, sync, undo,
+    abort_cmd, continue_cmd, fold, merge, merged, modify, move_cmd, restack, squash, sync, undo,
 };
 pub use removal::{delete, pop};
 pub use reorder::reorder;

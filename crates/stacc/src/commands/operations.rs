@@ -5,15 +5,17 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{json, Value};
 use stacc_core::{ops, recovery};
-use stacc_git::{Git, Hunk, HunkKind, RebaseError};
+use stacc_git::{Git, Hunk, HunkKind, MergeEquivalence, RebaseError};
 use stacc_github::{GitHub, PrState, PullRequestUpdate};
-use stacc_state::{Base, BranchState, PullRequest, RepoConfig, State, StateError, StateStore};
+use stacc_state::{
+    Base, BranchState, Disposal, PullRequest, RepoConfig, State, StateError, StateStore,
+};
 
 use super::absorb;
 use super::split::spec_matches;
 use crate::cli::{
-    FoldArgs, MergeArgs, ModifyArgs, MoveArgs, OutputFormat, RestackArgs, SquashArgs, SyncArgs,
-    UndoArgs,
+    FoldArgs, MergeArgs, MergedArgs, ModifyArgs, MoveArgs, OutputFormat, RestackArgs, SquashArgs,
+    SyncArgs, UndoArgs,
 };
 use crate::error::Error;
 
@@ -1084,7 +1086,7 @@ pub fn sync(args: &SyncArgs, format: OutputFormat) -> Result<(), Error> {
     let drop: BTreeSet<String> = merged.union(&pruned).cloned().collect();
     // tree_guard = true: sync's restack pass skips branches whose tree already
     // matches their base (the squash-merge backstop). Merge passes false.
-    let outcome = reconcile_with(&git, &store, &mut state, &repo, drop, args.offline, true)?;
+    let outcome = reconcile_with(&git, &store, &mut state, &repo, drop, Vec::new(), args.offline, true)?;
     // The merged branches landed and their children are restacked off them:
     // delete their local refs, unless the user asked to keep merged branches.
     // (The pruned set's refs are already gone, nothing to clean there.)
@@ -1303,12 +1305,17 @@ fn adopt_prs(
 /// merged): re-parent the dropped branches' children onto the nearest surviving
 /// base, drop them, fast-forward the trunk (unless `offline`), then restack the
 /// remainder bottom-up. Persists state and best-effort pushes it.
+// One shared sync/merge/merged reconcile core threads the drop set, disposal
+// records, and two mode flags; a parameter struct would only move this lint
+// without helping the three callers.
+#[allow(clippy::too_many_arguments)]
 fn reconcile_with(
     git: &Git,
     store: &StateStore,
     state: &mut State,
     repo: &RepoConfig,
     dropped: BTreeSet<String>,
+    disposals: Vec<(String, Disposal)>,
     offline: bool,
     tree_guard: bool,
 ) -> Result<SyncOutcome, Error> {
@@ -1331,13 +1338,18 @@ fn reconcile_with(
     for name in &dropped {
         state.branches.remove(name);
     }
+    for (key, record) in &disposals {
+        state.disposals.insert(key.clone(), record.clone());
+    }
 
     // The command's own state change, re-applied onto fresh state whenever the
-    // transactional save retries: drop the merged/pruned branches and re-parent
-    // their children. Both operations are idempotent, so re-applying after a CAS
-    // miss is safe.
+    // transactional save retries: drop the merged/pruned branches, re-parent
+    // their children, and append any disposal records. All are idempotent
+    // (removes, base-repoints, and keyed inserts), so re-applying after a CAS
+    // miss is safe, and the disposal record lands in the same commit as the drop.
     let dropped_delta = dropped.clone();
     let reparented_delta = reparented.clone();
+    let has_disposals = !disposals.is_empty();
     let apply_drops = move |s: &mut State| {
         for (name, new_base) in &reparented_delta {
             if let Some(b) = s.branches.get_mut(name) {
@@ -1347,13 +1359,16 @@ fn reconcile_with(
         for name in &dropped_delta {
             s.branches.remove(name);
         }
+        for (key, record) in &disposals {
+            s.disposals.insert(key.clone(), record.clone());
+        }
     };
 
     // Persist the dropped/re-parented branches transactionally before the
     // fallible fetch and restack, so PRs already merged on GitHub are not
     // stranded in local state if the fetch or restack then fails (a re-run
     // reconciles from here).
-    if !dropped.is_empty() {
+    if !dropped.is_empty() || has_disposals {
         persist_restack(store, &apply_drops, &[])?;
     }
 
@@ -1387,6 +1402,142 @@ fn reconcile_with(
         reparented,
         restacked,
     })
+}
+
+/// `stacc merged <branch>`: reconcile a branch whose changes already landed in
+/// trunk without a forge. Drops it, re-parents its children, records the
+/// disposal, and keeps the dropped tip reachable. Disposes only on a
+/// deterministic merge proof (`is_ancestor` / `same_tree`); a propose-only
+/// patch-id match refuses unless `--assume-merged` overrides it (KTD-4).
+/// State-first: the drop and the record land in one compare-and-swap, then the
+/// keep-alive ref transaction (KTD-5). Local-only: no forge call.
+pub fn merged(args: &MergedArgs, format: OutputFormat) -> Result<(), Error> {
+    let git = Git::open(".");
+    let store = StateStore::new(git.clone());
+    let mut state = store.load()?;
+    let repo = state
+        .repo
+        .clone()
+        .ok_or_else(|| Error::Usage("stacc is not initialized; run `stacc init` first".into()))?;
+
+    if git.rebase_in_progress() {
+        return Err(Error::Usage(
+            "a rebase is already in progress; run `stacc continue` to resume it or `stacc abort` to undo".into(),
+        ));
+    }
+
+    let branch = args.branch.clone();
+    if branch == repo.trunk {
+        return Err(Error::Usage(format!(
+            "cannot reconcile the trunk branch `{}`",
+            repo.trunk
+        )));
+    }
+    let branch_state = state.branches.get(&branch).cloned().ok_or_else(|| {
+        Error::Usage(format!(
+            "branch `{branch}` is not tracked; stacc only reconciles branches it manages"
+        ))
+    })?;
+
+    let tip = git
+        .rev_parse(&branch)
+        .map_err(|_| Error::Usage(format!("branch `{branch}` has no git ref to reconcile")))?;
+
+    // Verify the merge. A deterministic proof disposes; a propose-only patch-id
+    // match (or no match at all) needs `--assume-merged` (KTD-4).
+    let evidence = match (git.merge_equivalence(&repo.trunk, &branch)?, args.assume_merged) {
+        (MergeEquivalence::Ancestor, _) => "ancestor",
+        (MergeEquivalence::SameTree, _) => "same_tree",
+        (MergeEquivalence::NetDiff, true) => "net_diff",
+        (MergeEquivalence::NotFound, true) => "assume_merged",
+        (MergeEquivalence::NetDiff, false) => {
+            return Err(Error::Usage(format!(
+                "`{branch}`'s changes look already on `{}` but stacc cannot prove it merged; pass `--assume-merged` to drop it",
+                repo.trunk
+            )));
+        }
+        (MergeEquivalence::NotFound, false) => {
+            return Err(Error::Usage(format!(
+                "`{branch}` does not look merged into `{}`; pass `--assume-merged` if you have confirmed it merged out of band",
+                repo.trunk
+            )));
+        }
+    };
+
+    // Guards (mirroring delete): never delete or rebase a ref checked out in
+    // another worktree, and move off the branch before it is dropped.
+    guard_worktree(&git, &ops::upstack_order(&state.branches, &branch))?;
+    if git.current_branch().ok().as_deref() == Some(branch.as_str()) {
+        git.checkout(&repo.trunk).map_err(|e| {
+            Error::Usage(format!(
+                "`{branch}` is checked out; switching to the trunk `{}` before dropping it failed ({e})",
+                repo.trunk
+            ))
+        })?;
+    }
+    let here = git.current_branch().ok();
+
+    // Capture the stack shape for the record before reconcile mutates state.
+    let dropped: BTreeSet<String> = std::iter::once(branch.clone()).collect();
+    let base = ops::resolve_base(&state.branches, &dropped, branch_state.base.name.clone());
+    let children = ops::children(&state.branches, &branch);
+    let record = Disposal {
+        branch: branch.clone(),
+        tip: tip.clone(),
+        base,
+        children,
+        evidence: evidence.to_string(),
+    };
+    let disposals = vec![(format!("{branch}@{tip}"), record)];
+
+    // Drop + reparent + record in one CAS (state-first), restacking children
+    // against the local trunk (offline: a dispose makes no forge call).
+    match reconcile_with(&git, &store, &mut state, &repo, dropped, disposals, true, false) {
+        Ok(_) => {}
+        Err(err @ Error::Conflict { .. }) => {
+            eprintln!(
+                "note: `{branch}` is dropped from the stack and its tip is recorded; after resolving and `stacc continue`, its git ref still exists (remove it with `git branch -D {branch}`)"
+            );
+            return Err(err);
+        }
+        Err(err) => return Err(err),
+    }
+
+    // The children's restack may have left HEAD on the last rebased branch; put
+    // the user back where they started.
+    if let Some(here) = &here {
+        if git.current_branch().ok().as_deref() != Some(here.as_str()) {
+            if let Err(err) = git.checkout(here) {
+                eprintln!("warning: could not switch back to `{here}`: {err}");
+            }
+        }
+    }
+
+    // State landed; now the git refs. The keep-alive ref preserves the dropped
+    // tip and the branch ref is deleted under its OID in one transaction, so a
+    // failure here leaves the branch re-trackable (KTD-5).
+    store.keep_alive_and_delete(&branch, &tip)?;
+    store.prune_dropped()?;
+
+    report_merged(format, &branch, evidence, &tip);
+    Ok(())
+}
+
+fn report_merged(format: OutputFormat, branch: &str, evidence: &str, tip: &str) {
+    match format {
+        OutputFormat::Json => println!(
+            "{}",
+            json!({
+                "op": "merged",
+                "branch": branch,
+                "evidence": evidence,
+                "dropped_tip": tip,
+            })
+        ),
+        OutputFormat::Pretty => println!(
+            "Dropped `{branch}` (merged: {evidence}); its tip is kept at `refs/stacc/dropped/{branch}-{tip}`"
+        ),
+    }
 }
 
 /// A PR `merge` resolved: the branch, its number, the squash commit SHA when we
@@ -1758,7 +1909,7 @@ fn merge_stack(
         let drop: BTreeSet<String> = std::iter::once(branch.clone()).collect();
         // tree_guard = false: merge reconciles via the API, so it needs no
         // squash-merge restack backstop (that is sync's pass).
-        match reconcile_with(git, store, state, repo, drop, offline, false) {
+        match reconcile_with(git, store, state, repo, drop, Vec::new(), offline, false) {
             Ok(outcome) => {
                 reparented_all.extend(outcome.reparented);
                 restacked_all.extend(outcome.restacked);
@@ -2610,7 +2761,7 @@ pub(crate) fn restack_with_recovery_forced(
             }
             if !outcome.tree_identical_skipped.is_empty() {
                 eprintln!(
-                    "note: skipped {} branch(es) whose tree already matches their base (they look squash-merged): {}. Run `stacc sync` online to confirm and clean up, or `stacc delete <branch>`.",
+                    "note: skipped {} branch(es) whose tree already matches their base (they look squash-merged): {}. Run `stacc sync` online to confirm and clean up, or `stacc merged <branch>` to reconcile one locally.",
                     outcome.tree_identical_skipped.len(),
                     outcome.tree_identical_skipped.join(", ")
                 );
