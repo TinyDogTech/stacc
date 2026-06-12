@@ -54,6 +54,7 @@ pub fn init(args: &InitArgs, format: OutputFormat) -> Result<(), Error> {
     let flags = Overrides {
         trunk: args.trunk.clone(),
         remote: args.remote.clone(),
+        local: None,
     };
     let config = resolve(detected, file, flags)?;
     let repo = RepoConfig {

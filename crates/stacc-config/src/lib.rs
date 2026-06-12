@@ -25,17 +25,24 @@ pub enum ConfigError {
     #[error("cannot edit `{key}`: `aliases` is not a table in the config file")]
     AliasesNotATable { key: String },
 
+    #[error("`{key}` expects `true` or `false`, got `{value}`")]
+    InvalidValue { key: String, value: String },
+
     #[error("could not determine {field}; pass it explicitly")]
     Missing { field: &'static str },
 }
 
-/// A key the config files support: the top-level `trunk` and `remote`
-/// overrides, and `aliases.<name>` entries in the `[aliases]` table. This is
-/// the complete settable namespace; `stacc config` validates against it.
+/// A key the config files support: the top-level `trunk`, `remote`, and `local`
+/// overrides, and `aliases.<name>` entries in the `[aliases]` table. This is the
+/// complete settable namespace; `stacc config` validates against it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Key {
     Trunk,
     Remote,
+    /// Forge-less local mode: when true, forge-touching commands default to the
+    /// forge-less path without a per-invocation flag (the first repo-scoped
+    /// behavioral mode in the namespace).
+    Local,
     Alias(String),
 }
 
@@ -45,6 +52,7 @@ impl Key {
         match key {
             "trunk" => Some(Key::Trunk),
             "remote" => Some(Key::Remote),
+            "local" => Some(Key::Local),
             _ => match key.strip_prefix("aliases.") {
                 Some(name) if !name.is_empty() && !name.contains('.') => {
                     Some(Key::Alias(name.to_string()))
@@ -60,6 +68,7 @@ impl std::fmt::Display for Key {
         match self {
             Key::Trunk => f.write_str("trunk"),
             Key::Remote => f.write_str("remote"),
+            Key::Local => f.write_str("local"),
             Key::Alias(name) => write!(f, "aliases.{name}"),
         }
     }
@@ -71,6 +80,7 @@ impl std::fmt::Display for Key {
 pub struct Overrides {
     pub trunk: Option<String>,
     pub remote: Option<String>,
+    pub local: Option<bool>,
 }
 
 /// Values discovered from the repository.
@@ -112,6 +122,23 @@ pub fn aliases_from_file(path: &Path) -> BTreeMap<String, String> {
     toml::from_str::<Wrap>(&text).unwrap_or_default().aliases
 }
 
+/// Read the boolean `local` (forge-less mode) flag from `path`. Best-effort: a
+/// missing file, an absent key, or invalid TOML all yield `false`, so a config
+/// typo can never silently force forge-less mode on. Read per-invocation like
+/// [`aliases_from_file`], not threaded through resolved state.
+pub fn local_from_file(path: &Path) -> bool {
+    #[derive(Default, Deserialize)]
+    struct Wrap {
+        #[serde(default)]
+        local: bool,
+    }
+
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    toml::from_str::<Wrap>(&text).unwrap_or_default().local
+}
+
 /// Set `key` to `value` in the TOML file at `path`, creating the file (and
 /// its parent directories) when missing. The edit is format-preserving:
 /// unrelated keys, comments, and layout survive the round-trip.
@@ -120,6 +147,13 @@ pub fn set_in_file(path: &Path, key: &Key, value: &str) -> Result<(), ConfigErro
     match key {
         Key::Trunk => doc["trunk"] = toml_edit::value(value),
         Key::Remote => doc["remote"] = toml_edit::value(value),
+        Key::Local => {
+            let on: bool = value.parse().map_err(|_| ConfigError::InvalidValue {
+                key: "local".to_string(),
+                value: value.to_string(),
+            })?;
+            doc["local"] = toml_edit::value(on);
+        }
         Key::Alias(name) => {
             let aliases = doc
                 .entry("aliases")
@@ -154,6 +188,9 @@ pub fn unset_in_file(path: &Path, key: &Key) -> Result<(), ConfigError> {
         }
         Key::Remote => {
             doc.remove("remote");
+        }
+        Key::Local => {
+            doc.remove("local");
         }
         Key::Alias(name) => {
             if let Some(aliases) = doc.get_mut("aliases").and_then(toml_edit::Item::as_table_mut)
@@ -289,10 +326,12 @@ mod tests {
         let file = Overrides {
             trunk: Some("develop".into()),
             remote: None,
+            local: None,
         };
         let flags = Overrides {
             trunk: None,
             remote: Some("upstream".into()),
+            local: None,
         };
         let cfg = resolve(detected, file, flags).unwrap();
         assert_eq!(cfg.trunk, "develop"); // file beats detected
@@ -330,8 +369,44 @@ mod tests {
         assert_eq!(Key::parse("aliases."), None);
         assert_eq!(Key::parse("aliases.a.b"), None);
         assert_eq!(Key::parse("aliases"), None);
+        assert_eq!(Key::parse("local"), Some(Key::Local));
         assert_eq!(Key::parse("bogus"), None);
         assert_eq!(Key::Alias("co".into()).to_string(), "aliases.co");
+        assert_eq!(Key::Local.to_string(), "local");
+    }
+
+    #[test]
+    fn set_and_unset_local_round_trips_as_a_bool() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        set_in_file(&path, &Key::Local, "true").unwrap();
+        assert_eq!(read_file(&path).unwrap().local, Some(true));
+        assert!(local_from_file(&path));
+        // Written as a TOML boolean, not a quoted string.
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("local = true"), "got: {text}");
+
+        unset_in_file(&path, &Key::Local).unwrap();
+        assert_eq!(read_file(&path).unwrap().local, None);
+        assert!(!local_from_file(&path));
+    }
+
+    #[test]
+    fn local_from_file_defaults_false_when_absent_or_missing() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        assert!(!local_from_file(&path), "missing file is off");
+        std::fs::write(&path, "remote = \"origin\"\n").unwrap();
+        assert!(!local_from_file(&path), "absent key is off");
+    }
+
+    #[test]
+    fn set_local_rejects_a_non_bool_value() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        let err = set_in_file(&path, &Key::Local, "yes").unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidValue { .. }));
+        assert!(!path.exists(), "a rejected set must not create the file");
     }
 
     #[test]
