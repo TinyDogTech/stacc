@@ -361,22 +361,25 @@ fn sync_requires_init() {
 }
 
 #[test]
-fn sync_errors_when_remote_is_unreachable_without_offline() {
-    // With a tracked branch and no --offline, sync reaches the GitHub API (here
-    // a dead URL) and surfaces the failure as a hard error, with a stderr hint
-    // pointing at --offline. Adoption now runs before the git fetch, so the
-    // unreachable API is what fails first (a `github` error, not `git`).
-    let tmp = repo();
-    assert!(stacc(tmp.path(), &["init"]).status.success());
-    run_git(tmp.path(), &["checkout", "-q", "-b", "feature"]);
-    assert!(stacc(tmp.path(), &["track"]).status.success());
+fn sync_unreachable_forge_falls_back_to_forge_less_with_a_note() {
+    // A reachable git remote (via insteadOf) but an unreachable GitHub API (the
+    // dead API URL the hermetic `stacc` helper injects, a Transport error). Rather
+    // than hard-erroring, sync drops to the forge-less floor: it fetches trunk and
+    // restacks, emitting a loud note that merged-PR detection was skipped. KTD-6
+    // preserves STA-94's loud-beats-silent contract via the note, not a refusal.
+    let (tmp, _bare) = online_repo();
+    let p = tmp.path();
+    run_git(p, &["checkout", "-q", "-b", "feature"]);
+    assert!(stacc(p, &["track"]).status.success());
 
-    let out = stacc(tmp.path(), &["sync", "--format", "json"]);
-    assert!(!out.status.success());
-    let s = String::from_utf8_lossy(&out.stdout);
-    assert!(s.contains(r#""error":"github""#), "got: {s}");
+    let out = stacc(p, &["sync", "--format", "json"]);
+    assert!(
+        out.status.success(),
+        "an unreachable API falls back to forge-less, it does not error: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("--offline"), "stderr: {err}");
+    assert!(err.contains("no reachable forge"), "emits the skipped-detection note: {err}");
 }
 
 #[test]
@@ -854,55 +857,25 @@ fn sync_adoption_leaves_a_branch_without_any_pr_alone() {
 }
 
 #[test]
-fn sync_without_credentials_errors_loudly() {
-    let tmp = repo();
+fn sync_without_credentials_falls_back_to_forge_less_with_a_note() {
+    // A reachable git remote (via insteadOf) but no GitHub token, so `from_env`
+    // returns MissingToken. Rather than hard-erroring, sync drops to the forge-less
+    // floor: it fetches trunk and restacks, emitting a loud note that detection was
+    // skipped (KTD-6). The missing token surfaces in the note, not as a refusal.
+    let (tmp, _bare) = online_repo();
     let p = tmp.path();
-    assert!(stacc(p, &["init"]).status.success());
     run_git(p, &["checkout", "-q", "-b", "feature"]);
     commit_file(p, "f.txt", "1", "feature");
     assert!(stacc(p, &["track"]).status.success());
-    let before = git_out(p, &["rev-parse", "feature"]);
 
     let out = stacc_no_token(p, &["sync", "--format", "json"]);
-    assert!(!out.status.success(), "sync must fail without credentials");
-    let s = String::from_utf8_lossy(&out.stdout);
-    // The error message names the auth remedies...
     assert!(
-        s.contains("auth login") && s.contains("GITHUB_TOKEN") && s.contains("`gh`"),
-        "names auth remedies: {s}"
+        out.status.success(),
+        "a missing token falls back to forge-less, it does not error: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
-    // ...and the stderr hint adds --offline.
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("--offline"), "stderr names --offline: {err}");
-    // No rebase happened: the branch tip is untouched.
-    assert_eq!(git_out(p, &["rev-parse", "feature"]), before, "feature tip unchanged");
-}
-
-#[test]
-fn sync_errors_on_a_non_github_remote() {
-    let tmp = repo();
-    let p = tmp.path();
-    assert!(stacc(p, &["init"]).status.success());
-    run_git(p, &["remote", "set-url", "origin", "https://gitlab.com/owner/repo.git"]);
-    run_git(p, &["checkout", "-q", "-b", "feature"]);
-    assert!(stacc(p, &["track"]).status.success());
-
-    let out = stacc(p, &["sync", "--format", "json"]);
-    assert!(!out.status.success(), "a non-GitHub remote must error");
-    let s = String::from_utf8_lossy(&out.stdout);
-    assert!(s.contains(r#""error":"usage""#), "usage error: {s}");
-    assert!(
-        s.contains("GitHub-only") && s.contains("origin"),
-        "names v1 GitHub-only and the remote: {s}"
-    );
-
-    // --offline restacks local refs without parsing the remote at all.
-    let off = stacc(p, &["sync", "--offline", "--format", "json"]);
-    assert!(
-        off.status.success(),
-        "offline works on a non-GitHub remote: {}",
-        String::from_utf8_lossy(&off.stderr)
-    );
+    assert!(err.contains("no reachable forge"), "names the skipped-detection note: {err}");
 }
 
 #[test]

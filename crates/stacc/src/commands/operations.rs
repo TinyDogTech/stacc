@@ -2,11 +2,12 @@
 //! (continue/abort) lifecycle they share.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 use serde_json::{json, Value};
 use stacc_core::{ops, recovery};
 use stacc_git::{Git, Hunk, HunkKind, MergeEquivalence, RebaseError};
-use stacc_github::{GitHub, PrState, PullRequestUpdate};
+use stacc_github::{GitHub, GitHubError, PrState, PullRequestUpdate};
 use stacc_state::{
     Base, BranchState, Disposal, PullRequest, RepoConfig, State, StateError, StateStore,
 };
@@ -1053,20 +1054,33 @@ pub fn sync(args: &SyncArgs, format: OutputFormat) -> Result<(), Error> {
     // (STA-90). The `--continue` resume above returns before here, so it never
     // needs a token.
     let has_tracked = !state.branches.is_empty();
-    let detection_skipped = args.offline && has_tracked;
-    if detection_skipped {
-        eprintln!(
-            "note: --offline skipped merged-PR detection; run `stacc sync` online to reconcile merged PRs."
-        );
-    }
-    let (adopted, merged) = if args.offline || !has_tracked {
-        (Vec::new(), BTreeSet::new())
-    } else {
-        detect_and_adopt(&git, &store, &mut state, &repo).inspect_err(|_| {
+    let local_mode = stacc_config::local_from_file(Path::new(".stacc.toml"));
+    // `--offline` skips the fetch and detection both. Otherwise classify the
+    // merge-detection path: reachable GitHub uses the authoritative API; a
+    // forge-less repo (local-mode key, a non-GitHub remote, a missing token, or
+    // an unreachable API) fetches trunk but only PROPOSES likely-merged branches
+    // via the local heuristic and never drops on it (KTD-4/6). `detection_skipped`
+    // marks a run that emitted the skipped note (the JSON contract), as for
+    // `--offline`.
+    let (adopted, merged, likely_merged, detection_skipped) = if args.offline || !has_tracked {
+        if args.offline && has_tracked {
             eprintln!(
-                "hint: `stacc sync --offline` restacks local refs without merged-PR detection."
+                "note: --offline skipped merged-PR detection; run `stacc sync` online to reconcile merged PRs."
             );
-        })?
+        }
+        (Vec::new(), BTreeSet::new(), Vec::new(), args.offline && has_tracked)
+    } else {
+        match reconcile_detection(&git, &store, &mut state, &repo, local_mode)? {
+            Detection::Api { adopted, merged } => (adopted, merged, Vec::new(), false),
+            Detection::ForgeLess { likely, note } => {
+                if note {
+                    eprintln!(
+                        "note: skipped merged-PR detection (no reachable forge); proposing likely-merged branches from local history, reconcile one with `stacc merged <branch>`."
+                    );
+                }
+                (Vec::new(), BTreeSet::new(), likely, note)
+            }
+        }
     };
     // Snapshot the merged branches' tips NOW, the leases for the ref cleanup
     // after the reconcile: a branch that moves mid-sync is kept, not destroyed.
@@ -1106,6 +1120,7 @@ pub fn sync(args: &SyncArgs, format: OutputFormat) -> Result<(), Error> {
         &cleaned,
         &cleanup_skipped,
         detection_skipped,
+        &likely_merged,
     );
     Ok(())
 }
@@ -1163,6 +1178,66 @@ fn detect_and_adopt(
     let mut merged = detect_merged(&github, &owner, &repo_name, state, &adopted_names)?;
     merged.extend(adopted_merged.into_keys());
     Ok((adopted, merged))
+}
+
+/// How `sync` resolves merges this run.
+enum Detection {
+    /// Reachable GitHub: the authoritative API result (adopted PRs, merged set).
+    Api {
+        adopted: Vec<AdoptedPr>,
+        merged: BTreeSet<String>,
+    },
+    /// Forge-less (local-mode key, a non-GitHub remote, a missing token, or an
+    /// unreachable API): the local heuristic's propose-only list. `note` is false
+    /// only when the user explicitly opted in via the local-mode key.
+    ForgeLess {
+        likely: Vec<ops::LikelyMerged>,
+        note: bool,
+    },
+}
+
+/// Classify how to reconcile merges and run it. Forge-less engages when the
+/// per-repo local-mode key is set, the remote is not a `github.com` URL, the
+/// GitHub token is missing, or the first API call cannot reach GitHub; otherwise
+/// the authoritative API runs. The local heuristic only PROPOSES (KTD-4/6):
+/// nothing is dropped on a forge-less run.
+fn reconcile_detection(
+    git: &Git,
+    store: &StateStore,
+    state: &mut State,
+    repo: &RepoConfig,
+    local_mode: bool,
+) -> Result<Detection, Error> {
+    if local_mode {
+        let likely = ops::detect_merged_local(git, state, &repo.trunk)?;
+        return Ok(Detection::ForgeLess { likely, note: false });
+    }
+    // A non-`github.com` remote (GitLab, Bitbucket, GitHub Enterprise) cannot be
+    // told apart by URL, so it auto-engages forge-less WITH a note, so it can
+    // never silently skip detection (the STA-94 contract).
+    if stacc_github::parse_remote(&git.remote_url(&repo.remote)?).is_none() {
+        let likely = ops::detect_merged_local(git, state, &repo.trunk)?;
+        return Ok(Detection::ForgeLess { likely, note: true });
+    }
+    // `github.com`: the authoritative API. A missing token or an unreachable API
+    // falls back to forge-less with a note rather than hard-erroring.
+    match detect_and_adopt(git, store, state, repo) {
+        Ok((adopted, merged)) => Ok(Detection::Api { adopted, merged }),
+        Err(err) if is_forge_unreachable(&err) => {
+            let likely = ops::detect_merged_local(git, state, &repo.trunk)?;
+            Ok(Detection::ForgeLess { likely, note: true })
+        }
+        Err(err) => Err(err),
+    }
+}
+
+/// Whether an error means the GitHub API is simply unreachable (no token, or a
+/// transport failure), as opposed to a real API error the user must see.
+fn is_forge_unreachable(err: &Error) -> bool {
+    matches!(
+        err,
+        Error::Github(GitHubError::MissingToken | GitHubError::Transport(_))
+    )
 }
 
 /// Ask GitHub which recorded PRs have merged, returning their branch names.
@@ -2633,6 +2708,7 @@ fn continue_op(
                 &[],
                 &[],
                 false,
+                &[],
             );
         }
         // A resumed modify carries its branch, so JSON gets the same
@@ -2964,6 +3040,16 @@ fn report_restacked(format: OutputFormat, op: &str, restacked: &[String]) {
     }
 }
 
+/// The local merge-equivalence signal as a stable JSON/pretty label.
+fn evidence_str(e: MergeEquivalence) -> &'static str {
+    match e {
+        MergeEquivalence::Ancestor => "ancestor",
+        MergeEquivalence::SameTree => "same_tree",
+        MergeEquivalence::NetDiff => "net_diff",
+        MergeEquivalence::NotFound => "not_found",
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn report_sync(
     format: OutputFormat,
@@ -2976,6 +3062,7 @@ fn report_sync(
     cleaned: &[String],
     cleanup_skipped: &[CleanupSkip],
     detection_skipped: bool,
+    likely_merged: &[ops::LikelyMerged],
 ) {
     match format {
         OutputFormat::Json => {
@@ -2989,6 +3076,10 @@ fn report_sync(
                 .iter()
                 .map(|(branch, base)| json!({ "branch": branch, "base": base }))
                 .collect();
+            let likely_list: Vec<Value> = likely_merged
+                .iter()
+                .map(|l| json!({ "branch": l.branch, "evidence": evidence_str(l.evidence) }))
+                .collect();
             println!(
                 "{}",
                 json!({
@@ -3001,6 +3092,7 @@ fn report_sync(
                     "cleaned": cleaned,
                     "cleanup_skipped": cleanup_skipped_json(cleanup_skipped),
                     "detection_skipped": detection_skipped,
+                    "likely_merged": likely_list,
                 })
             );
         }
@@ -3010,6 +3102,7 @@ fn report_sync(
                 && adopted.is_empty()
                 && reparented.is_empty()
                 && restacked.is_empty()
+                && likely_merged.is_empty()
             {
                 println!("Already up to date.");
             } else {
@@ -3027,6 +3120,14 @@ fn report_sync(
                 }
                 for name in restacked {
                     println!("Restacked {name}");
+                }
+                for l in likely_merged {
+                    println!(
+                        "Likely merged: {} ({}); run `stacc merged {}` to reconcile",
+                        l.branch,
+                        evidence_str(l.evidence),
+                        l.branch
+                    );
                 }
             }
             report_cleanup_pretty(cleaned, cleanup_skipped);
