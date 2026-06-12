@@ -11,7 +11,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
-use stacc_git::{Git, GitError, RebaseError};
+use stacc_git::{Git, GitError, MergeEquivalence, RebaseError};
 use stacc_state::{BranchState, State, StateError};
 use thiserror::Error;
 
@@ -172,6 +172,44 @@ pub fn resolve_base(
         }
     }
     base
+}
+
+/// A tracked branch whose changes already appear in trunk, with the local
+/// signal that flagged it. Produced by [`detect_merged_local`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LikelyMerged {
+    pub branch: String,
+    pub evidence: MergeEquivalence,
+}
+
+/// Scan `state`'s tracked branches for ones whose changes already appear in
+/// `trunk`, using the local [`Git::merge_equivalence`] signals, and return the
+/// flagged branches with their evidence. This is the PROPOSE half of the
+/// forge-less reconcile path: it mutates nothing and drops nothing. The net-diff
+/// signal is propose-only (it has false positives), so a caller must never drop
+/// a branch on it without an explicit `stacc merged` / `--assume-merged`.
+///
+/// A branch whose own ref no longer resolves is skipped; sync prunes
+/// missing-ref branches on a separate path.
+pub fn detect_merged_local(
+    git: &Git,
+    state: &State,
+    trunk: &str,
+) -> Result<Vec<LikelyMerged>, OpsError> {
+    let mut found = Vec::new();
+    for branch in state.branches.keys() {
+        if git.ref_missing(&format!("refs/heads/{branch}")) {
+            continue;
+        }
+        match git.merge_equivalence(trunk, branch)? {
+            MergeEquivalence::NotFound => {}
+            evidence => found.push(LikelyMerged {
+                branch: branch.clone(),
+                evidence,
+            }),
+        }
+    }
+    Ok(found)
 }
 
 /// What a restack pass did: the branches it rebased, any it skipped because
@@ -501,6 +539,68 @@ mod tests {
         };
         let err = downstack_chain(&state, "a", "main").unwrap_err();
         assert!(matches!(err, OpsError::Untracked(ref n) if n == "missing"));
+    }
+
+    /// A single-branch state tracking `name`, base recorded as `main`.
+    fn tracking(name: &str) -> State {
+        let mut branches = BTreeMap::new();
+        branches.insert(
+            name.to_string(),
+            BranchState {
+                base: Base {
+                    name: "main".into(),
+                    hash: "0".repeat(40),
+                },
+                pr: None,
+            },
+        );
+        State {
+            repo: None,
+            branches,
+            ..State::default()
+        }
+    }
+
+    #[test]
+    fn detect_merged_local_flags_a_squash_merged_branch() {
+        let (tmp, git) = init_repo();
+        let path = tmp.path();
+        write_commit(path, "base.txt", "base\n", "base");
+        run_git(path, &["checkout", "-q", "-b", "feature"]);
+        write_commit(path, "f.txt", "feat\n", "feature change");
+        run_git(path, &["checkout", "-q", "main"]);
+        write_commit(path, "other.txt", "x\n", "trunk advance");
+        write_commit(path, "f.txt", "feat\n", "squash feature");
+
+        let found = detect_merged_local(&git, &tracking("feature"), "main").unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].branch, "feature");
+        assert_eq!(found[0].evidence, MergeEquivalence::NetDiff);
+    }
+
+    #[test]
+    fn detect_merged_local_ignores_unmerged_branches() {
+        let (tmp, git) = init_repo();
+        let path = tmp.path();
+        write_commit(path, "base.txt", "base\n", "base");
+        run_git(path, &["checkout", "-q", "-b", "feature"]);
+        write_commit(path, "f.txt", "feat\n", "feature change");
+        run_git(path, &["checkout", "-q", "main"]);
+        write_commit(path, "other.txt", "x\n", "unrelated advance");
+
+        assert!(detect_merged_local(&git, &tracking("feature"), "main")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn detect_merged_local_skips_a_branch_with_no_ref() {
+        let (_tmp, git) = init_repo();
+        // `ghost` is tracked in state but has no `refs/heads/ghost`; it is skipped
+        // without error (sync prunes missing-ref branches separately).
+        assert!(detect_merged_local(&git, &tracking("ghost"), "main")
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
