@@ -279,6 +279,24 @@ fn log_long_passes_through_to_git() {
 }
 
 #[test]
+fn log_long_on_trunk_with_no_stack_shows_trunk_history() {
+    let tmp = repo();
+    let p = tmp.path();
+    assert!(stacc(p, &["init"]).status.success());
+    // On the trunk with nothing tracked: there are no branch tips to exclude,
+    // so `log long` falls back to the trunk's own history instead of emitting
+    // nothing (regression for STA-97).
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "trunk-only-commit"]);
+
+    let out = stacc(p, &["log", "long"]);
+    assert!(out.status.success());
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(!s.trim().is_empty(), "log long must not be silent on trunk: {s:?}");
+    assert!(s.contains("trunk-only-commit"), "trunk history expected: {s}");
+    assert!(!s.contains('◉'), "long is a git pass-through, not the stacc graph: {s}");
+}
+
+#[test]
 fn log_json_includes_commit_object_and_null_pr() {
     let tmp = repo();
     let p = tmp.path();
