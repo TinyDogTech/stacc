@@ -134,6 +134,35 @@ pub struct TreeEntry {
     pub sha: String,
 }
 
+/// Evidence that a branch's changes already live in a trunk, returned by
+/// [`Git::merge_equivalence`]. Ordered by strength: the first two variants are
+/// deterministic proofs that the branch is contained in trunk; the third is a
+/// heuristic, propose-only signal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeEquivalence {
+    /// The branch tip is an ancestor of trunk: every branch commit is already
+    /// reachable from trunk (a plain or fast-forward merge).
+    Ancestor,
+    /// The branch tip's tree equals trunk's tree: the branch produced exactly
+    /// trunk's current content (a squash where trunk has not advanced since).
+    SameTree,
+    /// The branch's net diff matches the patch-id of a commit already on trunk
+    /// (a squash, even after trunk advanced on other files). Propose-only: it
+    /// has known false positives (a reverted-then-overwritten change, an
+    /// independent backport of the same diff), so a caller must not treat it as
+    /// proof for a destructive drop.
+    NetDiff,
+    /// No evidence that the branch is contained in trunk.
+    NotFound,
+}
+
+/// Diff options pinned for patch-id comparability. Both sides of a comparison
+/// must use identical options for their ids to match: the `--no-*` flags strip
+/// rename detection and config- or environment-dependent filters, and `-U0`
+/// drops context lines so an unrelated trunk change on a neighbouring line does
+/// not perturb the hash.
+const PATCH_ID_DIFF_OPTS: &[&str] = &["--no-renames", "--no-ext-diff", "--no-textconv", "-U0"];
+
 impl Git {
     pub fn open(dir: impl Into<PathBuf>) -> Self {
         Self { dir: dir.into() }
@@ -230,6 +259,78 @@ impl Git {
             Some(1) => Ok(None),
             _ => Err(self.command_error(&args, &output)),
         }
+    }
+
+    /// Report the strongest evidence that `branch`'s changes already appear in
+    /// `trunk`. Checks in order of strength: [`is_ancestor`](Git::is_ancestor)
+    /// (a plain merge), [`same_tree`](Git::same_tree) (a squash where trunk has
+    /// not advanced), then a net-diff patch-id scan of the commits trunk gained
+    /// since the fork point (a squash after trunk advanced). The scan is bounded
+    /// to `merge_base(trunk, branch)..trunk`, never all of trunk.
+    ///
+    /// [`MergeEquivalence::NetDiff`] is propose-only and must not authorize a
+    /// destructive drop on its own; the two deterministic signals can.
+    pub fn merge_equivalence(
+        &self,
+        trunk: &str,
+        branch: &str,
+    ) -> Result<MergeEquivalence, GitError> {
+        if self.is_ancestor(branch, trunk)? {
+            return Ok(MergeEquivalence::Ancestor);
+        }
+        if self.same_tree(branch, trunk)? {
+            return Ok(MergeEquivalence::SameTree);
+        }
+        let base = self.merge_base(trunk, branch)?;
+        let Some(branch_patch) = self.net_diff_patch_id(&base, branch)? else {
+            // An empty net diff means the branch carries no changes of its own,
+            // so there is nothing for trunk to contain.
+            return Ok(MergeEquivalence::NotFound);
+        };
+        if self.range_patch_ids(&base, trunk)?.contains(&branch_patch) {
+            Ok(MergeEquivalence::NetDiff)
+        } else {
+            Ok(MergeEquivalence::NotFound)
+        }
+    }
+
+    /// The `git patch-id --stable` id of the net diff `from..to`, or `None` when
+    /// that diff is empty.
+    fn net_diff_patch_id(&self, from: &str, to: &str) -> Result<Option<String>, GitError> {
+        let range = format!("{from}..{to}");
+        let mut args = vec!["diff"];
+        args.extend_from_slice(PATCH_ID_DIFF_OPTS);
+        args.push(range.as_str());
+        let diff = self.run(&args)?;
+        if diff.is_empty() {
+            return Ok(None);
+        }
+        let out = self.run_with_stdin(&["patch-id", "--stable"], diff.as_bytes())?;
+        Ok(out.split_whitespace().next().map(ToString::to_string))
+    }
+
+    /// The set of per-commit patch-ids for the commits in `from..to`.
+    fn range_patch_ids(
+        &self,
+        from: &str,
+        to: &str,
+    ) -> Result<std::collections::HashSet<String>, GitError> {
+        let range = format!("{from}..{to}");
+        let mut args = vec!["log", "-p", "--no-merges"];
+        args.extend_from_slice(PATCH_ID_DIFF_OPTS);
+        args.push(range.as_str());
+        let patches = self.run(&args)?;
+        if patches.is_empty() {
+            return Ok(std::collections::HashSet::new());
+        }
+        let out = self.run_with_stdin(&["patch-id", "--stable"], patches.as_bytes())?;
+        // `git patch-id --stable` emits one `<patch-id> <commit-id>` line per
+        // commit in the stream; keep the patch-id.
+        Ok(out
+            .lines()
+            .filter_map(|line| line.split_whitespace().next())
+            .map(ToString::to_string)
+            .collect())
     }
 
     /// Rebase `branch` onto `onto`, replaying the commits after `upstream`.
@@ -1321,6 +1422,136 @@ mod tests {
         let second = repo.rev_parse("HEAD").unwrap();
         assert!(repo.is_ancestor(&first, &second).unwrap());
         assert!(!repo.is_ancestor(&second, &first).unwrap());
+    }
+
+    #[test]
+    fn merge_equivalence_ancestor_for_fast_forward_merge() {
+        let (tmp, repo) = init_repo();
+        let path = tmp.path();
+        run_git(path, &["checkout", "-q", "-b", "feature"]);
+        write_commit(path, "f.txt", "feature\n", "feature add");
+        run_git(path, &["checkout", "-q", "main"]);
+        run_git(path, &["merge", "-q", "--ff-only", "feature"]);
+        // feature's commits are now reachable from main.
+        assert_eq!(
+            repo.merge_equivalence("main", "feature").unwrap(),
+            MergeEquivalence::Ancestor
+        );
+    }
+
+    #[test]
+    fn merge_equivalence_same_tree_for_squash_without_advance() {
+        let (tmp, repo) = init_repo();
+        let path = tmp.path();
+        write_commit(path, "a.txt", "base\n", "base");
+        run_git(path, &["checkout", "-q", "-b", "feature"]);
+        write_commit(path, "a.txt", "base\nfeat\n", "feature change");
+        run_git(path, &["checkout", "-q", "main"]);
+        // Squash the same content onto main; trunk has not advanced otherwise,
+        // so the trees match even though the commits differ.
+        write_commit(path, "a.txt", "base\nfeat\n", "squash feature");
+        assert_eq!(
+            repo.merge_equivalence("main", "feature").unwrap(),
+            MergeEquivalence::SameTree
+        );
+    }
+
+    #[test]
+    fn merge_equivalence_netdiff_for_single_commit_squash_after_advance() {
+        let (tmp, repo) = init_repo();
+        let path = tmp.path();
+        write_commit(path, "a.txt", "base\n", "base");
+        run_git(path, &["checkout", "-q", "-b", "feature"]);
+        write_commit(path, "a.txt", "base\nfeat\n", "feature change");
+        run_git(path, &["checkout", "-q", "main"]);
+        // Trunk advances on an unrelated file, then the feature lands squashed.
+        write_commit(path, "b.txt", "other\n", "unrelated trunk advance");
+        write_commit(path, "a.txt", "base\nfeat\n", "squash feature");
+        // Not an ancestor, and trees differ (main has b.txt), but the squash
+        // commit's patch matches the branch's net diff.
+        assert_eq!(
+            repo.merge_equivalence("main", "feature").unwrap(),
+            MergeEquivalence::NetDiff
+        );
+    }
+
+    #[test]
+    fn merge_equivalence_netdiff_for_multi_commit_squash() {
+        let (tmp, repo) = init_repo();
+        let path = tmp.path();
+        write_commit(path, "a.txt", "l1\n", "base");
+        run_git(path, &["checkout", "-q", "-b", "feature"]);
+        write_commit(path, "a.txt", "l1\nl2\n", "feature c1");
+        write_commit(path, "a.txt", "l1\nl2\nl3\n", "feature c2");
+        run_git(path, &["checkout", "-q", "main"]);
+        write_commit(path, "b.txt", "other\n", "unrelated trunk advance");
+        // The two feature commits land as one squashed commit; the branch's net
+        // diff equals the squash's diff even though no single per-commit patch
+        // would (the `git cherry` failure mode).
+        write_commit(path, "a.txt", "l1\nl2\nl3\n", "squash feature");
+        assert_eq!(
+            repo.merge_equivalence("main", "feature").unwrap(),
+            MergeEquivalence::NetDiff
+        );
+    }
+
+    #[test]
+    fn merge_equivalence_not_found_for_unmerged_branch() {
+        let (tmp, repo) = init_repo();
+        let path = tmp.path();
+        write_commit(path, "a.txt", "base\n", "base");
+        run_git(path, &["checkout", "-q", "-b", "feature"]);
+        write_commit(path, "a.txt", "base\nfeat\n", "feature change");
+        run_git(path, &["checkout", "-q", "main"]);
+        write_commit(path, "b.txt", "other\n", "unrelated trunk advance");
+        // Feature's change never lands on main.
+        assert_eq!(
+            repo.merge_equivalence("main", "feature").unwrap(),
+            MergeEquivalence::NotFound
+        );
+    }
+
+    #[test]
+    fn merge_equivalence_not_found_when_landed_as_separate_commits() {
+        let (tmp, repo) = init_repo();
+        let path = tmp.path();
+        write_commit(path, "a.txt", "l1\n", "base");
+        run_git(path, &["checkout", "-q", "-b", "feature"]);
+        write_commit(path, "a.txt", "l1\nl2\n", "feature c1");
+        write_commit(path, "a.txt", "l1\nl2\nl3\n", "feature c2");
+        run_git(path, &["checkout", "-q", "main"]);
+        // Trunk advances on an unrelated file so the trees differ (otherwise
+        // same_tree would correctly short-circuit), then the two changes land as
+        // two separate commits, not one squash. No single trunk commit's patch
+        // matches the branch's combined net diff, so the heuristic reads
+        // not-found (the conceded false negative).
+        write_commit(path, "b.txt", "other\n", "unrelated trunk advance");
+        write_commit(path, "a.txt", "l1\nl2\n", "land c1");
+        write_commit(path, "a.txt", "l1\nl2\nl3\n", "land c2");
+        assert_eq!(
+            repo.merge_equivalence("main", "feature").unwrap(),
+            MergeEquivalence::NotFound
+        );
+    }
+
+    #[test]
+    fn merge_equivalence_netdiff_false_positive_after_revert() {
+        let (tmp, repo) = init_repo();
+        let path = tmp.path();
+        write_commit(path, "a.txt", "base\n", "base");
+        run_git(path, &["checkout", "-q", "-b", "feature"]);
+        write_commit(path, "a.txt", "base\nfeat\n", "feature change");
+        run_git(path, &["checkout", "-q", "main"]);
+        // Feature lands squashed, then is reverted: the net effect on trunk is
+        // gone, but the original landing commit's patch is still in history, so
+        // the heuristic reports NetDiff. This is the safe false positive the
+        // propose-only contract exists for.
+        write_commit(path, "a.txt", "base\nfeat\n", "squash feature");
+        write_commit(path, "a.txt", "base\n", "revert feature");
+        assert_eq!(
+            repo.merge_equivalence("main", "feature").unwrap(),
+            MergeEquivalence::NetDiff
+        );
     }
 
     #[test]
