@@ -32,6 +32,25 @@ pub struct BranchState {
     pub pr: Option<PullRequest>,
 }
 
+/// A record of a branch dropped by `stacc merged`, kept in the `disposals` blob
+/// so a wrong drop is diagnosable and, via its keep-alive ref, recoverable.
+/// Keyed in state by branch and tip.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Disposal {
+    /// The dropped branch.
+    pub branch: String,
+    /// The branch tip at drop time; the keep-alive ref points here.
+    pub tip: String,
+    /// The surviving base its children were re-parented onto (stack shape).
+    pub base: String,
+    /// The children re-parented off the dropped branch (stack shape).
+    #[serde(default)]
+    pub children: Vec<String>,
+    /// The merge signal that authorized the drop: `ancestor`, `same_tree`,
+    /// `net_diff`, or `assume_merged`.
+    pub evidence: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

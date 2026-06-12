@@ -443,6 +443,7 @@ mod tests {
                 remote: "origin".into(),
             }),
             branches,
+            ..State::default()
         };
         (StateStore::new(git.clone()), state)
     }
@@ -472,6 +473,7 @@ mod tests {
         let state = State {
             repo: None,
             branches,
+            ..State::default()
         };
         assert_eq!(
             downstack_chain(&state, "c", "main").unwrap(),
@@ -485,6 +487,7 @@ mod tests {
         let state = State {
             repo: None,
             branches: cyclic,
+            ..State::default()
         };
         assert!(matches!(
             downstack_chain(&state, "a", "main"),
@@ -494,6 +497,7 @@ mod tests {
         let state = State {
             repo: None,
             branches: branch_state(&[("a", "missing")]),
+            ..State::default()
         };
         let err = downstack_chain(&state, "a", "main").unwrap_err();
         assert!(matches!(err, OpsError::Untracked(ref n) if n == "missing"));
@@ -689,6 +693,7 @@ mod tests {
         let mut state = State {
             repo: None,
             branches,
+            ..State::default()
         };
         let err = restack(&git, &mut state, &["a".into()], &mut Vec::new()).unwrap_err();
         assert!(matches!(err, OpsError::ForkPointLost { ref branch, .. } if branch == "a"));
