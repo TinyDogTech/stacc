@@ -791,11 +791,20 @@ impl Git {
     /// Git's own graph history for the given branch `tips`, excluding the
     /// trunk's history (`git log --graph --oneline --decorate <tips> --not
     /// <trunk>`). Backs `stacc log long`.
+    ///
+    /// With no `tips` (nothing tracked beyond the trunk), the exclusion has no
+    /// positive ref, so git falls back to `HEAD` and `--not <trunk>` cancels it
+    /// out to nothing on the trunk. We instead show the trunk's own history so
+    /// the command is never silently empty.
     pub fn log_graph(&self, tips: &[&str], trunk: &str) -> Result<String, GitError> {
         let mut args = vec!["log", "--graph", "--oneline", "--decorate"];
-        args.extend(tips.iter().copied());
-        args.push("--not");
-        args.push(trunk);
+        if tips.is_empty() {
+            args.push(trunk);
+        } else {
+            args.extend(tips.iter().copied());
+            args.push("--not");
+            args.push(trunk);
+        }
         self.run(&args)
     }
 
