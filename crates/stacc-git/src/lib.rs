@@ -163,6 +163,15 @@ pub enum MergeEquivalence {
 /// not perturb the hash.
 const PATCH_ID_DIFF_OPTS: &[&str] = &["--no-renames", "--no-ext-diff", "--no-textconv", "-U0"];
 
+/// One ref mutation for an atomic [`update_refs`](Git::update_refs) batch.
+pub enum RefUpdate {
+    /// Create `name` at `new`; the transaction fails if `name` already exists.
+    Create { name: String, new: String },
+    /// Delete `name`; when `old` is set, only if it currently equals `old` (a
+    /// compare-and-swap delete).
+    Delete { name: String, old: Option<String> },
+}
+
 impl Git {
     pub fn open(dir: impl Into<PathBuf>) -> Self {
         Self { dir: dir.into() }
@@ -750,6 +759,51 @@ impl Git {
             args.push(old);
         }
         self.run(&args).map(|_| ())
+    }
+
+    /// Apply `updates` as one atomic `git update-ref --stdin` transaction: every
+    /// update lands or none do (git locks all refs first), and `old`-value
+    /// guards make each a compare-and-swap. Used to create a keep-alive ref and
+    /// delete a branch ref as a single unit, so a dropped branch's commits are
+    /// never left unreachable by a partial failure.
+    pub fn update_refs(&self, updates: &[RefUpdate]) -> Result<(), GitError> {
+        use std::fmt::Write as _;
+        // Writing to a String is infallible, so the writeln! results are ignored.
+        let mut input = String::new();
+        for update in updates {
+            match update {
+                RefUpdate::Create { name, new } => {
+                    let _ = writeln!(input, "create {name} {new}");
+                }
+                RefUpdate::Delete {
+                    name,
+                    old: Some(old),
+                } => {
+                    let _ = writeln!(input, "delete {name} {old}");
+                }
+                RefUpdate::Delete { name, old: None } => {
+                    let _ = writeln!(input, "delete {name}");
+                }
+            }
+        }
+        self.run_with_stdin(&["update-ref", "--stdin"], input.as_bytes())
+            .map(|_| ())
+    }
+
+    /// Ref names under `prefix`, newest-committed first
+    /// (`git for-each-ref --sort=-committerdate`). Empty when none match.
+    pub fn list_refs(&self, prefix: &str) -> Result<Vec<String>, GitError> {
+        let out = self.run(&[
+            "for-each-ref",
+            "--format=%(refname)",
+            "--sort=-committerdate",
+            prefix,
+        ])?;
+        Ok(out
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(ToString::to_string)
+            .collect())
     }
 
     /// The commit a ref points at, or `None` if the ref does not exist.
@@ -1552,6 +1606,91 @@ mod tests {
             repo.merge_equivalence("main", "feature").unwrap(),
             MergeEquivalence::NetDiff
         );
+    }
+
+    #[test]
+    fn update_refs_creates_and_guard_deletes_atomically() {
+        let (tmp, repo) = init_repo();
+        let path = tmp.path();
+        run_git(path, &["checkout", "-q", "-b", "feature"]);
+        write_commit(path, "f.txt", "x\n", "feature");
+        let tip = repo.rev_parse("feature").unwrap();
+        run_git(path, &["checkout", "-q", "main"]);
+
+        repo.update_refs(&[
+            RefUpdate::Create {
+                name: "refs/stacc/dropped/feature-keep".into(),
+                new: tip.clone(),
+            },
+            RefUpdate::Delete {
+                name: "refs/heads/feature".into(),
+                old: Some(tip.clone()),
+            },
+        ])
+        .unwrap();
+
+        assert!(repo.ref_missing("refs/heads/feature"), "branch deleted");
+        assert_eq!(
+            repo.ref_commit("refs/stacc/dropped/feature-keep")
+                .unwrap()
+                .as_deref(),
+            Some(tip.as_str()),
+            "keep-alive ref preserves the tip"
+        );
+    }
+
+    #[test]
+    fn update_refs_aborts_every_update_on_a_failed_guard() {
+        let (tmp, repo) = init_repo();
+        let path = tmp.path();
+        run_git(path, &["checkout", "-q", "-b", "feature"]);
+        write_commit(path, "f.txt", "x\n", "feature");
+        let tip = repo.rev_parse("feature").unwrap();
+        run_git(path, &["checkout", "-q", "main"]);
+
+        // The delete guard names the wrong old OID, so the whole transaction must
+        // roll back: neither the create nor the delete lands.
+        let result = repo.update_refs(&[
+            RefUpdate::Create {
+                name: "refs/stacc/dropped/feature-keep".into(),
+                new: tip.clone(),
+            },
+            RefUpdate::Delete {
+                name: "refs/heads/feature".into(),
+                old: Some("0".repeat(40)),
+            },
+        ]);
+        assert!(result.is_err(), "a failed guard fails the transaction");
+        assert_eq!(
+            repo.ref_commit("refs/heads/feature").unwrap().as_deref(),
+            Some(tip.as_str()),
+            "branch ref survives the aborted transaction"
+        );
+        assert!(
+            repo.ref_missing("refs/stacc/dropped/feature-keep"),
+            "the create rolled back too"
+        );
+    }
+
+    #[test]
+    fn list_refs_returns_matching_refs_only() {
+        let (_tmp, repo) = init_repo();
+        let head = repo.rev_parse("HEAD").unwrap();
+        repo.update_refs(&[
+            RefUpdate::Create {
+                name: "refs/stacc/dropped/a".into(),
+                new: head.clone(),
+            },
+            RefUpdate::Create {
+                name: "refs/stacc/dropped/b".into(),
+                new: head.clone(),
+            },
+        ])
+        .unwrap();
+        let mut refs = repo.list_refs("refs/stacc/dropped/").unwrap();
+        refs.sort();
+        assert_eq!(refs, vec!["refs/stacc/dropped/a", "refs/stacc/dropped/b"]);
+        assert!(repo.list_refs("refs/stacc/nonesuch/").unwrap().is_empty());
     }
 
     #[test]
