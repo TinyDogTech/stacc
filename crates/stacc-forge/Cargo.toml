@@ -1,0 +1,18 @@
+[package]
+name = "stacc-forge"
+version.workspace = true
+description = "Forge-neutral change model and the Forge trait every forge implements."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[lints]
+workspace = true
