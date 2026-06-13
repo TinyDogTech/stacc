@@ -228,6 +228,38 @@ mod tests {
             let json = serde_json::to_string(&checks).unwrap();
             assert_eq!(serde_json::from_str::<ChecksState>(&json).unwrap(), checks);
         }
+        for review in [
+            ReviewState::Approved,
+            ReviewState::ChangesRequested,
+            ReviewState::ReviewRequired,
+            ReviewState::NoReview,
+        ] {
+            let json = serde_json::to_string(&review).unwrap();
+            assert_eq!(serde_json::from_str::<ReviewState>(&json).unwrap(), review);
+        }
+        for readiness in [
+            MergeReadiness::Ready,
+            MergeReadiness::Conflicted,
+            MergeReadiness::Behind,
+            MergeReadiness::Blocked,
+            MergeReadiness::NeedsApproval,
+            MergeReadiness::Draft,
+            MergeReadiness::Unknown,
+        ] {
+            let json = serde_json::to_string(&readiness).unwrap();
+            assert_eq!(serde_json::from_str::<MergeReadiness>(&json).unwrap(), readiness);
+        }
+        for reason in [
+            MergeRejectionReason::Conflict,
+            MergeRejectionReason::Behind,
+            MergeRejectionReason::Blocked,
+            MergeRejectionReason::NeedsApproval,
+            MergeRejectionReason::Draft,
+            MergeRejectionReason::Unknown,
+        ] {
+            let json = serde_json::to_string(&reason).unwrap();
+            assert_eq!(serde_json::from_str::<MergeRejectionReason>(&json).unwrap(), reason);
+        }
     }
 
     #[test]

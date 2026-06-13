@@ -44,11 +44,12 @@ pub enum ForgeError {
     #[error("forge authentication failed")]
     AuthFailed,
 
+    /// The forge refused to merge. Every block carries a structured reason
+    /// ([`MergeRejectionReason::Unknown`] when the forge gives no mappable
+    /// cause), so an agent is never left with an opaque rejection (R16). There
+    /// is deliberately no unstructured "not mergeable" variant.
     #[error("the forge refused to merge the change: {0:?}")]
     Rejected(MergeRejectionReason),
-
-    #[error("the change is not mergeable (head moved, or readiness not satisfied)")]
-    NotMergeable,
 
     #[error("conflicting state on the forge")]
     Conflict,
@@ -74,7 +75,7 @@ impl ForgeError {
     pub fn error_type(&self) -> ForgeErrorType {
         match self {
             ForgeError::MissingToken | ForgeError::AuthFailed => ForgeErrorType::ForgeAuth,
-            ForgeError::Rejected(_) | ForgeError::NotMergeable => ForgeErrorType::ForgeRejected,
+            ForgeError::Rejected(_) => ForgeErrorType::ForgeRejected,
             ForgeError::Conflict => ForgeErrorType::Conflict,
             ForgeError::NotFound => ForgeErrorType::NotFound,
             ForgeError::RateLimited => ForgeErrorType::RateLimited,
@@ -132,6 +133,8 @@ mod tests {
         assert_eq!(code(&ForgeErrorType::NotFound), "not_found");
         assert_eq!(code(&ForgeErrorType::RateLimited), "rate_limited");
         assert_eq!(code(&ForgeErrorType::Unsupported), "unsupported");
+        assert_eq!(code(&ForgeErrorType::Transport), "transport");
+        assert_eq!(code(&ForgeErrorType::Unexpected), "unexpected");
     }
 
     #[test]
@@ -145,6 +148,17 @@ mod tests {
         assert_eq!(
             ForgeError::Unsupported("rename_branch".into()).error_type(),
             ForgeErrorType::Unsupported
+        );
+        assert_eq!(ForgeError::Conflict.error_type(), ForgeErrorType::Conflict);
+        assert_eq!(ForgeError::NotFound.error_type(), ForgeErrorType::NotFound);
+        assert_eq!(ForgeError::RateLimited.error_type(), ForgeErrorType::RateLimited);
+        assert_eq!(
+            ForgeError::Transport("boom".into()).error_type(),
+            ForgeErrorType::Transport
+        );
+        assert_eq!(
+            ForgeError::Unexpected("huh".into()).error_type(),
+            ForgeErrorType::Unexpected
         );
     }
 
@@ -161,6 +175,12 @@ mod tests {
         assert!(json.contains("schema_version"), "{json}");
         // No `forge` discriminator: an agent branches on `type`, never the forge.
         assert!(!json.contains("\"forge\""), "{json}");
+
+        // The structured reason must survive a full round-trip, not merely
+        // appear in the serialized form.
+        let back: ForgeErrorEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, envelope);
+        assert_eq!(back.reason, Some(MergeRejectionReason::Conflict));
     }
 
     #[test]
