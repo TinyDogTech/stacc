@@ -197,7 +197,9 @@ path that does not punish them for lacking a usable forge.
 ## Planned Direction: Forge-Equal Abstraction (Slice 2)
 
 This is the direction slice 2 builds toward, captured so planning inherits the
-shape. It is not slice 1 scope.
+shape. It is not slice 1 scope. Slice 2 is now specified in full at
+`docs/brainstorms/2026-06-12-gitlab-forge-equal-requirements.md`; the sketch
+below remains as the original framing.
 
 - **A forge boundary with a shared capability set.** Each forge implements the
   set; selection is by remote-URL host with a config override; auth is per forge.
