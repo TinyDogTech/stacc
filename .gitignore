@@ -3,3 +3,4 @@
 
 # Compound Engineering machine-local config (preferences, not shared).
 .compound-engineering/*.local.yaml
+.tokensave
