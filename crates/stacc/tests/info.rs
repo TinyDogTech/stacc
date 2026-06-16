@@ -93,7 +93,8 @@ fn info_reports_the_tracked_branch_shape() {
     assert_eq!(v["base"]["hash"].as_str().unwrap().len(), 40, "recorded base hash");
     assert_eq!(v["head"].as_str().unwrap(), head);
     assert_eq!(v["parent"], "main");
-    assert!(v["children"].as_array().unwrap().is_empty());
+    // No children: the empty array is omitted (compacted), not emitted as `[]`.
+    assert!(v.get("children").is_none(), "empty children omitted: {v}");
     assert_eq!(v["needs_restack"], false);
     assert_eq!(v["commits"], 1);
     assert_eq!(v["commit"]["subject"], "feat: add f");

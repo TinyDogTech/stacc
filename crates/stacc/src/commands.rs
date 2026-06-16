@@ -3,7 +3,7 @@
 use std::io::IsTerminal;
 use std::path::Path;
 
-use serde_json::json;
+use serde_json::{json, Value};
 use stacc_config::{detect, read_file, resolve, Overrides};
 use stacc_core::ops;
 use stacc_git::Git;
@@ -454,16 +454,13 @@ pub fn status(format: OutputFormat) -> Result<(), Error> {
         OutputFormat::Json => {
             let change_json =
                 pr.map(|(number, state)| json!({ "number": number, "state": pr_state_str(state) }));
-            println!(
-                "{}",
-                json!({
-                    "branch": branch,
-                    "base": branch_state.base.name,
-                    "children": children,
-                    "change": change_json,
-                    "schema_version": SCHEMA_VERSION,
-                })
-            );
+            print_compact(json!({
+                "branch": branch,
+                "base": branch_state.base.name,
+                "children": children,
+                "change": change_json,
+                "schema_version": SCHEMA_VERSION,
+            }));
         }
         OutputFormat::Pretty => {
             println!("{branch} (base: {})", branch_state.base.name);
@@ -507,6 +504,41 @@ pub(crate) fn readiness_str(mergeable_state: Option<&str>) -> &'static str {
         Some("blocked") => "blocked",
         _ => "unknown",
     }
+}
+
+/// Strip content an agent does not need from a JSON value before printing it:
+/// object keys whose value is null (an absent key reads as none), an empty
+/// `children` array (a leaf node), and `draft: false` (the non-draft default).
+/// Recurses through objects and arrays. Key names stay descriptive; only
+/// redundant content is dropped, so the output costs fewer tokens with no loss
+/// of signal.
+pub(crate) fn compact(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            map.retain(|key, v| {
+                let is_waste = v.is_null()
+                    || (key == "children" && v.as_array().is_some_and(Vec::is_empty))
+                    || (key == "draft" && v.as_bool() == Some(false));
+                !is_waste
+            });
+            for v in map.values_mut() {
+                compact(v);
+            }
+        }
+        Value::Array(items) => {
+            for v in items {
+                compact(v);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Compact (see [`compact`]) a JSON value and print it as one line. The agent
+/// emit path for commands that return structured data.
+pub(crate) fn print_compact(mut value: Value) {
+    compact(&mut value);
+    println!("{value}");
 }
 
 /// `stacc pr`: print the current branch's recorded PR URL, and open it in a

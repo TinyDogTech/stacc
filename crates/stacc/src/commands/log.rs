@@ -182,10 +182,11 @@ pub fn log(args: &LogArgs, format: OutputFormat, color: ColorChoice) -> Result<(
     match format {
         OutputFormat::Json => {
             let stack = stack_json(&trunk, &children, branches, &git, &pr_status, &deleted);
-            println!(
-                "{}",
-                json!({ "trunk": trunk, "stack": stack, "schema_version": SCHEMA_VERSION })
-            );
+            super::print_compact(json!({
+                "trunk": trunk,
+                "stack": stack,
+                "schema_version": SCHEMA_VERSION,
+            }));
         }
         OutputFormat::Pretty => {
             let palette = Palette::build(color_enabled(color), branches, &visible, &trunk);

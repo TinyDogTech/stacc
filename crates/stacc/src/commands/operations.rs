@@ -2119,19 +2119,16 @@ fn report_merge(
                     "restacked": o.restacked,
                 })
             });
-            println!(
-                "{}",
-                json!({
-                    "op": "merge",
-                    "merged": merged_json,
-                    "stopped_at": stopped,
-                    "trunk_protected": protected,
-                    "synced": synced,
-                    "cleaned": cleaned,
-                    "cleanup_skipped": cleanup_skipped_json(cleanup_skipped),
-                    "schema_version": SCHEMA_VERSION,
-                })
-            );
+            super::print_compact(json!({
+                "op": "merge",
+                "merged": merged_json,
+                "stopped_at": stopped,
+                "trunk_protected": protected,
+                "synced": synced,
+                "cleaned": cleaned,
+                "cleanup_skipped": cleanup_skipped_json(cleanup_skipped),
+                "schema_version": SCHEMA_VERSION,
+            }));
         }
         OutputFormat::Pretty => {
             if merged.is_empty() {

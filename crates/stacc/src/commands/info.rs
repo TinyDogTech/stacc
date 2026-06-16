@@ -209,7 +209,7 @@ fn render_json(d: &Details) {
     if let Some(fetch) = d.pr_fetch {
         obj["change_fetch"] = json!(fetch);
     }
-    println!("{obj}");
+    super::print_compact(obj);
 }
 
 /// The compact human layout, mirroring `status`'s header style.

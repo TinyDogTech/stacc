@@ -157,7 +157,7 @@ stacc log --format json
 ```
 
 ```json
-{"trunk":"main","stack":[{"name":"add-api","base":"main","change":{"number":123,"url":"https://github.com/you/repo/pull/123","state":"open"},"commit":{"sha":"95338df","subject":"feat: add the user API","age":"5 minutes ago"},"children":[{"name":"add-ui","base":"add-api","change":{"number":124,"url":"https://github.com/you/repo/pull/124","state":"open"},"commit":{"sha":"95610c6","subject":"feat: render the user list","age":"2 minutes ago"},"children":[]}]}],"schema_version":2}
+{"trunk":"main","stack":[{"name":"add-api","base":"main","change":{"number":123,"url":"https://github.com/you/repo/pull/123","state":"open"},"commit":{"sha":"95338df","subject":"feat: add the user API","age":"5 minutes ago"},"children":[{"name":"add-ui","base":"add-api","change":{"number":124,"url":"https://github.com/you/repo/pull/124","state":"open"},"commit":{"sha":"95610c6","subject":"feat: render the user list","age":"2 minutes ago"}}]}],"schema_version":2}
 ```
 
 Each branch carries its `change` (the forge-neutral pull/merge request: an
@@ -211,7 +211,7 @@ stable contract; the exact per-command JSON shapes live in `stacc <command>
   identifies the v2 schema. For example, `stacc status --format json`:
 
   ```json
-  {"branch":"add-ui","base":"add-api","change":null,"children":[],"schema_version":2}
+  {"branch":"add-ui","base":"add-api","schema_version":2}
   ```
 
   Field names are forge-neutral: a GitHub pull request and a GitLab merge request
@@ -219,6 +219,13 @@ stable contract; the exact per-command JSON shapes live in `stacc <command>
   regardless of forge. (Human `pretty` output still says "PR" or "MR" as
   appropriate.) Where `schema_version` is present, a value other than `2` is a
   schema an older reader should not assume it understands.
+
+- **Output is compacted to save tokens.** A field that would be `null`, an empty
+  `children` list, and `draft: false` are omitted rather than emitted. Read an
+  absent field as none / empty / not-a-draft. Descriptive key names are kept, so
+  the schema stays self-describing; only redundant content is dropped. (In the
+  example above the branch has no PR, so `change` and the empty `children` are
+  simply absent.)
 
 - **Pass `--no-interactive` to never block.** Any command that would prompt a
   human instead fails with a structured error, so an agent never hangs on a TTY.
