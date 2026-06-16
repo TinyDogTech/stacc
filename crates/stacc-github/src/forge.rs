@@ -27,26 +27,32 @@ use crate::{
 /// A blocked merge does not flow through this conversion: [`GitHubForge::merge_change`]
 /// turns [`GitHubError::NotMergeable`] into a structured [`ForgeError::Rejected`]
 /// before it can reach here.
-impl From<GitHubError> for ForgeError {
-    fn from(err: GitHubError) -> Self {
+impl From<&GitHubError> for ForgeError {
+    fn from(err: &GitHubError) -> Self {
         match err {
             GitHubError::MissingToken => ForgeError::MissingToken,
             // Reaching here means NotMergeable escaped a call other than a merge;
             // fall back to an unspecified rejection rather than an opaque error.
             GitHubError::NotMergeable => ForgeError::Rejected(MergeRejectionReason::Unknown),
-            GitHubError::Status { status, body } => match status {
+            GitHubError::Status { status, body } => match *status {
                 401 | 403 => ForgeError::AuthFailed,
                 404 => ForgeError::NotFound,
                 409 => ForgeError::Conflict,
                 429 => ForgeError::RateLimited,
                 _ => ForgeError::Unexpected(format!("GitHub status {status}: {body}")),
             },
-            GitHubError::Transport(msg) => ForgeError::Transport(msg),
+            GitHubError::Transport(msg) => ForgeError::Transport(msg.clone()),
             GitHubError::Decode(err) => ForgeError::Unexpected(format!("decode: {err}")),
-            GitHubError::Unexpected(msg) => ForgeError::Unexpected(msg),
+            GitHubError::Unexpected(msg) => ForgeError::Unexpected(msg.clone()),
             GitHubError::DeviceFlowExpired | GitHubError::DeviceFlowDenied => ForgeError::AuthFailed,
             GitHubError::Keyring(msg) => ForgeError::Unexpected(format!("keyring: {msg}")),
         }
+    }
+}
+
+impl From<GitHubError> for ForgeError {
+    fn from(err: GitHubError) -> Self {
+        Self::from(&err)
     }
 }
 

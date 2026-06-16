@@ -236,7 +236,7 @@ fn pop_refuses_a_dirty_working_tree() {
     let out = stacc(p, &["pop", "--format", "json"]);
     assert!(!out.status.success(), "must refuse: {:?}", json(&out));
     let v = json(&out);
-    assert_eq!(v["error"], "usage", "structured refusal: {v}");
+    assert_eq!(v["type"], "usage", "structured refusal: {v}");
     assert!(
         v["message"].as_str().expect("message").contains("uncommitted"),
         "names the dirty tree: {v}"
@@ -257,7 +257,7 @@ fn pop_refuses_the_trunk() {
     let out = stacc(p, &["pop", "--format", "json"]);
     assert!(!out.status.success());
     let v = json(&out);
-    assert_eq!(v["error"], "usage");
+    assert_eq!(v["type"], "usage");
     assert!(
         v["message"].as_str().expect("message").contains("trunk"),
         "names the trunk: {v}"
@@ -274,7 +274,7 @@ fn pop_refuses_an_untracked_branch() {
     let out = stacc(p, &["pop", "--format", "json"]);
     assert!(!out.status.success());
     let v = json(&out);
-    assert_eq!(v["error"], "usage");
+    assert_eq!(v["type"], "usage");
     assert!(
         v["message"].as_str().expect("message").contains("not tracked"),
         "names the untracked branch: {v}"
@@ -300,7 +300,7 @@ fn pop_refuses_when_a_child_is_in_another_worktree() {
     assert!(!out.status.success(), "must refuse: {:?}", json(&out));
     let v = json(&out);
     assert_eq!(
-        v["error"], "worktree_conflict",
+        v["type"], "worktree_conflict",
         "refused with the worktree_conflict discriminator: {v}"
     );
     assert_eq!(v["branch"], "c", "names the borrowed child: {v}");

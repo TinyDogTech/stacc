@@ -194,7 +194,7 @@ fn squash_refuses_a_branch_not_restacked_onto_its_base() {
     let out = stacc(p, &["squash", "--format", "json"]);
     assert!(!out.status.success(), "squash must refuse: {:?}", json(&out));
     let v = json(&out);
-    assert_eq!(v["error"], "usage", "structured refusal: {v}");
+    assert_eq!(v["type"], "usage", "structured refusal: {v}");
     let msg = v["message"].as_str().expect("message");
     assert!(
         msg.contains("restack"),
@@ -307,7 +307,7 @@ fn squash_refuses_when_an_upstack_branch_is_in_another_worktree() {
     assert!(!out.status.success(), "squash must refuse: {:?}", json(&out));
     let v = json(&out);
     assert_eq!(
-        v["error"], "worktree_conflict",
+        v["type"], "worktree_conflict",
         "refused with the worktree_conflict discriminator: {v}"
     );
 

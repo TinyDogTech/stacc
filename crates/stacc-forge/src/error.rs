@@ -21,7 +21,11 @@ pub enum ForgeErrorType {
     ForgeAuth,
     /// The forge refused an otherwise well-formed request (e.g. a blocked merge).
     ForgeRejected,
-    /// A conflicting state on the forge.
+    /// A conflicting state on the forge. Wire name `forge_conflict` so it stays
+    /// distinct from the CLI's rebase-conflict error (`type: "conflict"`, which
+    /// carries `branch`/`continue`/`abort`); an agent must not confuse a forge
+    /// 409 with a local rebase stop.
+    #[serde(rename = "forge_conflict")]
     Conflict,
     /// The requested resource does not exist.
     NotFound,
@@ -129,7 +133,7 @@ mod tests {
         let code = |t: &ForgeErrorType| serde_json::to_value(t).unwrap().as_str().unwrap().to_string();
         assert_eq!(code(&ForgeErrorType::ForgeAuth), "forge_auth");
         assert_eq!(code(&ForgeErrorType::ForgeRejected), "forge_rejected");
-        assert_eq!(code(&ForgeErrorType::Conflict), "conflict");
+        assert_eq!(code(&ForgeErrorType::Conflict), "forge_conflict");
         assert_eq!(code(&ForgeErrorType::NotFound), "not_found");
         assert_eq!(code(&ForgeErrorType::RateLimited), "rate_limited");
         assert_eq!(code(&ForgeErrorType::Unsupported), "unsupported");

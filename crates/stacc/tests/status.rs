@@ -75,7 +75,9 @@ fn status_tracked_without_pr() {
     assert!(out.status.success());
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains(r#""base":"main""#), "got: {s}");
-    assert!(s.contains(r#""pr":null"#), "got: {s}");
+    // A branch with no PR omits `change` entirely (compacted), rather than null.
+    assert!(!s.contains(r#""change""#), "change omitted when absent: {s}");
+    assert!(s.contains(r#""schema_version":2"#), "v2 schema stamp: {s}");
 }
 
 #[test]

@@ -19,7 +19,7 @@ fn login_fails_fast_on_the_placeholder_client_id() {
     let out = login(None);
     assert!(!out.status.success(), "login must fail without a registered app");
     let s = String::from_utf8_lossy(&out.stdout);
-    assert!(s.contains(r#""error":"usage""#), "usage error: {s}");
+    assert!(s.contains(r#""type":"usage""#), "usage error: {s}");
     // The message points at the working alternatives.
     assert!(s.contains("gh") && s.contains("GITHUB_TOKEN"), "names alternatives: {s}");
 }
@@ -31,5 +31,5 @@ fn login_fails_fast_on_an_empty_client_id_override() {
     let out = login(Some(""));
     assert!(!out.status.success(), "empty override must fail fast");
     let s = String::from_utf8_lossy(&out.stdout);
-    assert!(s.contains(r#""error":"usage""#), "usage error: {s}");
+    assert!(s.contains(r#""type":"usage""#), "usage error: {s}");
 }

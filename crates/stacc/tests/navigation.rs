@@ -131,7 +131,7 @@ fn up_with_multiple_children_errors_with_choices() {
     let out = stacc(p, &["up", "--format", "json"]);
     assert!(!out.status.success());
     let s = String::from_utf8_lossy(&out.stdout);
-    assert!(s.contains(r#""error":"ambiguous""#), "got: {s}");
+    assert!(s.contains(r#""type":"ambiguous""#), "got: {s}");
     assert!(s.contains(r#""b""#) && s.contains(r#""c""#), "got: {s}");
     // No move happened.
     assert_eq!(current_branch(p), "a");
@@ -144,7 +144,7 @@ fn top_at_a_fork_errors_with_choices() {
     let out = stacc(p, &["top", "--format", "json"]);
     assert!(!out.status.success());
     let s = String::from_utf8_lossy(&out.stdout);
-    assert!(s.contains(r#""error":"ambiguous""#), "got: {s}");
+    assert!(s.contains(r#""type":"ambiguous""#), "got: {s}");
     assert!(s.contains(r#""b""#) && s.contains(r#""c""#), "got: {s}");
 }
 

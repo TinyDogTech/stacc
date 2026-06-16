@@ -186,7 +186,7 @@ fn bare_checkout_with_json_errors() {
     let out = stacc(p, &["checkout", "--format", "json"]);
     assert!(!out.status.success());
     assert!(
-        String::from_utf8_lossy(&out.stdout).contains(r#""error":"usage""#),
+        String::from_utf8_lossy(&out.stdout).contains(r#""type":"usage""#),
         "got: {}",
         String::from_utf8_lossy(&out.stdout)
     );

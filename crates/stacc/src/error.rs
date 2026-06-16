@@ -6,6 +6,7 @@
 
 use miette::Diagnostic;
 use serde_json::{json, Value};
+use stacc_forge::SCHEMA_VERSION;
 use thiserror::Error;
 
 #[derive(Debug, Error, Diagnostic)]
@@ -111,28 +112,51 @@ impl Error {
     /// The machine-readable JSON form, used by `--format json`.
     pub fn as_json(&self) -> Value {
         match self {
-            Error::Config(err) => json!({ "error": "config", "message": err.to_string() }),
-            Error::State(err) => json!({ "error": "state", "message": err.to_string() }),
-            Error::Contention(msg) => json!({ "error": "contention", "message": msg }),
-            Error::Git(err) => json!({ "error": "git", "message": err.to_string() }),
-            Error::Github(err) => json!({ "error": "github", "message": err.to_string() }),
+            Error::Config(err) => {
+                json!({ "type": "config", "message": err.to_string(), "schema_version": SCHEMA_VERSION })
+            }
+            Error::State(err) => {
+                json!({ "type": "state", "message": err.to_string(), "schema_version": SCHEMA_VERSION })
+            }
+            Error::Contention(msg) => {
+                json!({ "type": "contention", "message": msg, "schema_version": SCHEMA_VERSION })
+            }
+            Error::Git(err) => {
+                json!({ "type": "git", "message": err.to_string(), "schema_version": SCHEMA_VERSION })
+            }
+            // The forge error carries the neutral type/reason envelope (its body
+            // was scrubbed in U4); no `github` discriminator survives, and the
+            // envelope already stamps `schema_version`.
+            Error::Github(err) => {
+                let envelope = stacc_forge::ForgeError::from(err).to_envelope();
+                serde_json::to_value(&envelope).unwrap_or_else(|_| {
+                    json!({ "type": "unexpected", "message": err.to_string(), "schema_version": SCHEMA_VERSION })
+                })
+            }
             Error::Conflict { branch } => json!({
-                "error": "conflict",
+                "type": "conflict",
                 "branch": branch,
                 "continue": "stacc continue",
                 "abort": "stacc abort",
+                "schema_version": SCHEMA_VERSION,
             }),
-            Error::Usage(msg) => json!({ "error": "usage", "message": msg }),
-            Error::NotInProgress(msg) => json!({ "error": "not_in_progress", "message": msg }),
+            Error::Usage(msg) => {
+                json!({ "type": "usage", "message": msg, "schema_version": SCHEMA_VERSION })
+            }
+            Error::NotInProgress(msg) => {
+                json!({ "type": "not_in_progress", "message": msg, "schema_version": SCHEMA_VERSION })
+            }
             Error::Ambiguous { choices } => json!({
-                "error": "ambiguous",
+                "type": "ambiguous",
                 "message": format!("multiple choices: {}; check out one directly", choices.join(", ")),
                 "choices": choices,
+                "schema_version": SCHEMA_VERSION,
             }),
             Error::WorktreeConflict { branch, worktree } => json!({
-                "error": "worktree_conflict",
+                "type": "worktree_conflict",
                 "branch": branch,
                 "worktree": worktree,
+                "schema_version": SCHEMA_VERSION,
             }),
         }
     }
@@ -146,7 +170,8 @@ mod tests {
     fn contention_maps_to_its_own_discriminator() {
         let err: Error = stacc_state::StateError::Contention { attempts: 5 }.into();
         assert!(matches!(err, Error::Contention(_)));
-        assert_eq!(err.as_json()["error"].as_str(), Some("contention"));
+        assert_eq!(err.as_json()["type"].as_str(), Some("contention"));
+        assert_eq!(err.as_json()["schema_version"].as_u64(), Some(u64::from(SCHEMA_VERSION)));
     }
 
     #[test]
@@ -154,6 +179,6 @@ mod tests {
         let json_err = serde_json::from_str::<i32>("not a number").unwrap_err();
         let err: Error = stacc_state::StateError::Json(json_err).into();
         assert!(matches!(err, Error::State(_)));
-        assert_eq!(err.as_json()["error"].as_str(), Some("state"));
+        assert_eq!(err.as_json()["type"].as_str(), Some("state"));
     }
 }

@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use stacc_core::ops;
+use stacc_forge::SCHEMA_VERSION;
 use stacc_git::Git;
 use stacc_github::{CheckRollup, GitHub, PrChecks, PrState, ReviewDecision};
 use stacc_state::{BranchState, PullRequest, RepoConfig, StateStore};
@@ -124,7 +125,10 @@ pub fn log(args: &LogArgs, format: OutputFormat, color: ColorChoice) -> Result<(
     // long form: a pure git pass-through; JSON is a documented no-op.
     if args.form() == Some(LogForm::Long) {
         if format == OutputFormat::Json {
-            println!("{}", json!({ "trunk": trunk, "form": "long" }));
+            println!(
+                "{}",
+                json!({ "trunk": trunk, "form": "long", "schema_version": SCHEMA_VERSION })
+            );
             return Ok(());
         }
         let tips = tracked_tips(&visible, &state.branches);
@@ -178,7 +182,11 @@ pub fn log(args: &LogArgs, format: OutputFormat, color: ColorChoice) -> Result<(
     match format {
         OutputFormat::Json => {
             let stack = stack_json(&trunk, &children, branches, &git, &pr_status, &deleted);
-            println!("{}", json!({ "trunk": trunk, "stack": stack }));
+            super::print_compact(json!({
+                "trunk": trunk,
+                "stack": stack,
+                "schema_version": SCHEMA_VERSION,
+            }));
         }
         OutputFormat::Pretty => {
             let palette = Palette::build(color_enabled(color), branches, &visible, &trunk);
@@ -731,20 +739,25 @@ fn check_label(checks: CheckRollup) -> &'static str {
     }
 }
 
-/// JSON spellings of the rollup values (snake_case, like `pr_state_str`).
-fn review_str(review: ReviewDecision) -> &'static str {
+/// Neutral JSON spelling of the review state, `no_review` when GitHub reports
+/// none; mirrors the forge `ReviewState` values.
+fn review_state_str(review: Option<ReviewDecision>) -> &'static str {
     match review {
-        ReviewDecision::Approved => "approved",
-        ReviewDecision::ChangesRequested => "changes_requested",
-        ReviewDecision::ReviewRequired => "review_required",
+        Some(ReviewDecision::Approved) => "approved",
+        Some(ReviewDecision::ChangesRequested) => "changes_requested",
+        Some(ReviewDecision::ReviewRequired) => "review_required",
+        None => "no_review",
     }
 }
 
-fn check_str(checks: CheckRollup) -> &'static str {
+/// Neutral JSON spelling of the checks state, `no_checks` when GitHub reports
+/// none; mirrors the forge `ChecksState` values.
+fn checks_state_str(checks: Option<CheckRollup>) -> &'static str {
     match checks {
-        CheckRollup::Pass => "pass",
-        CheckRollup::Fail => "fail",
-        CheckRollup::Pending => "pending",
+        Some(CheckRollup::Pass) => "passed",
+        Some(CheckRollup::Fail) => "failed",
+        Some(CheckRollup::Pending) => "pending",
+        None => "no_checks",
     }
 }
 
@@ -942,23 +955,23 @@ fn stack_json(
         .map(|kid| {
             let is_deleted = deleted.contains(kid);
             let live = pr_status.get(kid).and_then(Option::as_ref);
-            let pr = branches.get(kid).and_then(|b| b.pr.as_ref()).map(|p| {
+            let change = branches.get(kid).and_then(|b| b.pr.as_ref()).map(|p| {
                 json!({
                     "number": p.number,
                     "url": p.url,
-                    "status": live.map(|l| super::pr_state_str(l.pr.state)),
+                    "state": live.map(|l| super::pr_state_str(l.pr.state)),
                     "title": live.map(|l| l.pr.title.clone()),
                     "draft": live.map(|l| l.pr.draft),
-                    "mergeable_state": live.and_then(|l| l.pr.mergeable_state.clone()),
-                    "review": live.and_then(|l| l.checks.review).map(review_str),
-                    "checks": live.and_then(|l| l.checks.checks).map(check_str),
+                    "readiness": live.map(|l| super::readiness_str(l.pr.mergeable_state.as_deref())),
+                    "review": live.map(|l| review_state_str(l.checks.review)),
+                    "checks": live.map(|l| checks_state_str(l.checks.checks)),
                 })
             });
             let commit = if is_deleted { None } else { commit_json(git, kid, node) };
             let mut value = json!({
                 "name": kid,
                 "base": node,
-                "pr": pr,
+                "change": change,
                 "commit": commit,
                 "children": stack_json(kid, children, branches, git, pr_status, deleted),
             });
@@ -1020,6 +1033,59 @@ fn print_untracked(git: &Git, branches: &BTreeMap<String, BranchState>, trunk: &
 mod tests {
     use super::*;
     use stacc_state::Base;
+
+    /// The CLI's neutral JSON spellings must stay byte-identical to the forge
+    /// model's serde, since both feed the same agent-facing schema while the CLI
+    /// has not yet been routed through `dyn Forge` (STA-109). This pins the two
+    /// mapping sources together so a forge-model serde change cannot drift the
+    /// CLI output silently.
+    #[test]
+    fn neutral_strings_match_the_forge_model_serde() {
+        use stacc_forge::{ChecksState, MergeReadiness, ReviewState};
+        fn wire(value: &serde_json::Value) -> String {
+            value.as_str().unwrap().to_string()
+        }
+        let readiness_str = super::super::readiness_str;
+        assert_eq!(
+            review_state_str(Some(ReviewDecision::Approved)),
+            wire(&serde_json::to_value(ReviewState::Approved).unwrap())
+        );
+        assert_eq!(
+            review_state_str(Some(ReviewDecision::ChangesRequested)),
+            wire(&serde_json::to_value(ReviewState::ChangesRequested).unwrap())
+        );
+        assert_eq!(
+            review_state_str(Some(ReviewDecision::ReviewRequired)),
+            wire(&serde_json::to_value(ReviewState::ReviewRequired).unwrap())
+        );
+        assert_eq!(review_state_str(None), wire(&serde_json::to_value(ReviewState::NoReview).unwrap()));
+        assert_eq!(
+            checks_state_str(Some(CheckRollup::Pass)),
+            wire(&serde_json::to_value(ChecksState::Passed).unwrap())
+        );
+        assert_eq!(
+            checks_state_str(Some(CheckRollup::Fail)),
+            wire(&serde_json::to_value(ChecksState::Failed).unwrap())
+        );
+        assert_eq!(
+            checks_state_str(Some(CheckRollup::Pending)),
+            wire(&serde_json::to_value(ChecksState::Pending).unwrap())
+        );
+        assert_eq!(checks_state_str(None), wire(&serde_json::to_value(ChecksState::NoChecks).unwrap()));
+        // readiness_str maps GitHub's mergeable_state strings; each output must be
+        // a valid MergeReadiness wire value.
+        assert_eq!(readiness_str(Some("clean")), wire(&serde_json::to_value(MergeReadiness::Ready).unwrap()));
+        assert_eq!(
+            readiness_str(Some("dirty")),
+            wire(&serde_json::to_value(MergeReadiness::Conflicted).unwrap())
+        );
+        assert_eq!(readiness_str(Some("behind")), wire(&serde_json::to_value(MergeReadiness::Behind).unwrap()));
+        assert_eq!(
+            readiness_str(Some("blocked")),
+            wire(&serde_json::to_value(MergeReadiness::Blocked).unwrap())
+        );
+        assert_eq!(readiness_str(None), wire(&serde_json::to_value(MergeReadiness::Unknown).unwrap()));
+    }
 
     /// Branch map from (name, base) pairs.
     fn stack(pairs: &[(&str, &str)]) -> BTreeMap<String, BranchState> {

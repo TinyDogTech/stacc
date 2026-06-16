@@ -221,7 +221,7 @@ fn fold_refuses_a_branch_not_restacked_onto_its_parent() {
     let out = stacc(p, &["fold", "--format", "json"]);
     assert!(!out.status.success(), "fold must refuse: {:?}", json(&out));
     let v = json(&out);
-    assert_eq!(v["error"], "usage", "structured refusal: {v}");
+    assert_eq!(v["type"], "usage", "structured refusal: {v}");
     let msg = v["message"].as_str().expect("message");
     assert!(
         msg.contains("restack"),
@@ -331,7 +331,7 @@ fn abort_of_a_conflicted_fold_restores_the_pre_fold_state() {
     let out = stacc(p, &["fold", "--format", "json"]);
     assert!(!out.status.success(), "expected a conflict on c");
     let v = json(&out);
-    assert_eq!(v["error"], "conflict", "structured conflict: {v}");
+    assert_eq!(v["type"], "conflict", "structured conflict: {v}");
     assert_eq!(v["branch"], "c");
     let cont = std::fs::read_to_string(p.join(".git/stacc-continue.json")).expect("continuation");
     assert!(cont.contains(r#""op":"fold""#), "got: {cont}");
@@ -422,7 +422,7 @@ fn fold_refuses_when_the_parent_is_checked_out_in_another_worktree() {
     assert!(!out.status.success(), "fold must refuse: {:?}", json(&out));
     let v = json(&out);
     assert_eq!(
-        v["error"], "worktree_conflict",
+        v["type"], "worktree_conflict",
         "refused with the worktree_conflict discriminator: {v}"
     );
     assert_eq!(v["branch"], "a", "names the parent: {v}");

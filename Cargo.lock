@@ -2217,6 +2217,7 @@ dependencies = [
  "shlex",
  "stacc-config",
  "stacc-core",
+ "stacc-forge",
  "stacc-git",
  "stacc-github",
  "stacc-state",
