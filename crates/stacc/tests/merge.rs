@@ -1077,6 +1077,40 @@ fn merge_aborts_when_an_adoption_lookup_fails() {
 }
 
 #[test]
+fn forge_error_envelope_is_neutral_schema_versioned_and_scrubbed() {
+    let tmp = repo();
+    let p = tmp.path();
+    run_git(p, &["checkout", "-q", "-b", "feature"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "f1"]);
+    track_no_pr(p, "feature", "main");
+
+    // The adoption lookup is rejected for auth, and the response body echoes a
+    // secret alongside GitHub's message.
+    let server = MockServer::start();
+    server.mock(|w, t| {
+        w.method(Method::GET)
+            .path("/repos/stacc-sandbox/example/pulls")
+            .query_param("head", "stacc-sandbox:feature");
+        t.status(401)
+            .json_body(serde_json::json!({ "message": "Bad credentials", "token": "ghp_SECRET" }));
+    });
+
+    let out = stacc_env(
+        p,
+        &["merge", "--offline", "--format", "json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(!out.status.success());
+    let s = String::from_utf8_lossy(&out.stdout);
+    let v: serde_json::Value = serde_json::from_str(&s).unwrap_or_else(|_| panic!("json error: {s}"));
+    // Neutral error type (no `github`/`forge` discriminator), schema-versioned.
+    assert_eq!(v["type"], "forge_auth", "got: {s}");
+    assert_eq!(v["schema_version"], 2, "got: {s}");
+    // R18: the response body's secret never reaches the error envelope.
+    assert!(!s.contains("ghp_SECRET"), "token leaked into error: {s}");
+}
+
+#[test]
 fn merge_retargets_an_adopted_mid_chain_pr_to_the_trunk() {
     let tmp = repo();
     let p = tmp.path();

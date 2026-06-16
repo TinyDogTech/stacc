@@ -206,8 +206,9 @@ stable contract; the exact per-command JSON shapes live in `stacc <command>
 --help` and `--format json`.
 
 - **Always pass `--format json`.** Every command returns a JSON object on
-  success, each stamped with `"schema_version": 2`. For example, `stacc status
-  --format json`:
+  success. The forge-facing commands (`submit`, `merge`, `sync`, `log`, `info`,
+  `status`, `pr`) and every error stamp it with `"schema_version": 2`, which
+  identifies the v2 schema. For example, `stacc status --format json`:
 
   ```json
   {"branch":"add-ui","base":"add-api","change":null,"children":[],"schema_version":2}
@@ -216,7 +217,8 @@ stable contract; the exact per-command JSON shapes live in `stacc <command>
   Field names are forge-neutral: a GitHub pull request and a GitLab merge request
   both appear under `change` with the same shape, so an agent consumes one schema
   regardless of forge. (Human `pretty` output still says "PR" or "MR" as
-  appropriate.) Treat output without a `schema_version` as pre-v2 and untrusted.
+  appropriate.) Where `schema_version` is present, a value other than `2` is a
+  schema an older reader should not assume it understands.
 
 - **Pass `--no-interactive` to never block.** Any command that would prompt a
   human instead fails with a structured error, so an agent never hangs on a TTY.
@@ -234,7 +236,8 @@ stable contract; the exact per-command JSON shapes live in `stacc <command>
   | `git` / `state` / `config` / `contention` | A failure from that subsystem |
   | `forge_auth` | No forge token, or forge authentication failed |
   | `forge_rejected` | The forge refused a merge; a structured `reason` carries the cause |
-  | `not_found` / `rate_limited` / `transport` / `unexpected` | A forge call failed in that way |
+  | `forge_conflict` | A conflicting state on the forge (for example a 409); distinct from the rebase `conflict` above |
+  | `not_found` / `rate_limited` / `transport` / `unsupported` / `unexpected` | A forge call failed in that way |
 
   Forge errors carry no `forge` field, so an agent branches on `type`, never on
   which forge it is talking to. A `forge_rejected` error adds a structured

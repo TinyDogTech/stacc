@@ -1033,6 +1033,59 @@ mod tests {
     use super::*;
     use stacc_state::Base;
 
+    /// The CLI's neutral JSON spellings must stay byte-identical to the forge
+    /// model's serde, since both feed the same agent-facing schema while the CLI
+    /// has not yet been routed through `dyn Forge` (STA-109). This pins the two
+    /// mapping sources together so a forge-model serde change cannot drift the
+    /// CLI output silently.
+    #[test]
+    fn neutral_strings_match_the_forge_model_serde() {
+        use stacc_forge::{ChecksState, MergeReadiness, ReviewState};
+        fn wire(value: &serde_json::Value) -> String {
+            value.as_str().unwrap().to_string()
+        }
+        let readiness_str = super::super::readiness_str;
+        assert_eq!(
+            review_state_str(Some(ReviewDecision::Approved)),
+            wire(&serde_json::to_value(ReviewState::Approved).unwrap())
+        );
+        assert_eq!(
+            review_state_str(Some(ReviewDecision::ChangesRequested)),
+            wire(&serde_json::to_value(ReviewState::ChangesRequested).unwrap())
+        );
+        assert_eq!(
+            review_state_str(Some(ReviewDecision::ReviewRequired)),
+            wire(&serde_json::to_value(ReviewState::ReviewRequired).unwrap())
+        );
+        assert_eq!(review_state_str(None), wire(&serde_json::to_value(ReviewState::NoReview).unwrap()));
+        assert_eq!(
+            checks_state_str(Some(CheckRollup::Pass)),
+            wire(&serde_json::to_value(ChecksState::Passed).unwrap())
+        );
+        assert_eq!(
+            checks_state_str(Some(CheckRollup::Fail)),
+            wire(&serde_json::to_value(ChecksState::Failed).unwrap())
+        );
+        assert_eq!(
+            checks_state_str(Some(CheckRollup::Pending)),
+            wire(&serde_json::to_value(ChecksState::Pending).unwrap())
+        );
+        assert_eq!(checks_state_str(None), wire(&serde_json::to_value(ChecksState::NoChecks).unwrap()));
+        // readiness_str maps GitHub's mergeable_state strings; each output must be
+        // a valid MergeReadiness wire value.
+        assert_eq!(readiness_str(Some("clean")), wire(&serde_json::to_value(MergeReadiness::Ready).unwrap()));
+        assert_eq!(
+            readiness_str(Some("dirty")),
+            wire(&serde_json::to_value(MergeReadiness::Conflicted).unwrap())
+        );
+        assert_eq!(readiness_str(Some("behind")), wire(&serde_json::to_value(MergeReadiness::Behind).unwrap()));
+        assert_eq!(
+            readiness_str(Some("blocked")),
+            wire(&serde_json::to_value(MergeReadiness::Blocked).unwrap())
+        );
+        assert_eq!(readiness_str(None), wire(&serde_json::to_value(MergeReadiness::Unknown).unwrap()));
+    }
+
     /// Branch map from (name, base) pairs.
     fn stack(pairs: &[(&str, &str)]) -> BTreeMap<String, BranchState> {
         pairs

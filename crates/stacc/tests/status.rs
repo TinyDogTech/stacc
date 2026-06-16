@@ -76,6 +76,7 @@ fn status_tracked_without_pr() {
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains(r#""base":"main""#), "got: {s}");
     assert!(s.contains(r#""change":null"#), "got: {s}");
+    assert!(s.contains(r#""schema_version":2"#), "v2 schema stamp: {s}");
 }
 
 #[test]

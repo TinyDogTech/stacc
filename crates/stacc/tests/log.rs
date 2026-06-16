@@ -308,8 +308,9 @@ fn log_json_includes_commit_object_and_null_pr() {
     let s = String::from_utf8_lossy(&stacc(p, &["log", "--format", "json"]).stdout).into_owned();
     assert!(s.contains(r#""name":"a""#), "got: {s}");
     assert!(s.contains(r#""subject":"a1""#), "commit object expected: {s}");
-    // pr is an object-or-null; with no recorded PR it is null.
-    assert!(s.contains(r#""change":null"#), "pr should be null without a PR: {s}");
+    // change is an object-or-null; with no recorded PR it is null.
+    assert!(s.contains(r#""change":null"#), "change should be null without a PR: {s}");
+    assert!(s.contains(r#""schema_version":2"#), "v2 schema stamp: {s}");
 }
 
 #[test]

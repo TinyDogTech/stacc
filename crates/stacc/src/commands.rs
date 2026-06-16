@@ -498,7 +498,7 @@ pub(crate) fn mergeable_hint(state: Option<&str>) -> Option<&str> {
 /// stacc surfaces are named; everything else, including absence and GitHub's
 /// not-yet-computed `unknown`, is `"unknown"`. Mirrors the forge adapter's
 /// `readiness` mapping; the two collapse once the CLI holds neutral `Change`
-/// values directly (U6).
+/// values directly (the forge-wiring unit, STA-109).
 pub(crate) fn readiness_str(mergeable_state: Option<&str>) -> &'static str {
     match mergeable_state {
         Some("clean") => "ready",
