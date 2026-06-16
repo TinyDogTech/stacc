@@ -171,7 +171,7 @@ fn split_by_commit_wrong_name_count_is_a_usage_error() {
     let out = stacc(p, &["split", "n1", "--format", "json"]);
     assert!(!out.status.success(), "must refuse: {:?}", json(&out));
     let v = json(&out);
-    assert_eq!(v["error"], "usage", "structured refusal: {v}");
+    assert_eq!(v["type"], "usage", "structured refusal: {v}");
     let msg = v["message"].as_str().expect("message");
     assert!(msg.contains("exactly 2"), "names the required count: {msg}");
 
@@ -184,7 +184,7 @@ fn split_by_commit_wrong_name_count_is_a_usage_error() {
     let out = stacc(p, &["split", "--format", "json"]);
     assert!(!out.status.success(), "bare split must refuse: {:?}", json(&out));
     let v = json(&out);
-    assert_eq!(v["error"], "usage");
+    assert_eq!(v["type"], "usage");
     assert!(
         v["message"].as_str().expect("message").contains("2 branch name"),
         "names the required count: {v}"
@@ -201,7 +201,7 @@ fn split_by_commit_duplicate_or_existing_name_creates_zero_refs() {
     let out = stacc(p, &["split", "n1", "n1", "--format", "json"]);
     assert!(!out.status.success(), "must refuse: {:?}", json(&out));
     let v = json(&out);
-    assert_eq!(v["error"], "usage");
+    assert_eq!(v["type"], "usage");
     assert!(
         v["message"].as_str().expect("message").contains("duplicate"),
         "names the duplicate: {v}"
@@ -215,7 +215,7 @@ fn split_by_commit_duplicate_or_existing_name_creates_zero_refs() {
     let out = stacc(p, &["split", "exists", "n2", "--format", "json"]);
     assert!(!out.status.success(), "must refuse: {:?}", json(&out));
     let v = json(&out);
-    assert_eq!(v["error"], "usage");
+    assert_eq!(v["type"], "usage");
     assert!(
         v["message"].as_str().expect("message").contains("already exists"),
         "names the collision: {v}"
@@ -236,7 +236,7 @@ fn split_by_commit_rejects_mixing_names_with_by_file() {
     let out = stacc(p, &["split", "n1", "--by-file", "src=code", "--format", "json"]);
     assert!(!out.status.success(), "must refuse: {:?}", json(&out));
     let v = json(&out);
-    assert_eq!(v["error"], "usage");
+    assert_eq!(v["type"], "usage");
     assert!(
         v["message"].as_str().expect("message").contains("not both"),
         "names the exclusivity: {v}"
@@ -374,7 +374,7 @@ fn split_by_file_orphan_path_is_a_structured_error() {
     let out = stacc(p, &["split", "--by-file", "src=code", "--format", "json"]);
     assert!(!out.status.success(), "must refuse: {:?}", json(&out));
     let v = json(&out);
-    assert_eq!(v["error"], "usage", "structured refusal: {v}");
+    assert_eq!(v["type"], "usage", "structured refusal: {v}");
     let msg = v["message"].as_str().expect("message");
     assert!(msg.contains("other.txt"), "lists the orphan path: {msg}");
 
@@ -401,7 +401,7 @@ fn split_by_file_refuses_a_dirty_working_tree() {
     let out = stacc(p, &["split", "--by-file", "src=code", "--format", "json"]);
     assert!(!out.status.success(), "must refuse: {:?}", json(&out));
     let v = json(&out);
-    assert_eq!(v["error"], "usage", "structured refusal: {v}");
+    assert_eq!(v["type"], "usage", "structured refusal: {v}");
     assert!(
         v["message"].as_str().expect("message").contains("uncommitted"),
         "names the dirty tree: {v}"
@@ -437,7 +437,7 @@ fn split_by_file_refuses_when_a_child_is_in_another_worktree() {
     assert!(!out.status.success(), "must refuse: {:?}", json(&out));
     let v = json(&out);
     assert_eq!(
-        v["error"], "worktree_conflict",
+        v["type"], "worktree_conflict",
         "refused with the worktree_conflict discriminator: {v}"
     );
     assert_eq!(v["branch"], "c", "names the borrowed branch: {v}");

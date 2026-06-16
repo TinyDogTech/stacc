@@ -9,6 +9,7 @@
 
 use serde_json::json;
 use stacc_core::ops;
+use stacc_forge::SCHEMA_VERSION;
 use stacc_git::{CommitInfo, DiffStat, Git};
 use stacc_github::{GitHub, PrState};
 use stacc_state::{BranchState, RepoConfig, StateStore};
@@ -65,14 +66,20 @@ pub fn info(args: &InfoArgs, format: OutputFormat) -> Result<(), Error> {
     // error: scripts probe branches with `info` (mirrors `status`).
     if branch == repo.trunk {
         match format {
-            OutputFormat::Json => println!("{}", json!({ "branch": branch, "trunk": true })),
+            OutputFormat::Json => println!(
+                "{}",
+                json!({ "branch": branch, "trunk": true, "schema_version": SCHEMA_VERSION })
+            ),
             OutputFormat::Pretty => println!("{branch} (trunk)"),
         }
         return Ok(());
     }
     let Some(branch_state) = state.branches.get(&branch) else {
         match format {
-            OutputFormat::Json => println!("{}", json!({ "branch": branch, "tracked": false })),
+            OutputFormat::Json => println!(
+                "{}",
+                json!({ "branch": branch, "tracked": false, "schema_version": SCHEMA_VERSION })
+            ),
             OutputFormat::Pretty => println!("{branch} (not tracked)"),
         }
         return Ok(());
@@ -164,14 +171,14 @@ fn fetch_pr(git: &Git, repo: &RepoConfig, number: u64) -> Option<stacc_github::P
 /// The JSON object: every pretty field is present; the heavy fields (`diff`,
 /// `patch`, the PR body and `pr_fetch`) appear only when their flag was set.
 fn render_json(d: &Details) {
-    let pr = d.pr.as_ref().map(|pr| {
+    let change = d.pr.as_ref().map(|pr| {
         let mut obj = json!({ "number": pr.number, "url": pr.url });
         if let Some(live) = &d.pr_live {
             obj["title"] = json!(live.title);
             obj["state"] = json!(super::pr_state_str(live.state));
             obj["body"] = json!(live.body);
             obj["draft"] = json!(live.draft);
-            obj["mergeable_state"] = json!(live.mergeable_state);
+            obj["readiness"] = json!(super::readiness_str(live.mergeable_state.as_deref()));
         }
         obj
     });
@@ -190,7 +197,8 @@ fn render_json(d: &Details) {
         "diffstat": d.diffstat.map(|s| {
             json!({ "files": s.files, "insertions": s.insertions, "deletions": s.deletions })
         }),
-        "pr": pr,
+        "change": change,
+        "schema_version": SCHEMA_VERSION,
     });
     if let Some(diff) = &d.diff {
         obj["diff"] = json!(diff);
@@ -199,7 +207,7 @@ fn render_json(d: &Details) {
         obj["patch"] = json!(patch);
     }
     if let Some(fetch) = d.pr_fetch {
-        obj["pr_fetch"] = json!(fetch);
+        obj["change_fetch"] = json!(fetch);
     }
     println!("{obj}");
 }

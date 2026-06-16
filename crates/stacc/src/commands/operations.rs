@@ -6,6 +6,7 @@ use std::path::Path;
 
 use serde_json::{json, Value};
 use stacc_core::{ops, recovery};
+use stacc_forge::SCHEMA_VERSION;
 use stacc_git::{Git, Hunk, HunkKind, MergeEquivalence, RebaseError};
 use stacc_github::{GitHub, GitHubError, PrState, PullRequestUpdate};
 use stacc_state::{
@@ -1652,6 +1653,7 @@ fn report_merged(format: OutputFormat, branch: &str, evidence: &str, tip: &str) 
                 "branch": branch,
                 "evidence": evidence,
                 "dropped_tip": tip,
+                "schema_version": SCHEMA_VERSION,
             })
         ),
         OutputFormat::Pretty => println!(
@@ -1978,7 +1980,7 @@ fn merge_stack(
                         }
                     };
                     if !live.ready() {
-                        stopped = Some(json!({ "kind": "not_ready", "branch": branch, "number": pr.number, "mergeable_state": live.mergeable_state, "reason": "not cleanly mergeable" }));
+                        stopped = Some(json!({ "kind": "not_ready", "branch": branch, "number": pr.number, "readiness": super::readiness_str(live.mergeable_state.as_deref()), "reason": "not cleanly mergeable" }));
                         break;
                     }
                     match github.merge_pull_request(owner, repo_name, pr.number) {
@@ -2127,6 +2129,7 @@ fn report_merge(
                     "synced": synced,
                     "cleaned": cleaned,
                     "cleanup_skipped": cleanup_skipped_json(cleanup_skipped),
+                    "schema_version": SCHEMA_VERSION,
                 })
             );
         }
@@ -3136,6 +3139,7 @@ fn report_sync(
                     "cleanup_skipped": cleanup_skipped_json(cleanup_skipped),
                     "detection_skipped": detection_skipped,
                     "likely_merged": likely_list,
+                    "schema_version": SCHEMA_VERSION,
                 })
             );
         }

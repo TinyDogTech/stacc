@@ -100,11 +100,11 @@ fn info_reports_the_tracked_branch_shape() {
     assert_eq!(v["diffstat"]["files"], 1);
     assert_eq!(v["diffstat"]["insertions"], 2);
     assert_eq!(v["diffstat"]["deletions"], 0);
-    assert!(v["pr"].is_null());
+    assert!(v["change"].is_null());
     // Heavy fields are absent without their flags.
     assert!(v.get("diff").is_none(), "got: {v}");
     assert!(v.get("patch").is_none(), "got: {v}");
-    assert!(v.get("pr_fetch").is_none(), "got: {v}");
+    assert!(v.get("change_fetch").is_none(), "got: {v}");
 }
 
 #[test]
@@ -213,11 +213,11 @@ fn info_reports_the_recorded_pr() {
     seed_pr(tmp.path(), "feature", 5, Some(url));
 
     let v = info_json(tmp.path(), &["info"]);
-    assert_eq!(v["pr"]["number"], 5);
-    assert_eq!(v["pr"]["url"], url);
+    assert_eq!(v["change"]["number"], 5);
+    assert_eq!(v["change"]["url"], url);
     // Without --body there is no fetch and no body fields.
-    assert!(v["pr"].get("body").is_none(), "got: {v}");
-    assert!(v.get("pr_fetch").is_none(), "got: {v}");
+    assert!(v["change"].get("body").is_none(), "got: {v}");
+    assert!(v.get("change_fetch").is_none(), "got: {v}");
 }
 
 #[test]
@@ -247,13 +247,13 @@ fn info_body_fetches_the_pr_title_state_and_body() {
         String::from_utf8_lossy(&out.stderr)
     );
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(v["pr"]["number"], 5);
-    assert_eq!(v["pr"]["title"], "feat: add f");
-    assert_eq!(v["pr"]["state"], "open");
-    assert_eq!(v["pr"]["body"], "the body");
-    assert_eq!(v["pr"]["draft"], true);
-    assert_eq!(v["pr"]["mergeable_state"], "behind");
-    assert_eq!(v["pr_fetch"], "ok");
+    assert_eq!(v["change"]["number"], 5);
+    assert_eq!(v["change"]["title"], "feat: add f");
+    assert_eq!(v["change"]["state"], "open");
+    assert_eq!(v["change"]["body"], "the body");
+    assert_eq!(v["change"]["draft"], true);
+    assert_eq!(v["change"]["readiness"], "behind");
+    assert_eq!(v["change_fetch"], "ok");
 
     // The pretty form tags the same live facts on the PR line.
     let out = stacc_env(
@@ -283,9 +283,9 @@ fn info_body_fetch_failure_is_not_fatal() {
     );
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     // The recorded fields survive; only the fetch is marked failed.
-    assert_eq!(v["pr"]["number"], 5);
-    assert!(v["pr"].get("body").is_none(), "got: {v}");
-    assert_eq!(v["pr_fetch"], "failed");
+    assert_eq!(v["change"]["number"], 5);
+    assert!(v["change"].get("body").is_none(), "got: {v}");
+    assert_eq!(v["change_fetch"], "failed");
 }
 
 #[test]

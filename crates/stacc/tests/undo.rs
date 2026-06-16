@@ -196,7 +196,7 @@ fn undo_beyond_retention_is_a_structured_error() {
     let out = stacc(p, &["undo", "--steps", "100", "--format", "json"]);
     assert!(!out.status.success(), "should refuse beyond retention");
     let v = json(&out);
-    assert_eq!(v["error"], "usage");
+    assert_eq!(v["type"], "usage");
     assert!(
         v["message"].as_str().unwrap().contains("50"),
         "names the retention bound: {v}"

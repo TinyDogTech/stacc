@@ -242,7 +242,7 @@ fn delete_refuses_an_unmerged_branch_and_force_overrides() {
     let out = stacc(p, &["delete", "b", "--format", "json"]);
     assert!(!out.status.success(), "must refuse: {:?}", json(&out));
     let v = json(&out);
-    assert_eq!(v["error"], "usage", "structured refusal: {v}");
+    assert_eq!(v["type"], "usage", "structured refusal: {v}");
     let msg = v["message"].as_str().expect("message");
     assert!(msg.contains("--force"), "the error names --force: {msg}");
     assert!(
@@ -290,7 +290,7 @@ fn delete_refuses_when_the_open_pr_state_says_open() {
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(!out.status.success(), "an open PR is not safe: {:?}", json(&out));
-    assert_eq!(json(&out)["error"], "usage");
+    assert_eq!(json(&out)["type"], "usage");
     get.assert();
     assert!(branch_ref_exists(p, "b"), "nothing mutated");
 }
@@ -355,7 +355,7 @@ fn delete_treats_an_unfetchable_pr_state_as_unsafe() {
         "unknown PR state must refuse: {:?}",
         json(&out)
     );
-    assert_eq!(json(&out)["error"], "usage");
+    assert_eq!(json(&out)["type"], "usage");
     assert!(branch_ref_exists(p, "b"), "nothing mutated");
     assert!(log_json(p).contains(r#""name":"b""#), "b still tracked");
 }
@@ -450,7 +450,7 @@ fn delete_refuses_the_trunk() {
     let out = stacc(p, &["delete", "main", "--format", "json"]);
     assert!(!out.status.success());
     let v = json(&out);
-    assert_eq!(v["error"], "usage");
+    assert_eq!(v["type"], "usage");
     assert!(
         v["message"].as_str().expect("message").contains("trunk"),
         "names the trunk: {v}"
@@ -466,7 +466,7 @@ fn delete_refuses_an_untracked_branch_with_a_raw_git_hint() {
     let out = stacc(p, &["delete", "loose", "--format", "json"]);
     assert!(!out.status.success());
     let v = json(&out);
-    assert_eq!(v["error"], "usage");
+    assert_eq!(v["type"], "usage");
     let msg = v["message"].as_str().expect("message");
     assert!(
         msg.contains("git branch -D"),
@@ -523,7 +523,7 @@ fn delete_refuses_when_a_child_is_in_another_worktree() {
     assert!(!out.status.success(), "must refuse: {:?}", json(&out));
     let v = json(&out);
     assert_eq!(
-        v["error"], "worktree_conflict",
+        v["type"], "worktree_conflict",
         "refused with the worktree_conflict discriminator: {v}"
     );
     assert_eq!(v["branch"], "c", "names the borrowed child: {v}");

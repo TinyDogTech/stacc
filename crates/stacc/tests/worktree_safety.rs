@@ -86,7 +86,7 @@ fn modify_refuses_when_an_upstack_branch_is_checked_out_elsewhere() {
     let out = stacc(p, &["modify", "--format", "json"]);
 
     assert!(!out.status.success(), "modify must refuse");
-    assert_eq!(json(&out)["error"], "worktree_conflict");
+    assert_eq!(json(&out)["type"], "worktree_conflict");
     assert_eq!(json(&out)["branch"], "b");
     // `a` was not amended.
     assert_eq!(rev_parse(p, "a"), a_before, "a must be untouched");
@@ -107,7 +107,7 @@ fn move_refuses_when_a_subtree_branch_is_checked_out_elsewhere() {
     // before re-pointing anything.
     let out = stacc(p, &["move", "--onto", "side", "--format", "json"]);
     assert!(!out.status.success(), "move must refuse");
-    assert_eq!(json(&out)["error"], "worktree_conflict");
+    assert_eq!(json(&out)["type"], "worktree_conflict");
     assert_eq!(json(&out)["branch"], "b");
 }
 

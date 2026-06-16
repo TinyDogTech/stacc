@@ -130,7 +130,7 @@ fn unknown_key_is_a_structured_error_naming_the_valid_keys() {
         let out = stacc(tmp.path(), &args);
         assert!(!out.status.success(), "{sub:?} should fail");
         let v = json(&out);
-        assert_eq!(v["error"], "usage", "{sub:?}");
+        assert_eq!(v["type"], "usage", "{sub:?}");
         let msg = v["message"].as_str().unwrap();
         assert!(msg.contains("unknown config key `bogus`"), "got: {msg}");
         assert!(msg.contains("trunk"), "got: {msg}");

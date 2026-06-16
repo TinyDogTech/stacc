@@ -7,6 +7,7 @@ use serde_json::json;
 use stacc_config::{detect, read_file, resolve, Overrides};
 use stacc_core::ops;
 use stacc_git::Git;
+use stacc_forge::SCHEMA_VERSION;
 use stacc_github::{GitHub, NewPullRequest, PrState, PullRequestUpdate};
 use stacc_state::{Base, BranchState, PullRequest, RepoConfig, StateStore};
 
@@ -409,7 +410,10 @@ pub fn status(format: OutputFormat) -> Result<(), Error> {
 
     if branch == repo.trunk {
         match format {
-            OutputFormat::Json => println!("{}", json!({ "branch": branch, "trunk": true })),
+            OutputFormat::Json => println!(
+                "{}",
+                json!({ "branch": branch, "trunk": true, "schema_version": SCHEMA_VERSION })
+            ),
             OutputFormat::Pretty => println!("{branch} (trunk)"),
         }
         return Ok(());
@@ -417,7 +421,10 @@ pub fn status(format: OutputFormat) -> Result<(), Error> {
 
     let Some(branch_state) = state.branches.get(&branch) else {
         match format {
-            OutputFormat::Json => println!("{}", json!({ "branch": branch, "tracked": false })),
+            OutputFormat::Json => println!(
+                "{}",
+                json!({ "branch": branch, "tracked": false, "schema_version": SCHEMA_VERSION })
+            ),
             OutputFormat::Pretty => println!("{branch} (not tracked)"),
         }
         return Ok(());
@@ -445,7 +452,7 @@ pub fn status(format: OutputFormat) -> Result<(), Error> {
 
     match format {
         OutputFormat::Json => {
-            let pr_json =
+            let change_json =
                 pr.map(|(number, state)| json!({ "number": number, "state": pr_state_str(state) }));
             println!(
                 "{}",
@@ -453,7 +460,8 @@ pub fn status(format: OutputFormat) -> Result<(), Error> {
                     "branch": branch,
                     "base": branch_state.base.name,
                     "children": children,
-                    "pr": pr_json,
+                    "change": change_json,
+                    "schema_version": SCHEMA_VERSION,
                 })
             );
         }
@@ -483,6 +491,22 @@ pub(crate) fn pr_state_str(state: PrState) -> &'static str {
 /// show no hint.
 pub(crate) fn mergeable_hint(state: Option<&str>) -> Option<&str> {
     state.filter(|state| matches!(*state, "blocked" | "behind" | "dirty"))
+}
+
+/// Neutral readiness value for the agent-facing JSON, flattened from GitHub's
+/// `mergeable_state` string. Display-only and never gates. Only the states
+/// stacc surfaces are named; everything else, including absence and GitHub's
+/// not-yet-computed `unknown`, is `"unknown"`. Mirrors the forge adapter's
+/// `readiness` mapping; the two collapse once the CLI holds neutral `Change`
+/// values directly (U6).
+pub(crate) fn readiness_str(mergeable_state: Option<&str>) -> &'static str {
+    match mergeable_state {
+        Some("clean") => "ready",
+        Some("dirty") => "conflicted",
+        Some("behind") => "behind",
+        Some("blocked") => "blocked",
+        _ => "unknown",
+    }
 }
 
 /// `stacc pr`: print the current branch's recorded PR URL, and open it in a
@@ -520,7 +544,10 @@ pub fn pr(format: OutputFormat) -> Result<(), Error> {
 
     match format {
         OutputFormat::Json => {
-            println!("{}", json!({ "branch": branch, "number": pr.number, "url": url }));
+            println!(
+                "{}",
+                json!({ "branch": branch, "number": pr.number, "url": url, "schema_version": SCHEMA_VERSION })
+            );
         }
         OutputFormat::Pretty => {
             println!("{url}");
@@ -722,7 +749,10 @@ pub fn submit(args: &SubmitArgs, format: OutputFormat) -> Result<(), Error> {
                     entry
                 })
                 .collect();
-            println!("{}", json!({ "submitted": list, "skipped": skipped }));
+            println!(
+                "{}",
+                json!({ "submitted": list, "skipped": skipped, "schema_version": SCHEMA_VERSION })
+            );
         }
         OutputFormat::Pretty => {
             for (branch, action, number, url) in &results {

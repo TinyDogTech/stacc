@@ -21,6 +21,7 @@ serde_json = { workspace = true }
 shlex = { workspace = true }
 stacc-config = { path = "../stacc-config" }
 stacc-core = { path = "../stacc-core" }
+stacc-forge = { path = "../stacc-forge" }
 stacc-git = { path = "../stacc-git" }
 stacc-github = { path = "../stacc-github" }
 stacc-state = { path = "../stacc-state" }

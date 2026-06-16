@@ -75,7 +75,7 @@ fn status_tracked_without_pr() {
     assert!(out.status.success());
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains(r#""base":"main""#), "got: {s}");
-    assert!(s.contains(r#""pr":null"#), "got: {s}");
+    assert!(s.contains(r#""change":null"#), "got: {s}");
 }
 
 #[test]

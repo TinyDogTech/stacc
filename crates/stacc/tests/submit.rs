@@ -606,7 +606,7 @@ fn submit_on_a_non_github_remote_is_unavailable_with_a_forge_generic_message() {
     let out = stacc(p, &["submit", "--format", "json"]);
     assert!(!out.status.success(), "submit on a non-GitHub remote is unavailable");
     let s = String::from_utf8_lossy(&out.stdout);
-    assert!(s.contains(r#""error":"usage""#), "usage error, not a crash: {s}");
+    assert!(s.contains(r#""type":"usage""#), "usage error, not a crash: {s}");
     assert!(s.contains("open a change through your forge"), "forge-generic guidance: {s}");
     assert!(s.contains("origin"), "names the remote: {s}");
     // No forge detection and no raw remote URL: neither the host nor the path leak.

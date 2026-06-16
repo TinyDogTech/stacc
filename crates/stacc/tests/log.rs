@@ -309,7 +309,7 @@ fn log_json_includes_commit_object_and_null_pr() {
     assert!(s.contains(r#""name":"a""#), "got: {s}");
     assert!(s.contains(r#""subject":"a1""#), "commit object expected: {s}");
     // pr is an object-or-null; with no recorded PR it is null.
-    assert!(s.contains(r#""pr":null"#), "pr should be null without a PR: {s}");
+    assert!(s.contains(r#""change":null"#), "pr should be null without a PR: {s}");
 }
 
 #[test]
@@ -496,7 +496,7 @@ fn log_full_shows_live_pr_status() {
 
     let j = String::from_utf8_lossy(&stacc_env(p, &["log", "--format", "json"], envs).stdout)
         .into_owned();
-    assert!(j.contains(r#""status":"open""#), "JSON status expected: {j}");
+    assert!(j.contains(r#""state":"open""#), "JSON status expected: {j}");
 }
 
 #[test]
@@ -732,10 +732,10 @@ fn log_full_shows_title_draft_and_mergeable_hint() {
 
     let j = String::from_utf8_lossy(&stacc_env(p, &["log", "--format", "json"], envs).stdout)
         .into_owned();
-    assert!(j.contains(r#""status":"open""#), "draft stays open in JSON: {j}");
+    assert!(j.contains(r#""state":"open""#), "draft stays open in JSON: {j}");
     assert!(j.contains(r#""title":"feat: add the foo widget""#), "got: {j}");
     assert!(j.contains(r#""draft":true"#), "got: {j}");
-    assert!(j.contains(r#""mergeable_state":"blocked""#), "got: {j}");
+    assert!(j.contains(r#""readiness":"blocked""#), "got: {j}");
 }
 
 #[test]
@@ -801,7 +801,7 @@ fn log_full_shows_review_and_ci_rollup_from_one_batched_call() {
     let j = String::from_utf8_lossy(&stacc_env(p, &["log", "--format", "json"], envs).stdout)
         .into_owned();
     assert!(j.contains(r#""review":"approved""#), "got: {j}");
-    assert!(j.contains(r#""checks":"pass""#), "got: {j}");
+    assert!(j.contains(r#""checks":"passed""#), "got: {j}");
     assert!(j.contains(r#""review":"changes_requested""#), "got: {j}");
     assert!(j.contains(r#""checks":"pending""#), "got: {j}");
     graphql.assert_hits(2); // still one batched call per run

@@ -527,7 +527,7 @@ fn sync_conflict_writes_context_then_continue_completes() {
     let out = stacc(tmp.path(), &["sync", "--offline", "--format", "json"]);
     assert!(!out.status.success());
     let s = String::from_utf8_lossy(&out.stdout);
-    assert!(s.contains(r#""error":"conflict""#), "got: {s}");
+    assert!(s.contains(r#""type":"conflict""#), "got: {s}");
     assert!(s.contains(r#""branch":"feature""#), "got: {s}");
 
     let git_dir = tmp.path().join(".git");
@@ -976,7 +976,7 @@ fn sync_aborts_when_an_adoption_lookup_fails_and_persists_partial() {
     );
     assert!(!out.status.success(), "a failed lookup must abort the sync");
     let s = String::from_utf8_lossy(&out.stdout);
-    assert!(s.contains(r#""error":"github""#), "github error: {s}");
+    assert!(s.contains(r#""type":"unexpected""#), "github error: {s}");
 
     // feature-a's PR, adopted before the failing lookup, is persisted.
     let state = StateStore::new(Git::open(p)).load().unwrap();
@@ -1002,7 +1002,7 @@ fn sync_continue_needs_no_credentials() {
     // Offline sync conflicts (no credentials needed to reach the restack).
     let out = stacc_no_token(p, &["sync", "--offline", "--format", "json"]);
     assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stdout).contains(r#""error":"conflict""#));
+    assert!(String::from_utf8_lossy(&out.stdout).contains(r#""type":"conflict""#));
 
     // Resolve, then continue with no token: the resume must not need credentials.
     write(p, "conflict.txt", "resolved\n");

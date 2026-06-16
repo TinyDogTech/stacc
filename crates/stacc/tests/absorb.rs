@@ -438,7 +438,7 @@ fn absorb_upstack_conflict_is_resumable_via_continue() {
     let out = stacc(p, &["absorb", "--format", "json"]);
     assert!(!out.status.success(), "the upstack restack should conflict");
     let v = json(&out);
-    assert_eq!(v["error"], "conflict", "structured conflict, not a strand: {v}");
+    assert_eq!(v["type"], "conflict", "structured conflict, not a strand: {v}");
     assert_eq!(v["branch"], "b");
     // The absorb itself landed on `a` (its tip was rewritten before the restack).
     assert_eq!(blob_at(p, "a", "shared.txt"), "a-version\n");
@@ -491,7 +491,7 @@ fn absorb_refuses_when_an_upstack_branch_is_in_another_worktree() {
     assert!(!out.status.success(), "absorb must refuse: {:?}", json(&out));
     let v = json(&out);
     assert_eq!(
-        v["error"], "worktree_conflict",
+        v["type"], "worktree_conflict",
         "refused with the worktree_conflict discriminator: {v}"
     );
 

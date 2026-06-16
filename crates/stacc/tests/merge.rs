@@ -192,7 +192,7 @@ fn merge_squashes_ready_downstack_and_stops_at_unready() {
     // bottom (#1) and middle (#2) merged; stopped at top (#3, blocked).
     assert!(s.contains(r#""number":1"#) && s.contains(r#""number":2"#), "got: {s}");
     assert!(s.contains(r#""stopped_at""#), "got: {s}");
-    assert!(s.contains(r#""mergeable_state":"blocked""#), "got: {s}");
+    assert!(s.contains(r#""readiness":"blocked""#), "got: {s}");
     assert!(s.contains(r#""trunk_protected":false"#), "got: {s}");
     merge1.assert();
     merge2.assert();
@@ -247,7 +247,7 @@ fn merge_with_nothing_ready_is_a_noop() {
     );
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains(r#""merged":[]"#), "got: {s}");
-    assert!(s.contains(r#""mergeable_state":"blocked""#), "got: {s}");
+    assert!(s.contains(r#""readiness":"blocked""#), "got: {s}");
     // Nothing dropped: feat is still tracked.
     let log = String::from_utf8_lossy(&stacc(p, &["log", "--format", "json"]).stdout).into_owned();
     assert!(log.contains(r#""name":"feat""#), "got: {log}");
@@ -1073,7 +1073,7 @@ fn merge_aborts_when_an_adoption_lookup_fails() {
     );
     assert!(!out.status.success(), "a failed adoption lookup must abort merge");
     let s = String::from_utf8_lossy(&out.stdout);
-    assert!(s.contains(r#""error":"github""#), "github error: {s}");
+    assert!(s.contains(r#""type":"unexpected""#), "github error: {s}");
 }
 
 #[test]
@@ -1286,7 +1286,7 @@ fn merge_on_a_non_github_remote_is_unavailable_with_a_forge_generic_message() {
     let out = stacc(p, &["merge", "--format", "json"]);
     assert!(!out.status.success(), "merge on a non-GitHub remote is unavailable");
     let s = String::from_utf8_lossy(&out.stdout);
-    assert!(s.contains(r#""error":"usage""#), "usage error, not a crash: {s}");
+    assert!(s.contains(r#""type":"usage""#), "usage error, not a crash: {s}");
     assert!(s.contains("open a change through your forge"), "forge-generic guidance: {s}");
     assert!(s.contains("origin"), "names the remote: {s}");
     assert!(!s.contains("gitlab.com"), "no raw remote URL: {s}");

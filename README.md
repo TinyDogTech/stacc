@@ -20,9 +20,9 @@ interactive pickers. stacc works the same whether you drive it by hand or via an
   a hang.
 - **Machine-readable output.** `--format json` on every command emits a JSON
   object a script or agent can parse. The default `pretty` format is for humans.
-- **Structured errors.** Failures are JSON objects with a stable `error`
-  discriminator (`conflict`, `usage`, `ambiguous`, and so on), so a caller
-  branches on the kind instead of scraping text.
+- **Structured errors.** Failures are JSON objects with a stable `type`
+  discriminator (`conflict`, `usage`, `ambiguous`, `forge_auth`, and so on), so a
+  caller branches on the kind instead of scraping text.
 - **Branch per PR.** Each branch is one reviewable change stacked on its parent.
   stacc records the stack in a hidden git ref and rebases the right branches when
   a base moves.
@@ -157,12 +157,13 @@ stacc log --format json
 ```
 
 ```json
-{"trunk":"main","stack":[{"name":"add-api","base":"main","pr":{"number":123,"url":"https://github.com/you/repo/pull/123","status":"open"},"commit":{"sha":"95338df","subject":"feat: add the user API","age":"5 minutes ago"},"children":[{"name":"add-ui","base":"add-api","pr":{"number":124,"url":"https://github.com/you/repo/pull/124","status":"open"},"commit":{"sha":"95610c6","subject":"feat: render the user list","age":"2 minutes ago"},"children":[]}]}]}
+{"trunk":"main","stack":[{"name":"add-api","base":"main","change":{"number":123,"url":"https://github.com/you/repo/pull/123","state":"open"},"commit":{"sha":"95338df","subject":"feat: add the user API","age":"5 minutes ago"},"children":[{"name":"add-ui","base":"add-api","change":{"number":124,"url":"https://github.com/you/repo/pull/124","state":"open"},"commit":{"sha":"95610c6","subject":"feat: render the user list","age":"2 minutes ago"},"children":[]}]}],"schema_version":2}
 ```
 
-Each branch carries its `pr` (an object `{number, url, status}`, or `null`
-before submit) and its `commit` (or `null` when the branch adds none of its
-own). A branch whose git ref no longer exists also carries `"deleted": true`;
+Each branch carries its `change` (the forge-neutral pull/merge request: an
+object `{number, url, state, ...}`, or `null` before submit) and its `commit`
+(or `null` when the branch adds none of its own). A branch whose git ref no
+longer exists also carries `"deleted": true`;
 clear it with `stacc untrack`. Pass `--no-status` to skip the live PR lookup, or
 `--stack` to scope the output to the current branch's stack.
 
@@ -205,31 +206,46 @@ stable contract; the exact per-command JSON shapes live in `stacc <command>
 --help` and `--format json`.
 
 - **Always pass `--format json`.** Every command returns a JSON object on
-  success. For example, `stacc status --format json`:
+  success, each stamped with `"schema_version": 2`. For example, `stacc status
+  --format json`:
 
   ```json
-  {"branch":"add-ui","base":"add-api","pr":null,"children":[]}
+  {"branch":"add-ui","base":"add-api","change":null,"children":[],"schema_version":2}
   ```
+
+  Field names are forge-neutral: a GitHub pull request and a GitLab merge request
+  both appear under `change` with the same shape, so an agent consumes one schema
+  regardless of forge. (Human `pretty` output still says "PR" or "MR" as
+  appropriate.) Treat output without a `schema_version` as pre-v2 and untrusted.
 
 - **Pass `--no-interactive` to never block.** Any command that would prompt a
   human instead fails with a structured error, so an agent never hangs on a TTY.
 
-- **Errors are JSON objects with an `error` discriminator.** Branch on `error`,
-  not on the message text:
+- **Errors are JSON objects with a `type` discriminator.** Branch on `type`, not
+  on the message text; every error also carries `schema_version`:
 
-  | `error` | Meaning |
+  | `type` | Meaning |
   | --- | --- |
   | `conflict` | A rebase stopped on a merge conflict (see recovery below) |
   | `usage` | Bad arguments or a precondition not met |
   | `ambiguous` | The command needs you to disambiguate; `choices` lists the options |
   | `not_in_progress` | `continue`/`abort` with nothing to resume |
-  | `git` / `github` / `state` / `config` | A failure from that subsystem |
+  | `worktree_conflict` | A target branch is checked out in another worktree |
+  | `git` / `state` / `config` / `contention` | A failure from that subsystem |
+  | `forge_auth` | No forge token, or forge authentication failed |
+  | `forge_rejected` | The forge refused a merge; a structured `reason` carries the cause |
+  | `not_found` / `rate_limited` / `transport` / `unexpected` | A forge call failed in that way |
+
+  Forge errors carry no `forge` field, so an agent branches on `type`, never on
+  which forge it is talking to. A `forge_rejected` error adds a structured
+  `reason`: `conflict`, `behind`, `blocked`, `needs_approval`, `draft`, or
+  `unknown`.
 
 - **Recover from conflicts with `continue` / `abort`.** When a restack hits a
   conflict, stacc stops and tells you how to proceed:
 
   ```json
-  {"error":"conflict","branch":"add-ui","continue":"stacc continue","abort":"stacc abort"}
+  {"type":"conflict","branch":"add-ui","continue":"stacc continue","abort":"stacc abort","schema_version":2}
   ```
 
   Resolve the conflict in the working tree, then `stacc continue` to resume the
