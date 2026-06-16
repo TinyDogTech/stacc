@@ -2,5 +2,9 @@
   "base": {
     "name": "jillian/sta-115-1-ignore-tokensave",
     "hash": "5ce0e687ba09ebdfd83ebfb92e693d71e8ad9b54"
+  },
+  "pr": {
+    "number": 104,
+    "url": "https://github.com/TinyDogTech/stacc/pull/104"
   }
 }
