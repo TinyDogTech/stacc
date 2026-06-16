@@ -6,6 +6,7 @@ use std::io::IsTerminal;
 
 use serde_json::json;
 use stacc_core::ops;
+use stacc_forge::SCHEMA_VERSION;
 use stacc_git::Git;
 use stacc_state::{State, StateStore};
 
@@ -37,7 +38,7 @@ fn go(git: &Git, format: OutputFormat, op: &str, from: &str, to: &str) -> Result
     }
     match format {
         OutputFormat::Json => {
-            println!("{}", json!({ "op": op, "branch": to, "moved": moved }));
+            println!("{}", json!({ "op": op, "branch": to, "moved": moved, "schema_version": SCHEMA_VERSION }));
         }
         OutputFormat::Pretty => {
             if moved {
@@ -106,7 +107,7 @@ pub fn parent(format: OutputFormat) -> Result<(), Error> {
     let parent = ops::parent(&state.branches, &current);
     match format {
         OutputFormat::Json => {
-            println!("{}", json!({ "op": "parent", "parent": parent }));
+            println!("{}", json!({ "op": "parent", "parent": parent, "schema_version": SCHEMA_VERSION }));
         }
         OutputFormat::Pretty => {
             if let Some(parent) = parent {
@@ -125,7 +126,7 @@ pub fn children(format: OutputFormat) -> Result<(), Error> {
     let kids = ops::children(&state.branches, &current);
     match format {
         OutputFormat::Json => {
-            println!("{}", json!({ "op": "children", "children": kids }));
+            println!("{}", json!({ "op": "children", "children": kids, "schema_version": SCHEMA_VERSION }));
         }
         OutputFormat::Pretty => {
             for kid in &kids {
