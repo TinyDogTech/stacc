@@ -2,12 +2,14 @@
 
 pub mod auth;
 mod error;
+mod forge;
 
 pub use auth::{
     clear_token, env_token, gh_token, keychain_token, load_token, store_token, DeviceCode,
     DeviceFlow,
 };
 pub use error::GitHubError;
+pub use forge::GitHubForge;
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -387,8 +389,27 @@ impl GitHub {
         repo: &str,
         number: u64,
     ) -> Result<MergeOutcome, GitHubError> {
+        self.merge_pull_request_with(owner, repo, number, None)
+    }
+
+    /// Squash-merge a pull request, optionally asserting its head is at
+    /// `head_sha` first (GitHub's merge `sha` parameter), so a head that moved
+    /// since readiness was read is rejected rather than silently merged. `None`
+    /// skips the assertion, matching [`merge_pull_request`](Self::merge_pull_request).
+    pub(crate) fn merge_pull_request_with(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+        head_sha: Option<&str>,
+    ) -> Result<MergeOutcome, GitHubError> {
         let url = format!("{}/repos/{owner}/{repo}/pulls/{number}/merge", self.base_url);
-        let body = serde_json::json!({ "merge_method": "squash" });
+        let mut body = serde_json::Map::new();
+        body.insert("merge_method".into(), serde_json::json!("squash"));
+        if let Some(sha) = head_sha {
+            body.insert("sha".into(), serde_json::json!(sha));
+        }
+        let body = serde_json::Value::Object(body);
         match self.send::<_, MergeResponse>("PUT", &url, &body) {
             Ok(resp) => Ok(MergeOutcome {
                 merged: resp.merged,
