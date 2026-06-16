@@ -113,6 +113,12 @@ fn to_status(checks: PrChecks) -> ChangeStatus {
 /// The rejection reason implied by a change's readiness, for when GitHub blocks
 /// a merge. Derived from the structured readiness, never parsed from a free-text
 /// rejection body, so an agent always gets a typed reason (R16).
+///
+/// `NeedsApproval` and `Draft` are unreachable from GitHub data: [`readiness`]
+/// never yields them from `mergeable_state` (a draft or unapproved PR reads as
+/// `blocked`). They are part of the neutral contract for forges that surface
+/// those states, and are mapped here so the function stays total over
+/// [`MergeReadiness`].
 fn rejection_reason(readiness: MergeReadiness) -> MergeRejectionReason {
     match readiness {
         MergeReadiness::Conflicted => MergeRejectionReason::Conflict,
@@ -239,9 +245,23 @@ impl Forge for GitHubForge {
             Err(GitHubError::NotMergeable) => {
                 // Re-read the change so the rejection reason comes from its
                 // structured readiness rather than an opaque "not mergeable".
+                // Bound this enrichment probe so a slow forge cannot stall the
+                // merge call; a failed re-read or an unmappable state yields
+                // Unknown, and the merge is still correctly reported as rejected.
+                //
+                // Known limitation: when a head_sha assertion catches a moved
+                // head, the re-read sees the new (clean) head and yields Unknown.
+                // Naming that case (a HeadMoved reason) is deferred to the
+                // merge-gate unit (U11); merge enforcement is unaffected here,
+                // only the fidelity of the reported reason.
                 let reason = self
                     .client
-                    .get_pull_request(&self.owner, &self.repo, number)
+                    .get_pull_request_within(
+                        &self.owner,
+                        &self.repo,
+                        number,
+                        Duration::from_secs(10),
+                    )
                     .map_or(MergeRejectionReason::Unknown, |pr| {
                         rejection_reason(readiness(pr.mergeable_state.as_deref()))
                     });
@@ -357,6 +377,11 @@ mod tests {
         assert_eq!(rejection_reason(MergeReadiness::Conflicted), MergeRejectionReason::Conflict);
         assert_eq!(rejection_reason(MergeReadiness::Behind), MergeRejectionReason::Behind);
         assert_eq!(rejection_reason(MergeReadiness::Blocked), MergeRejectionReason::Blocked);
+        assert_eq!(
+            rejection_reason(MergeReadiness::NeedsApproval),
+            MergeRejectionReason::NeedsApproval
+        );
+        assert_eq!(rejection_reason(MergeReadiness::Draft), MergeRejectionReason::Draft);
         assert_eq!(rejection_reason(MergeReadiness::Ready), MergeRejectionReason::Unknown);
         assert_eq!(rejection_reason(MergeReadiness::Unknown), MergeRejectionReason::Unknown);
     }
@@ -477,6 +502,46 @@ mod tests {
             .merge_change(8, &MergeOptions { squash: true, head_sha: None })
             .unwrap_err();
         assert!(matches!(err, ForgeError::Rejected(MergeRejectionReason::Conflict)), "got {err:?}");
+    }
+
+    #[test]
+    fn merge_change_rejection_falls_back_to_unknown_when_reread_fails() {
+        // A rejected merge whose enrichment re-read itself fails still reports a
+        // rejection (the merge was refused), with reason Unknown.
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(httpmock::Method::PUT)
+                .path("/repos/o/r/pulls/7/merge");
+            then.status(405).json_body(json!({ "message": "not mergeable" }));
+        });
+        server.mock(|when, then| {
+            when.method(httpmock::Method::GET).path("/repos/o/r/pulls/7");
+            then.status(500).json_body(json!({ "message": "boom" }));
+        });
+        let err = forge(&server)
+            .merge_change(7, &MergeOptions { squash: true, head_sha: None })
+            .unwrap_err();
+        assert!(matches!(err, ForgeError::Rejected(MergeRejectionReason::Unknown)), "got {err:?}");
+    }
+
+    #[test]
+    fn status_errors_map_to_neutral_forge_errors() {
+        // GitHub HTTP statuses surface as the neutral error type an agent
+        // branches on, with no forge discriminator.
+        for (status, kind) in [(401u16, "auth"), (404u16, "not_found"), (429u16, "rate")] {
+            let server = MockServer::start();
+            server.mock(|when, then| {
+                when.method(httpmock::Method::GET).path("/repos/o/r/pulls/7");
+                then.status(status).json_body(json!({ "message": "x" }));
+            });
+            let err = forge(&server).get_change(7).unwrap_err();
+            match kind {
+                "auth" => assert!(matches!(err, ForgeError::AuthFailed), "status {status}: {err:?}"),
+                "not_found" => assert!(matches!(err, ForgeError::NotFound), "status {status}: {err:?}"),
+                "rate" => assert!(matches!(err, ForgeError::RateLimited), "status {status}: {err:?}"),
+                _ => unreachable!(),
+            }
+        }
     }
 
     #[test]
