@@ -68,7 +68,7 @@ fn parent_of_a_stacked_branch_is_its_recorded_base() {
     let tmp = stack();
     // HEAD is on b.
     let v = json(tmp.path(), &["parent"]);
-    assert_eq!(v, serde_json::json!({ "op": "parent", "parent": "a" }));
+    assert_eq!(v, serde_json::json!({ "op": "parent", "parent": "a", "schema_version": 2 }));
 
     // Pretty is just the name.
     let out = stacc(tmp.path(), &["parent"]);
@@ -90,7 +90,7 @@ fn parent_on_the_trunk_is_null_and_exits_zero() {
     let tmp = stack();
     run_git(tmp.path(), &["checkout", "-q", "main"]);
     let v = json(tmp.path(), &["parent"]);
-    assert_eq!(v, serde_json::json!({ "op": "parent", "parent": null }));
+    assert_eq!(v, serde_json::json!({ "op": "parent", "parent": null, "schema_version": 2 }));
 
     // Pretty prints nothing, still exit 0.
     let out = stacc(tmp.path(), &["parent"]);
@@ -103,7 +103,7 @@ fn parent_on_an_untracked_branch_is_null_and_exits_zero() {
     let tmp = stack();
     run_git(tmp.path(), &["checkout", "-q", "-b", "loose", "main"]);
     let v = json(tmp.path(), &["parent"]);
-    assert_eq!(v, serde_json::json!({ "op": "parent", "parent": null }));
+    assert_eq!(v, serde_json::json!({ "op": "parent", "parent": null, "schema_version": 2 }));
 }
 
 #[test]
@@ -111,7 +111,7 @@ fn children_of_a_branch_lists_its_direct_child() {
     let tmp = stack();
     run_git(tmp.path(), &["checkout", "-q", "a"]);
     let v = json(tmp.path(), &["children"]);
-    assert_eq!(v, serde_json::json!({ "op": "children", "children": ["b"] }));
+    assert_eq!(v, serde_json::json!({ "op": "children", "children": ["b"], "schema_version": 2 }));
 }
 
 #[test]
@@ -119,7 +119,7 @@ fn children_of_a_leaf_is_an_empty_array_and_exits_zero() {
     let tmp = stack();
     // HEAD is on b, the leaf.
     let v = json(tmp.path(), &["children"]);
-    assert_eq!(v, serde_json::json!({ "op": "children", "children": [] }));
+    assert_eq!(v, serde_json::json!({ "op": "children", "children": [], "schema_version": 2 }));
 
     // Pretty prints nothing, still exit 0.
     let out = stacc(tmp.path(), &["children"]);
@@ -139,7 +139,7 @@ fn children_at_a_fork_are_name_ordered() {
     let v = json(tmp.path(), &["children"]);
     assert_eq!(
         v,
-        serde_json::json!({ "op": "children", "children": ["kid-y", "kid-z"] })
+        serde_json::json!({ "op": "children", "children": ["kid-y", "kid-z"], "schema_version": 2 })
     );
 
     // Pretty is one name per line, same order.
@@ -158,6 +158,6 @@ fn children_on_the_trunk_lists_trunk_based_branches() {
     let v = json(tmp.path(), &["children"]);
     assert_eq!(
         v,
-        serde_json::json!({ "op": "children", "children": ["a", "c"] })
+        serde_json::json!({ "op": "children", "children": ["a", "c"], "schema_version": 2 })
     );
 }
