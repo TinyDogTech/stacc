@@ -276,7 +276,7 @@ pub fn create(args: &CreateArgs, format: OutputFormat) -> Result<(), Error> {
     }
 
     if args.all {
-        git.stage_all()?;
+        git.stage_all_respecting_ignores()?;
     }
 
     match &args.onto {

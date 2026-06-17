@@ -419,6 +419,59 @@ impl Git {
         self.run(&args).map(|_| ())
     }
 
+    /// Stage every change like [`stage_all`], then, only when this commit
+    /// changes a `.gitignore`, drop from the index any tracked path the new
+    /// rules cover. The working tree is untouched.
+    ///
+    /// `git add -A` skips *untracked* paths that match `.gitignore`, but it
+    /// keeps an *already-tracked* path even after a rule for it is added, so a
+    /// commit that adds a path to `.gitignore` (e.g. ignoring an index dir)
+    /// would still sweep that path in. After staging, this removes the
+    /// now-ignored tracked paths from the index (`git rm --cached`), so the
+    /// commit stops tracking them instead of committing them one last time.
+    ///
+    /// The drop is gated on a staged `.gitignore` change: without that gate a
+    /// deliberately force-added file (`git add -f build.log` under a pre-existing
+    /// `*.log` rule) would be un-tracked by every `-a`, even when this commit
+    /// touches neither it nor any `.gitignore`.
+    pub fn stage_all_respecting_ignores(&self) -> Result<(), GitError> {
+        self.run(&["add", "-A"])?;
+        if !self.gitignore_is_staged()? {
+            return Ok(());
+        }
+        let ignored = self.tracked_ignored_files()?;
+        if !ignored.is_empty() {
+            let mut args = vec!["rm", "--cached", "-q", "--"];
+            args.extend(ignored.iter().map(String::as_str));
+            self.run(&args)?;
+        }
+        Ok(())
+    }
+
+    /// Whether the staged change set includes a `.gitignore` (top-level or
+    /// nested). Used to gate the ignore-reconcile in
+    /// [`stage_all_respecting_ignores`] to commits that actually change ignore
+    /// rules.
+    fn gitignore_is_staged(&self) -> Result<bool, GitError> {
+        let out = self.run(&["diff", "--cached", "--name-only", "-z"])?;
+        Ok(out
+            .split('\0')
+            .any(|path| path == ".gitignore" || path.ends_with("/.gitignore")))
+    }
+
+    /// Tracked files that the current ignore rules (including the staged
+    /// `.gitignore` edit) now cover. `-z` keeps the records NUL-delimited so a
+    /// path containing a space or newline round-trips intact back into
+    /// `git rm`.
+    fn tracked_ignored_files(&self) -> Result<Vec<String>, GitError> {
+        let out = self.run(&["ls-files", "-z", "-i", "-c", "--exclude-standard"])?;
+        Ok(out
+            .split('\0')
+            .filter(|path| !path.is_empty())
+            .map(str::to_owned)
+            .collect())
+    }
+
     /// Unstage the changes under `paths`, leaving the working tree untouched
     /// (`git reset -q HEAD -- <paths>`).
     pub fn unstage_paths(&self, paths: &[String]) -> Result<(), GitError> {
