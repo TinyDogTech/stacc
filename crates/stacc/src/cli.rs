@@ -240,7 +240,8 @@ pub struct CreateArgs {
     #[arg(long, short)]
     pub message: Option<String>,
     /// Stage all changes, tracked and untracked (`git add -A`), before the
-    /// branch-create commit.
+    /// branch-create commit. A path the same commit adds to `.gitignore` stops
+    /// being tracked rather than getting swept in.
     #[arg(long, short = 'a')]
     pub all: bool,
     /// Base the new branch on `<branch>` instead of the current branch.
@@ -265,7 +266,8 @@ pub struct ModifyArgs {
     #[arg(long, short)]
     pub message: Option<String>,
     /// Stage all changes, tracked and untracked (`git add -A`), before
-    /// amending or committing.
+    /// amending or committing. A path the same change adds to `.gitignore`
+    /// stops being tracked rather than getting swept in.
     #[arg(long, short = 'a')]
     pub all: bool,
     /// Apply the staged changes into the named downstack branch's tip instead

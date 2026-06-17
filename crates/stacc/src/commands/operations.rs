@@ -68,7 +68,7 @@ pub fn modify(args: &ModifyArgs, format: OutputFormat) -> Result<(), Error> {
     validate_modify_flags(args)?;
 
     if args.all {
-        git.stage_all()?;
+        git.stage_all_respecting_ignores()?;
     }
 
     if args.into.is_some() {

@@ -239,6 +239,43 @@ fn create_all_stages_tracked_and_untracked_changes() {
     assert_eq!(git_out(p, &["status", "--porcelain"]), "");
 }
 
+// STA-117: a path the same `-a` commit adds to `.gitignore` must stop being
+// tracked, not get swept in. `git add -A` keeps an already-tracked path even
+// after a rule for it is added, so the dir would otherwise be committed once
+// more before the ignore "takes effect".
+#[test]
+fn create_all_drops_a_path_the_commit_adds_to_gitignore() {
+    let tmp = init_repo();
+    let p = tmp.path();
+    // An index dir tracked before it gets ignored (the dogfooding trigger).
+    std::fs::create_dir(p.join("cache")).expect("mkdir");
+    std::fs::write(p.join("cache/idx"), "v1\n").expect("write");
+    run_git(p, &["add", "cache/idx"]);
+    run_git(p, &["commit", "-q", "-m", "track cache"]);
+
+    // Ignore it and touch it, all part of the change `create -a` commits.
+    std::fs::write(p.join(".gitignore"), "cache/\n").expect("write");
+    std::fs::write(p.join("cache/idx"), "v2\n").expect("write");
+
+    let out = stacc(p, &["create", "feat-ig", "-a", "-m", "ignore cache", "--format", "json"]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // .gitignore is committed; cache/idx is not in the new commit (it stops
+    // being tracked), and the working-tree file is untouched.
+    assert!(git_ok(p, &["cat-file", "-e", "HEAD:.gitignore"]));
+    assert!(
+        !git_ok(p, &["cat-file", "-e", "HEAD:cache/idx"]),
+        "cache/idx must not be committed once it is ignored"
+    );
+    assert_eq!(std::fs::read_to_string(p.join("cache/idx")).unwrap(), "v2\n");
+    // The index matches the commit (nothing left staged).
+    assert!(git_ok(p, &["diff", "--cached", "--quiet"]));
+}
+
 #[test]
 fn create_onto_bases_on_the_named_branch() {
     let tmp = init_repo();

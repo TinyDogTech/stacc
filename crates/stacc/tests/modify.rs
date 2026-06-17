@@ -330,6 +330,44 @@ fn modify_all_stages_everything_then_amends() {
     assert_eq!(current_branch(p), "a");
 }
 
+// STA-117: the `create -a` fix applies equally to `modify -a`. A path the same
+// `--all` amend adds to `.gitignore` stops being tracked rather than getting
+// folded back into the tip.
+#[test]
+fn modify_all_drops_a_path_the_change_adds_to_gitignore() {
+    let tmp = init_repo();
+    let p = tmp.path();
+    // A branch whose own commit tracks an index dir.
+    assert!(stacc(p, &["create", "wip", "-m", "wip"]).status.success());
+    std::fs::create_dir(p.join("cache")).expect("mkdir");
+    std::fs::write(p.join("cache/idx"), "v1\n").expect("write");
+    assert!(
+        stacc(p, &["modify", "--commit", "-a", "-m", "track cache"])
+            .status
+            .success()
+    );
+    assert!(git_ok(p, &["cat-file", "-e", "wip:cache/idx"]));
+
+    // Ignore it and touch it, then fold with --all.
+    std::fs::write(p.join(".gitignore"), "cache/\n").expect("write");
+    std::fs::write(p.join("cache/idx"), "v2\n").expect("write");
+    let out = stacc(p, &["modify", "--all", "--format", "json"]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // The amended tip carries .gitignore and no longer tracks cache/idx; the
+    // working-tree file is untouched.
+    assert!(git_ok(p, &["cat-file", "-e", "wip:.gitignore"]));
+    assert!(
+        !git_ok(p, &["cat-file", "-e", "wip:cache/idx"]),
+        "cache/idx must be untracked after the ignore"
+    );
+    assert_eq!(std::fs::read_to_string(p.join("cache/idx")).unwrap(), "v2\n");
+}
+
 #[test]
 fn modify_into_lands_staged_changes_in_a_downstack_tip() {
     let tmp = stack_main_a_b();
