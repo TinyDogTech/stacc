@@ -427,6 +427,12 @@ mod tests {
             merge_rejection_for(Some("dirty"), Some(CheckRollup::Pending)),
             MergeRejectionReason::Conflict
         );
+        // A behind branch with pending CI stays Behind: rebasing, not waiting,
+        // is what clears it.
+        assert_eq!(
+            merge_rejection_for(Some("behind"), Some(CheckRollup::Pending)),
+            MergeRejectionReason::Behind
+        );
         // No checks configured plus a block is a hard block (review).
         assert_eq!(
             merge_rejection_for(Some("blocked"), None),

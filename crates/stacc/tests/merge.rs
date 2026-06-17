@@ -317,6 +317,7 @@ fn merge_watch_times_out_and_reports_the_retryable_stop() {
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains(r#""rejection":"checks_pending""#), "got: {s}");
     assert!(s.contains(r#""retryable":true"#), "got: {s}");
+    assert!(s.contains(r#""watch_outcome":"timed_out""#), "got: {s}");
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("waiting on CI"), "expected the watch note, got: {err}");
 }

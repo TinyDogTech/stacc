@@ -6,9 +6,9 @@ use std::path::Path;
 
 use serde_json::{json, Value};
 use stacc_core::{ops, recovery};
-use stacc_forge::SCHEMA_VERSION;
+use stacc_forge::{MergeRejectionReason, SCHEMA_VERSION};
 use stacc_git::{Git, Hunk, HunkKind, MergeEquivalence, RebaseError};
-use stacc_github::{GitHub, GitHubError, PrState, PullRequestUpdate};
+use stacc_github::{CheckRollup, GitHub, GitHubError, PrState, PullRequestUpdate};
 use stacc_state::{
     Base, BranchState, Disposal, PullRequest, RepoConfig, State, StateError, StateStore,
 };
@@ -1786,9 +1786,11 @@ pub fn merge(args: &MergeArgs, format: OutputFormat) -> Result<(), Error> {
     // commits` and merges cleanly (no squash-cascade conflict).
     // `--watch`: when a child stops only because its restacked CI is still
     // running, poll its checks and continue instead of stopping for a manual
-    // re-run. The budget is polls = timeout / interval (at least one).
+    // re-run. Bounded by a wall-clock timeout, with a poll-count backstop
+    // (polls = timeout / interval, at least one) for stubbed clocks.
     let watch = args.watch.then(|| Watch {
         interval: std::time::Duration::from_secs(args.watch_interval.max(1)),
+        timeout: std::time::Duration::from_secs(args.watch_timeout.max(1)),
         polls: u32::try_from(args.watch_timeout.max(1) / args.watch_interval.max(1))
             .unwrap_or(u32::MAX)
             .max(1),
@@ -1930,50 +1932,88 @@ fn retarget_children_to_trunk(
 struct Watch {
     /// Pause between readiness polls.
     interval: std::time::Duration,
-    /// Max polls before giving up (timeout / interval).
+    /// Wall-clock budget: stop waiting once this much time has elapsed.
+    timeout: std::time::Duration,
+    /// Poll-count backstop, in case a stubbed/zero-duration clock never advances
+    /// (`timeout / interval`).
     polls: u32,
 }
 
-/// The result of waiting on a child's CI.
+/// What one readiness sample means for the watch loop.
+enum WatchStep {
+    /// Mergeable now: proceed to merge.
+    Merge,
+    /// Still resolvable by waiting (CI running, or checks passed but the forge
+    /// has not recomputed mergeability yet): keep polling.
+    Waiting,
+    /// A block that waiting cannot clear (failed checks, conflict, no CI to wait
+    /// on, review required): stop with this reason.
+    Hard(MergeRejectionReason),
+    /// A permanent read error (auth, not found): abort the wait.
+    Permanent(Error),
+}
+
+/// How a `--watch` wait ended.
 enum WatchOutcome {
-    /// The change became mergeable.
+    /// The change became mergeable; re-read and merge.
     Ready,
-    /// The change reached a hard block (failed checks, review required).
-    Failed,
-    /// The budget ran out while still pending.
+    /// A block that waiting cannot clear; stop with this reason.
+    Hard(MergeRejectionReason),
+    /// The deadline (or poll backstop) passed while still waiting on CI.
     TimedOut,
+    /// A permanent read error aborted the wait.
+    Errored(Error),
 }
 
-/// One readiness sample: whether the change is mergeable now, and whether the
-/// only thing holding it back is still-running CI (so waiting could help).
-struct ReadyPoll {
-    ready: bool,
-    retryable: bool,
+/// Classify one readiness sample. `Waiting` covers both pending CI and the
+/// "checks passed but mergeability not yet recomputed" lag window, so a child
+/// whose checks just went green is not abandoned mid-flight. A failed check, a
+/// conflict, a behind branch, no CI to wait on, or a review block ends the wait.
+fn watch_step(live: &stacc_github::PullRequest, checks: Option<CheckRollup>) -> WatchStep {
+    if live.ready() {
+        return WatchStep::Merge;
+    }
+    // The states where more polling could plausibly reach `clean`. A conflict or
+    // behind branch never will, so they are never `Waiting`.
+    let gateable = matches!(
+        live.mergeable_state.as_deref(),
+        Some("blocked" | "unstable" | "unknown") | None
+    );
+    match checks {
+        // CI running, or passed but mergeability is lagging: keep waiting.
+        Some(CheckRollup::Pending | CheckRollup::Pass) if gateable => WatchStep::Waiting,
+        // Failed checks, no CI configured, or a non-CI block: waiting won't help.
+        _ => WatchStep::Hard(stacc_github::merge_rejection_for(
+            live.mergeable_state.as_deref(),
+            checks,
+        )),
+    }
 }
 
-/// Wait for a change to become mergeable, polling its readiness until it is
-/// ready, hits a hard block, or the budget runs out. Pure over its `poll` and
-/// `sleep` closures so the wait logic is unit-testable without real time or
-/// network: a still-pending sample keeps waiting; only `ready` or a non-retryable
-/// sample ends it early.
-fn watch_for_ready(
-    mut poll: impl FnMut() -> ReadyPoll,
+/// Run the `--watch` wait loop. Pure over its `poll`, `sleep`, and `expired`
+/// closures so the loop logic (merge / keep-waiting / hard-stop / time-out) is
+/// unit-testable without real time or network. Bounded by both a wall-clock
+/// deadline (`expired`) and a poll-count backstop (`polls`).
+fn run_watch(
+    mut poll: impl FnMut() -> WatchStep,
     mut sleep: impl FnMut(std::time::Duration),
+    mut expired: impl FnMut() -> bool,
     interval: std::time::Duration,
     mut polls: u32,
 ) -> WatchOutcome {
-    while polls > 0 {
+    loop {
+        if polls == 0 || expired() {
+            return WatchOutcome::TimedOut;
+        }
         sleep(interval);
         polls -= 1;
-        let sample = poll();
-        if sample.ready {
-            return WatchOutcome::Ready;
-        }
-        if !sample.retryable {
-            return WatchOutcome::Failed;
+        match poll() {
+            WatchStep::Merge => return WatchOutcome::Ready,
+            WatchStep::Waiting => {}
+            WatchStep::Hard(reason) => return WatchOutcome::Hard(reason),
+            WatchStep::Permanent(err) => return WatchOutcome::Errored(err),
         }
     }
-    WatchOutcome::TimedOut
 }
 
 /// The CI rollup for a change, best-effort (None on any read failure).
@@ -1982,12 +2022,52 @@ fn probe_checks(
     owner: &str,
     repo_name: &str,
     number: u64,
-) -> Option<stacc_github::CheckRollup> {
+) -> Option<CheckRollup> {
     github
         .pull_request_checks_within(owner, repo_name, &[number], std::time::Duration::from_secs(10))
         .ok()
         .and_then(|mut m| m.remove(&number))
         .and_then(|c| c.checks)
+}
+
+/// Whether a readiness read failed permanently (bad token, missing PR), so the
+/// watch should abort rather than burn its budget retrying. Everything else
+/// (rate limits, transport blips) is transient and keeps waiting.
+fn is_permanent(err: &Error) -> bool {
+    matches!(
+        err,
+        Error::Github(
+            GitHubError::Status {
+                status: 401 | 403 | 404,
+                ..
+            } | GitHubError::MissingToken
+        )
+    )
+}
+
+/// Build the structured `not_ready` stop envelope. `rejection`/`retryable`
+/// reflect the state that *ended* the wait (not a stale pre-watch value), and
+/// `watch_outcome` is set only on a `--watch` stop (`timed_out` | `hard_failed`).
+/// The human `reason` string is frozen so machine consumers key on
+/// `rejection`/`retryable`, never the prose.
+fn build_stop(
+    branch: &str,
+    number: u64,
+    live: &stacc_github::PullRequest,
+    reason: MergeRejectionReason,
+    retryable: bool,
+    watch_outcome: Option<&str>,
+) -> Value {
+    json!({
+        "kind": "not_ready",
+        "branch": branch,
+        "number": number,
+        "readiness": super::readiness_str(live.mergeable_state.as_deref()),
+        "rejection": serde_json::to_value(reason).unwrap_or(Value::Null),
+        "retryable": retryable,
+        "watch_outcome": watch_outcome,
+        "reason": "not cleanly mergeable",
+    })
 }
 
 /// The readiness gate for one PR in the merge walk.
@@ -2018,58 +2098,68 @@ fn await_pr_ready(
             Ok(live) => live,
             Err(err) => return Gate::Failed(err),
         };
-        if live.ready() {
-            return Gate::Ready;
-        }
         let checks = probe_checks(github, owner, repo_name, number);
-        let reason = stacc_github::merge_rejection_for(live.mergeable_state.as_deref(), checks);
-        let retryable = reason.is_retryable();
-        let stop = json!({
-            "kind": "not_ready",
-            "branch": branch,
-            "number": number,
-            "readiness": super::readiness_str(live.mergeable_state.as_deref()),
-            "rejection": serde_json::to_value(reason).unwrap_or(Value::Null),
-            "retryable": retryable,
-            "reason": if retryable { "waiting on required checks" } else { "not cleanly mergeable" },
-        });
-        match watch {
-            Some(w) if retryable => {
+        match watch_step(&live, checks) {
+            WatchStep::Merge => return Gate::Ready,
+            // Unreachable from a successful read (no error to carry), but the
+            // match stays exhaustive over WatchStep.
+            WatchStep::Permanent(err) => return Gate::Failed(err),
+            WatchStep::Hard(reason) => {
+                return Gate::Stop(build_stop(branch, number, &live, reason, false, None));
+            }
+            WatchStep::Waiting => {
+                let Some(w) = watch else {
+                    // No --watch: report the retryable "waiting on CI" stop so an
+                    // agent knows to poll and retry.
+                    return Gate::Stop(build_stop(
+                        branch,
+                        number,
+                        &live,
+                        MergeRejectionReason::ChecksPending,
+                        true,
+                        None,
+                    ));
+                };
                 eprintln!("waiting on CI for #{number} (`{branch}`)...");
-                let outcome = watch_for_ready(
-                    || {
-                        // A transient read error counts as "still pending" so a
-                        // blip doesn't abort the wait; the budget still bounds it.
-                        match poll_pr_ready(github, owner, repo_name, number) {
-                            Ok(live) => {
-                                let checks = probe_checks(github, owner, repo_name, number);
-                                let reason = stacc_github::merge_rejection_for(
-                                    live.mergeable_state.as_deref(),
-                                    checks,
-                                );
-                                ReadyPoll {
-                                    ready: live.ready(),
-                                    retryable: reason.is_retryable(),
-                                }
-                            }
-                            Err(_) => ReadyPoll {
-                                ready: false,
-                                retryable: true,
-                            },
-                        }
+                let deadline = std::time::Instant::now() + w.timeout;
+                let outcome = run_watch(
+                    || match poll_pr_ready(github, owner, repo_name, number) {
+                        Ok(live) => watch_step(&live, probe_checks(github, owner, repo_name, number)),
+                        Err(err) if is_permanent(&err) => WatchStep::Permanent(err),
+                        // A transient blip keeps waiting; the deadline bounds it.
+                        Err(_) => WatchStep::Waiting,
                     },
                     std::thread::sleep,
+                    move || std::time::Instant::now() >= deadline,
                     w.interval,
                     w.polls,
                 );
                 match outcome {
-                    // Checks passed: fall back to the top of the loop to re-read
-                    // readiness and merge.
+                    // Checks passed: re-read at the top of the loop and merge.
                     WatchOutcome::Ready => {}
-                    WatchOutcome::Failed | WatchOutcome::TimedOut => return Gate::Stop(stop),
+                    WatchOutcome::Hard(reason) => {
+                        return Gate::Stop(build_stop(
+                            branch,
+                            number,
+                            &live,
+                            reason,
+                            false,
+                            Some("hard_failed"),
+                        ));
+                    }
+                    WatchOutcome::TimedOut => {
+                        return Gate::Stop(build_stop(
+                            branch,
+                            number,
+                            &live,
+                            MergeRejectionReason::ChecksPending,
+                            true,
+                            Some("timed_out"),
+                        ));
+                    }
+                    WatchOutcome::Errored(err) => return Gate::Failed(err),
                 }
             }
-            _ => return Gate::Stop(stop),
         }
     }
 }
@@ -2305,7 +2395,14 @@ fn report_merge(
             }
             if let Some(stop) = stopped {
                 let branch = stop.get("branch").and_then(Value::as_str).unwrap_or("?");
-                println!("Stopped at {branch}.");
+                // Surface the retryable "waiting on CI" case so a human on the
+                // default output learns to poll-and-retry (or use --watch) rather
+                // than treating every stop as a hard block.
+                if stop.get("retryable").and_then(Value::as_bool) == Some(true) {
+                    println!("Stopped at {branch}: waiting on CI (re-run merge, or use --watch).");
+                } else {
+                    println!("Stopped at {branch}: not cleanly mergeable.");
+                }
             }
             if let Some(o) = outcome {
                 for name in &o.restacked {
@@ -3406,22 +3503,22 @@ mod tests {
     use super::*;
 
     // STA-118: the `--watch` wait loop. Driven by closures so it is exercised
-    // without real time or network; `no_sleep` makes the budget the only bound.
+    // without real time, network, or a wall clock (`never_expired`); `no_sleep`
+    // makes the poll backstop the only bound.
     fn no_sleep(_: std::time::Duration) {}
+    fn never_expired() -> bool {
+        false
+    }
 
     #[test]
-    fn watch_stops_as_soon_as_the_change_is_ready() {
+    fn watch_merges_as_soon_as_the_change_is_ready() {
         let samples = std::cell::RefCell::new(
-            vec![
-                ReadyPoll { ready: false, retryable: true },
-                ReadyPoll { ready: false, retryable: true },
-                ReadyPoll { ready: true, retryable: false },
-            ]
-            .into_iter(),
+            vec![WatchStep::Waiting, WatchStep::Waiting, WatchStep::Merge].into_iter(),
         );
-        let outcome = watch_for_ready(
+        let outcome = run_watch(
             || samples.borrow_mut().next().expect("poll past samples"),
             no_sleep,
+            never_expired,
             std::time::Duration::ZERO,
             10,
         );
@@ -3429,33 +3526,70 @@ mod tests {
     }
 
     #[test]
-    fn watch_stops_hard_when_checks_fail() {
+    fn watch_stops_hard_when_a_check_fails() {
         let samples = std::cell::RefCell::new(
             vec![
-                ReadyPoll { ready: false, retryable: true },
-                ReadyPoll { ready: false, retryable: false },
+                WatchStep::Waiting,
+                WatchStep::Hard(MergeRejectionReason::Blocked),
             ]
             .into_iter(),
         );
-        let outcome = watch_for_ready(
+        let outcome = run_watch(
             || samples.borrow_mut().next().expect("poll past samples"),
             no_sleep,
+            never_expired,
             std::time::Duration::ZERO,
             10,
         );
-        assert!(matches!(outcome, WatchOutcome::Failed));
+        assert!(matches!(
+            outcome,
+            WatchOutcome::Hard(MergeRejectionReason::Blocked)
+        ));
     }
 
     #[test]
-    fn watch_times_out_while_still_pending() {
-        // Always pending: the budget (2 polls) is the only thing that ends it.
-        let outcome = watch_for_ready(
-            || ReadyPoll { ready: false, retryable: true },
+    fn watch_times_out_on_the_poll_backstop_while_waiting() {
+        // Always waiting and the clock never expires: the poll backstop (2) ends it.
+        let outcome = run_watch(
+            || WatchStep::Waiting,
             no_sleep,
+            never_expired,
             std::time::Duration::ZERO,
             2,
         );
         assert!(matches!(outcome, WatchOutcome::TimedOut));
+    }
+
+    #[test]
+    fn watch_times_out_when_the_deadline_passes() {
+        // The wall-clock deadline ends it even with poll budget remaining.
+        let outcome = run_watch(
+            || WatchStep::Waiting,
+            no_sleep,
+            || true,
+            std::time::Duration::ZERO,
+            1000,
+        );
+        assert!(matches!(outcome, WatchOutcome::TimedOut));
+    }
+
+    #[test]
+    fn watch_aborts_on_a_permanent_error() {
+        let samples = std::cell::RefCell::new(
+            vec![
+                WatchStep::Waiting,
+                WatchStep::Permanent(Error::Usage("token revoked".into())),
+            ]
+            .into_iter(),
+        );
+        let outcome = run_watch(
+            || samples.borrow_mut().next().expect("poll past samples"),
+            no_sleep,
+            never_expired,
+            std::time::Duration::ZERO,
+            10,
+        );
+        assert!(matches!(outcome, WatchOutcome::Errored(_)));
     }
 
     fn run_git(dir: &Path, args: &[&str]) {
