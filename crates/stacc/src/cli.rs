@@ -8,7 +8,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 /// A stacked-diff CLI.
 #[derive(Debug, Parser)]
-#[command(name = "stacc", version, long_about = None)]
+#[command(name = "stacc", version = env!("STACC_VERSION"), long_about = None)]
 pub struct Cli {
     /// Flags shared by every subcommand.
     #[command(flatten)]
