@@ -9,7 +9,7 @@ pub use auth::{
     DeviceFlow,
 };
 pub use error::GitHubError;
-pub use forge::GitHubForge;
+pub use forge::{merge_rejection_for, GitHubForge};
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
