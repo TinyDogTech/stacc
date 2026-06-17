@@ -276,6 +276,35 @@ fn create_all_drops_a_path_the_commit_adds_to_gitignore() {
     assert!(git_ok(p, &["diff", "--cached", "--quiet"]));
 }
 
+// STA-117: the ignore-drop is gated on a staged `.gitignore` change. A
+// deliberately force-added file (`git add -f`) under a pre-existing ignore rule
+// must survive a later `-a` commit that does not touch `.gitignore`.
+#[test]
+fn create_all_keeps_a_force_added_file_when_gitignore_is_unchanged() {
+    let tmp = init_repo();
+    let p = tmp.path();
+    // A pre-existing ignore rule plus a force-added tracked file under it.
+    std::fs::write(p.join(".gitignore"), "*.log\n").expect("write");
+    run_git(p, &["add", ".gitignore"]);
+    std::fs::write(p.join("important.log"), "keep\n").expect("write");
+    run_git(p, &["add", "-f", "important.log"]);
+    run_git(p, &["commit", "-q", "-m", "base"]);
+
+    // A later -a commit that does not touch .gitignore must not un-track it.
+    std::fs::write(p.join("important.log"), "v2\n").expect("write");
+    std::fs::write(p.join("other.txt"), "x\n").expect("write");
+    let out = stacc(p, &["create", "feat-x", "-a", "-m", "more", "--format", "json"]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // important.log stays tracked and updated; other.txt is added.
+    assert!(git_ok(p, &["cat-file", "-e", "HEAD:important.log"]));
+    assert_eq!(git_out(p, &["show", "HEAD:important.log"]), "v2");
+    assert!(git_ok(p, &["cat-file", "-e", "HEAD:other.txt"]));
+}
+
 #[test]
 fn create_onto_bases_on_the_named_branch() {
     let tmp = init_repo();
