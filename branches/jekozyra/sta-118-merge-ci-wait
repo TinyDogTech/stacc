@@ -2,5 +2,9 @@
   "base": {
     "name": "jekozyra/sta-117-create-a-gitignore",
     "hash": "4225d47ad11175b8add74d5456724126cad93e1d"
+  },
+  "pr": {
+    "number": 106,
+    "url": "https://github.com/TinyDogTech/stacc/pull/106"
   }
 }

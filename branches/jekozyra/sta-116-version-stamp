@@ -2,5 +2,9 @@
   "base": {
     "name": "jekozyra/sta-118-merge-ci-wait",
     "hash": "052da710ee6b24a54f76d505f129f8b045b6ef83"
+  },
+  "pr": {
+    "number": 107,
+    "url": "https://github.com/TinyDogTech/stacc/pull/107"
   }
 }
