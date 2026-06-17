@@ -21,10 +21,12 @@ fn main() {
     // unrelated `cargo build` does not rebuild. Emitting any rerun line disables
     // Cargo's default whole-package scan, so build.rs must list itself too.
     // `--git-path` resolves each file inside the real git dir (worktree-safe) and
-    // is relative to this package root, where the build script runs.
+    // is relative to this package root, where the build script runs. `packed-refs`
+    // is included because `git gc` can move a ref's sha out of the loose `refs`
+    // tree into it, which would otherwise leave a stale stamped sha.
     println!("cargo:rerun-if-changed=build.rs");
-    for name in ["HEAD", "index", "refs"] {
-        if let Some(path) = git(&["rev-parse", "--git-path", name]) {
+    for name in ["HEAD", "index", "refs", "packed-refs"] {
+        if let Some(path) = run_git(&["rev-parse", "--git-path", name]) {
             println!("cargo:rerun-if-changed={path}");
         }
     }
@@ -33,15 +35,24 @@ fn main() {
 /// The short HEAD sha plus a `-dirty` marker when the working tree has changes,
 /// or `None` when git is unavailable (no `.git`, no `git` binary).
 fn git_build() -> Option<String> {
-    let sha = git(&["rev-parse", "--short", "HEAD"])?;
-    let dirty = git(&["status", "--porcelain"]).is_some_and(|s| !s.is_empty());
+    let sha = run_git(&["rev-parse", "--short", "HEAD"])?;
+    let dirty = run_git(&["status", "--porcelain"]).is_some_and(|s| !s.is_empty());
     Some(if dirty { format!("{sha}-dirty") } else { sha })
 }
 
-/// Run a git command, returning its trimmed stdout, or `None` on any failure
-/// (missing binary, non-zero exit, empty output).
-fn git(args: &[&str]) -> Option<String> {
-    let out = Command::new("git").args(args).output().ok()?;
+/// Run a git command anchored at this package's directory, returning its trimmed
+/// stdout, or `None` on any failure (missing binary, non-zero exit, empty
+/// output). The `-C $CARGO_MANIFEST_DIR` anchor pins the working directory so a
+/// cross-compile or container build that runs the script from elsewhere still
+/// queries this checkout (and `--git-path` results stay relative to it).
+fn run_git(args: &[&str]) -> Option<String> {
+    let dir = std::env::var("CARGO_MANIFEST_DIR").ok()?;
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(&dir)
+        .args(args)
+        .output()
+        .ok()?;
     if !out.status.success() {
         return None;
     }
