@@ -136,6 +136,38 @@ fn rejection_reason(readiness: MergeReadiness) -> MergeRejectionReason {
     }
 }
 
+/// Refine [`rejection_reason`] with the CI rollup: a change blocked only because
+/// its checks are still running maps to the retryable
+/// [`MergeRejectionReason::ChecksPending`] instead of an opaque hard block, so an
+/// agent knows to poll-and-retry rather than give up. A conflict or behind state
+/// is never overridden, since retrying cannot clear it. GitHub reports pending
+/// required checks as `blocked` and pending non-required ones as `unstable` (the
+/// latter flattens to `Unknown`), so both readiness values are eligible.
+fn rejection_reason_with_checks(
+    readiness: MergeReadiness,
+    checks: ChecksState,
+) -> MergeRejectionReason {
+    if checks == ChecksState::Pending
+        && matches!(readiness, MergeReadiness::Blocked | MergeReadiness::Unknown)
+    {
+        MergeRejectionReason::ChecksPending
+    } else {
+        rejection_reason(readiness)
+    }
+}
+
+/// The merge rejection reason for a change, from GitHub's raw `mergeable_state`
+/// and CI rollup. The single classifier the merge gate ([`GitHubForge::merge_change`])
+/// and the CLI's stop reporter share, so "waiting on CI" is decided one way
+/// everywhere.
+#[must_use]
+pub fn merge_rejection_for(
+    mergeable_state: Option<&str>,
+    checks: Option<CheckRollup>,
+) -> MergeRejectionReason {
+    rejection_reason_with_checks(readiness(mergeable_state), checks_state(checks))
+}
+
 /// The GitHub forge: a project-scoped adapter over the [`GitHub`] client.
 pub struct GitHubForge {
     client: GitHub,
@@ -269,7 +301,22 @@ impl Forge for GitHubForge {
                         Duration::from_secs(10),
                     )
                     .map_or(MergeRejectionReason::Unknown, |pr| {
-                        rejection_reason(readiness(pr.mergeable_state.as_deref()))
+                        // Also probe the CI rollup so a block that is only pending
+                        // checks reads as the retryable `ChecksPending`, not an
+                        // opaque hard block. Best-effort: a failed probe yields no
+                        // checks, which degrades to the readiness-only reason.
+                        let checks = self
+                            .client
+                            .pull_request_checks_within(
+                                &self.owner,
+                                &self.repo,
+                                &[number],
+                                Duration::from_secs(10),
+                            )
+                            .ok()
+                            .and_then(|mut m| m.remove(&number))
+                            .and_then(|c| c.checks);
+                        merge_rejection_for(pr.mergeable_state.as_deref(), checks)
                     });
                 Err(ForgeError::Rejected(reason))
             }
@@ -352,6 +399,45 @@ mod tests {
         assert_ne!(checks_state(None), checks_state(Some(CheckRollup::Pass)));
         assert_eq!(checks_state(Some(CheckRollup::Fail)), ChecksState::Failed);
         assert_eq!(checks_state(Some(CheckRollup::Pending)), ChecksState::Pending);
+    }
+
+    #[test]
+    fn merge_rejection_for_flags_pending_ci_as_retryable() {
+        // A block that is only pending required checks is retryable.
+        let r = merge_rejection_for(Some("blocked"), Some(CheckRollup::Pending));
+        assert_eq!(r, MergeRejectionReason::ChecksPending);
+        assert!(r.is_retryable());
+        // Pending non-required checks surface as `unstable` (flattens to Unknown).
+        assert_eq!(
+            merge_rejection_for(Some("unstable"), Some(CheckRollup::Pending)),
+            MergeRejectionReason::ChecksPending
+        );
+        // Failed checks under a block is a hard stop, not retryable.
+        assert_eq!(
+            merge_rejection_for(Some("blocked"), Some(CheckRollup::Fail)),
+            MergeRejectionReason::Blocked
+        );
+        // Passing checks but still blocked means review is required: hard stop.
+        assert_eq!(
+            merge_rejection_for(Some("blocked"), Some(CheckRollup::Pass)),
+            MergeRejectionReason::Blocked
+        );
+        // A conflict is never masked by pending CI.
+        assert_eq!(
+            merge_rejection_for(Some("dirty"), Some(CheckRollup::Pending)),
+            MergeRejectionReason::Conflict
+        );
+        // A behind branch with pending CI stays Behind: rebasing, not waiting,
+        // is what clears it.
+        assert_eq!(
+            merge_rejection_for(Some("behind"), Some(CheckRollup::Pending)),
+            MergeRejectionReason::Behind
+        );
+        // No checks configured plus a block is a hard block (review).
+        assert_eq!(
+            merge_rejection_for(Some("blocked"), None),
+            MergeRejectionReason::Blocked
+        );
     }
 
     #[test]

@@ -564,6 +564,9 @@ pub struct ReorderArgs {
 }
 
 /// Arguments for `stacc merge`.
+// Independent CLI flags are naturally booleans; the count is a surface, not a
+// data-modeling smell (same as RestackArgs, LogArgs, and SyncArgs).
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, clap::Args)]
 pub struct MergeArgs {
     /// Skip the post-merge fetch: merged branches still leave local state, but the
@@ -576,6 +579,18 @@ pub struct MergeArgs {
     /// Keep the local branches of merged PRs instead of deleting them.
     #[arg(long)]
     pub keep_branches: bool,
+    /// Wait on a child that stops only because its CI is still running: poll its
+    /// checks and continue the merge when they pass, instead of stopping for a
+    /// manual re-run. A hard block (conflict, review) still stops immediately.
+    #[arg(long)]
+    pub watch: bool,
+    /// Seconds between CI polls while `--watch` waits.
+    #[arg(long, value_name = "SECS", default_value_t = 15)]
+    pub watch_interval: u64,
+    /// Give up `--watch` after this many seconds of still-pending CI, leaving the
+    /// retryable stop to report.
+    #[arg(long, value_name = "SECS", default_value_t = 600)]
+    pub watch_timeout: u64,
 }
 
 /// Arguments for `stacc rename`.
