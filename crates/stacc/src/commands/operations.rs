@@ -1980,7 +1980,33 @@ fn merge_stack(
                         }
                     };
                     if !live.ready() {
-                        stopped = Some(json!({ "kind": "not_ready", "branch": branch, "number": pr.number, "readiness": super::readiness_str(live.mergeable_state.as_deref()), "reason": "not cleanly mergeable" }));
+                        // Probe the CI rollup so a child blocked only because its
+                        // restacked commit's checks are still running surfaces as a
+                        // retryable "waiting on CI" stop, distinct from a hard block
+                        // (conflict, review). An agent reads `retryable` to decide
+                        // poll-and-retry vs. give up; `stacc merge --watch` keys on it.
+                        let checks = github
+                            .pull_request_checks_within(
+                                owner,
+                                repo_name,
+                                &[pr.number],
+                                std::time::Duration::from_secs(10),
+                            )
+                            .ok()
+                            .and_then(|mut m| m.remove(&pr.number))
+                            .and_then(|c| c.checks);
+                        let reason =
+                            stacc_github::merge_rejection_for(live.mergeable_state.as_deref(), checks);
+                        let retryable = reason.is_retryable();
+                        stopped = Some(json!({
+                            "kind": "not_ready",
+                            "branch": branch,
+                            "number": pr.number,
+                            "readiness": super::readiness_str(live.mergeable_state.as_deref()),
+                            "rejection": serde_json::to_value(reason).unwrap_or(Value::Null),
+                            "retryable": retryable,
+                            "reason": if retryable { "waiting on required checks" } else { "not cleanly mergeable" },
+                        }));
                         break;
                     }
                     match github.merge_pull_request(owner, repo_name, pr.number) {
