@@ -64,15 +64,32 @@ pub enum MergeReadiness {
 /// Derived from the structured readiness field at merge time (never parsed from
 /// a free-text rejection body), so an agent is never left with an opaque
 /// rejection (R16). There is no `Ready` variant: a ready change is not rejected.
+///
+/// `ChecksPending` is the one *retryable* reason: the change is only blocked
+/// because CI is still running, so polling and re-merging can succeed without
+/// operator action (see [`MergeRejectionReason::is_retryable`]). Every other
+/// reason is a hard block needing a human.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MergeRejectionReason {
     Conflict,
     Behind,
     Blocked,
+    ChecksPending,
     NeedsApproval,
     Draft,
     Unknown,
+}
+
+impl MergeRejectionReason {
+    /// Whether retrying the merge later could succeed without operator action.
+    /// Only true for [`MergeRejectionReason::ChecksPending`]: CI is still
+    /// running, so `stacc merge --watch` (or a manual poll-and-retry) is the
+    /// right response rather than treating the stop as a hard block.
+    #[must_use]
+    pub fn is_retryable(self) -> bool {
+        matches!(self, MergeRejectionReason::ChecksPending)
+    }
 }
 
 /// A change (a GitHub PR or a GitLab MR) as stacc cares about it: identity,
@@ -208,9 +225,25 @@ mod tests {
         assert_eq!(wire(&MergeRejectionReason::Conflict), "conflict");
         assert_eq!(wire(&MergeRejectionReason::Behind), "behind");
         assert_eq!(wire(&MergeRejectionReason::Blocked), "blocked");
+        assert_eq!(wire(&MergeRejectionReason::ChecksPending), "checks_pending");
         assert_eq!(wire(&MergeRejectionReason::NeedsApproval), "needs_approval");
         assert_eq!(wire(&MergeRejectionReason::Draft), "draft");
         assert_eq!(wire(&MergeRejectionReason::Unknown), "unknown");
+    }
+
+    #[test]
+    fn checks_pending_is_the_only_retryable_rejection_reason() {
+        assert!(MergeRejectionReason::ChecksPending.is_retryable());
+        for reason in [
+            MergeRejectionReason::Conflict,
+            MergeRejectionReason::Behind,
+            MergeRejectionReason::Blocked,
+            MergeRejectionReason::NeedsApproval,
+            MergeRejectionReason::Draft,
+            MergeRejectionReason::Unknown,
+        ] {
+            assert!(!reason.is_retryable(), "{reason:?} must be a hard block");
+        }
     }
 
     #[test]
@@ -253,6 +286,7 @@ mod tests {
             MergeRejectionReason::Conflict,
             MergeRejectionReason::Behind,
             MergeRejectionReason::Blocked,
+            MergeRejectionReason::ChecksPending,
             MergeRejectionReason::NeedsApproval,
             MergeRejectionReason::Draft,
             MergeRejectionReason::Unknown,
