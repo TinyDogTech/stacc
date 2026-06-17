@@ -268,6 +268,115 @@ fn merge_marks_a_ci_pending_stop_retryable() {
     checks.assert();
 }
 
+// STA-118: `--watch` waits on a pending-CI stop, but gives up at the timeout and
+// reports the same retryable stop rather than hanging forever.
+#[test]
+fn merge_watch_times_out_and_reports_the_retryable_stop() {
+    let tmp = repo();
+    let p = tmp.path();
+    run_git(p, &["checkout", "-q", "-b", "feat"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "f"]);
+    track_pr(p, "feat", "main", 1);
+
+    let server = MockServer::start();
+    let base = "/repos/stacc-sandbox/example";
+    server.mock(|w, t| {
+        w.method(Method::GET).path(format!("{base}/branches/main/protection"));
+        t.status(404).json_body(serde_json::json!({ "message": "x" }));
+    });
+    server.mock(|w, t| {
+        w.method(Method::GET).path(format!("{base}/pulls/1"));
+        t.status(200).json_body(pr_open(1, "blocked"));
+    });
+    server.mock(|w, t| {
+        w.method(Method::POST).path("/graphql");
+        t.status(200).json_body(serde_json::json!({
+            "data": { "repository": { "pr1": {
+                "reviewDecision": serde_json::Value::Null,
+                "commits": { "nodes": [ { "commit": {
+                    "statusCheckRollup": { "state": "PENDING" }
+                } } ] }
+            } } }
+        }));
+    });
+
+    run_git(p, &["checkout", "-q", "feat"]);
+    let out = stacc_env(
+        p,
+        &[
+            "merge", "--offline", "--watch", "--watch-timeout", "1", "--watch-interval", "1",
+            "--format", "json",
+        ],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains(r#""rejection":"checks_pending""#), "got: {s}");
+    assert!(s.contains(r#""retryable":true"#), "got: {s}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("waiting on CI"), "expected the watch note, got: {err}");
+}
+
+// STA-118: `--watch` only engages for pending CI. A hard block (failed checks)
+// stops immediately, never entering the wait loop.
+#[test]
+fn merge_watch_does_not_wait_on_a_hard_block() {
+    let tmp = repo();
+    let p = tmp.path();
+    run_git(p, &["checkout", "-q", "-b", "feat"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "f"]);
+    track_pr(p, "feat", "main", 1);
+
+    let server = MockServer::start();
+    let base = "/repos/stacc-sandbox/example";
+    server.mock(|w, t| {
+        w.method(Method::GET).path(format!("{base}/branches/main/protection"));
+        t.status(404).json_body(serde_json::json!({ "message": "x" }));
+    });
+    server.mock(|w, t| {
+        w.method(Method::GET).path(format!("{base}/pulls/1"));
+        t.status(200).json_body(pr_open(1, "blocked"));
+    });
+    server.mock(|w, t| {
+        w.method(Method::POST).path("/graphql");
+        t.status(200).json_body(serde_json::json!({
+            "data": { "repository": { "pr1": {
+                "reviewDecision": serde_json::Value::Null,
+                "commits": { "nodes": [ { "commit": {
+                    "statusCheckRollup": { "state": "FAILURE" }
+                } } ] }
+            } } }
+        }));
+    });
+
+    run_git(p, &["checkout", "-q", "feat"]);
+    let out = stacc_env(
+        p,
+        &[
+            "merge", "--offline", "--watch", "--watch-timeout", "60", "--watch-interval", "1",
+            "--format", "json",
+        ],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains(r#""rejection":"blocked""#), "got: {s}");
+    assert!(s.contains(r#""retryable":false"#), "got: {s}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !err.contains("waiting on CI"),
+        "watch must not engage on a hard block, got: {err}"
+    );
+}
+
 #[test]
 fn merge_with_nothing_ready_is_a_noop() {
     let tmp = repo();

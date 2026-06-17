@@ -1784,6 +1784,16 @@ pub fn merge(args: &MergeArgs, format: OutputFormat) -> Result<(), Error> {
     // Walk bottom-up: merge each PR, then restack the rest onto the freshly
     // merged trunk and force-push the next branch, so its PR is `trunk + its own
     // commits` and merges cleanly (no squash-cascade conflict).
+    // `--watch`: when a child stops only because its restacked CI is still
+    // running, poll its checks and continue instead of stopping for a manual
+    // re-run. The budget is polls = timeout / interval (at least one).
+    let watch = args.watch.then(|| Watch {
+        interval: std::time::Duration::from_secs(args.watch_interval.max(1)),
+        polls: u32::try_from(args.watch_timeout.max(1) / args.watch_interval.max(1))
+            .unwrap_or(u32::MAX)
+            .max(1),
+    });
+
     let MergeWalk {
         merged: merged_prs,
         reparented,
@@ -1804,6 +1814,7 @@ pub fn merge(args: &MergeArgs, format: OutputFormat) -> Result<(), Error> {
         &adopted_merged,
         args.offline,
         args.keep_branches,
+        watch,
     );
 
     if args.offline && !merged_prs.is_empty() {
@@ -1914,6 +1925,155 @@ fn retarget_children_to_trunk(
 // One cohesive bottom-up walk: every arm's break/stop is coupled to the loop's
 // deferred-error reporting, so splitting it would only trade this lint for
 // too_many_arguments on a helper (same trade-off as `merge` above).
+/// How long `merge --watch` waits on a child stopped for pending CI.
+#[derive(Clone, Copy)]
+struct Watch {
+    /// Pause between readiness polls.
+    interval: std::time::Duration,
+    /// Max polls before giving up (timeout / interval).
+    polls: u32,
+}
+
+/// The result of waiting on a child's CI.
+enum WatchOutcome {
+    /// The change became mergeable.
+    Ready,
+    /// The change reached a hard block (failed checks, review required).
+    Failed,
+    /// The budget ran out while still pending.
+    TimedOut,
+}
+
+/// One readiness sample: whether the change is mergeable now, and whether the
+/// only thing holding it back is still-running CI (so waiting could help).
+struct ReadyPoll {
+    ready: bool,
+    retryable: bool,
+}
+
+/// Wait for a change to become mergeable, polling its readiness until it is
+/// ready, hits a hard block, or the budget runs out. Pure over its `poll` and
+/// `sleep` closures so the wait logic is unit-testable without real time or
+/// network: a still-pending sample keeps waiting; only `ready` or a non-retryable
+/// sample ends it early.
+fn watch_for_ready(
+    mut poll: impl FnMut() -> ReadyPoll,
+    mut sleep: impl FnMut(std::time::Duration),
+    interval: std::time::Duration,
+    mut polls: u32,
+) -> WatchOutcome {
+    while polls > 0 {
+        sleep(interval);
+        polls -= 1;
+        let sample = poll();
+        if sample.ready {
+            return WatchOutcome::Ready;
+        }
+        if !sample.retryable {
+            return WatchOutcome::Failed;
+        }
+    }
+    WatchOutcome::TimedOut
+}
+
+/// The CI rollup for a change, best-effort (None on any read failure).
+fn probe_checks(
+    github: &GitHub,
+    owner: &str,
+    repo_name: &str,
+    number: u64,
+) -> Option<stacc_github::CheckRollup> {
+    github
+        .pull_request_checks_within(owner, repo_name, &[number], std::time::Duration::from_secs(10))
+        .ok()
+        .and_then(|mut m| m.remove(&number))
+        .and_then(|c| c.checks)
+}
+
+/// The readiness gate for one PR in the merge walk.
+enum Gate {
+    /// The PR is mergeable.
+    Ready,
+    /// The PR is not mergeable and `--watch` could not clear it; the value is the
+    /// structured stop to report.
+    Stop(Value),
+    /// A read failed.
+    Failed(Error),
+}
+
+/// Resolve one PR's readiness: return the live PR once mergeable, a structured
+/// stop when it is not (and `--watch` can't clear it), or an error. With `watch`
+/// set, a stop that is only pending CI is polled until the checks pass (then
+/// readiness is re-read and the PR merges) or the budget runs out.
+fn await_pr_ready(
+    github: &GitHub,
+    owner: &str,
+    repo_name: &str,
+    branch: &str,
+    number: u64,
+    watch: Option<Watch>,
+) -> Gate {
+    loop {
+        let live = match poll_pr_ready(github, owner, repo_name, number) {
+            Ok(live) => live,
+            Err(err) => return Gate::Failed(err),
+        };
+        if live.ready() {
+            return Gate::Ready;
+        }
+        let checks = probe_checks(github, owner, repo_name, number);
+        let reason = stacc_github::merge_rejection_for(live.mergeable_state.as_deref(), checks);
+        let retryable = reason.is_retryable();
+        let stop = json!({
+            "kind": "not_ready",
+            "branch": branch,
+            "number": number,
+            "readiness": super::readiness_str(live.mergeable_state.as_deref()),
+            "rejection": serde_json::to_value(reason).unwrap_or(Value::Null),
+            "retryable": retryable,
+            "reason": if retryable { "waiting on required checks" } else { "not cleanly mergeable" },
+        });
+        match watch {
+            Some(w) if retryable => {
+                eprintln!("waiting on CI for #{number} (`{branch}`)...");
+                let outcome = watch_for_ready(
+                    || {
+                        // A transient read error counts as "still pending" so a
+                        // blip doesn't abort the wait; the budget still bounds it.
+                        match poll_pr_ready(github, owner, repo_name, number) {
+                            Ok(live) => {
+                                let checks = probe_checks(github, owner, repo_name, number);
+                                let reason = stacc_github::merge_rejection_for(
+                                    live.mergeable_state.as_deref(),
+                                    checks,
+                                );
+                                ReadyPoll {
+                                    ready: live.ready(),
+                                    retryable: reason.is_retryable(),
+                                }
+                            }
+                            Err(_) => ReadyPoll {
+                                ready: false,
+                                retryable: true,
+                            },
+                        }
+                    },
+                    std::thread::sleep,
+                    w.interval,
+                    w.polls,
+                );
+                match outcome {
+                    // Checks passed: fall back to the top of the loop to re-read
+                    // readiness and merge.
+                    WatchOutcome::Ready => {}
+                    WatchOutcome::Failed | WatchOutcome::TimedOut => return Gate::Stop(stop),
+                }
+            }
+            _ => return Gate::Stop(stop),
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn merge_stack(
     git: &Git,
@@ -1927,6 +2087,7 @@ fn merge_stack(
     adopted_merged: &BTreeMap<String, u64>,
     offline: bool,
     keep_branches: bool,
+    watch: Option<Watch>,
 ) -> MergeWalk {
     let mut merged_prs: Vec<MergedPr> = Vec::new();
     let mut reparented_all: Vec<(String, String)> = Vec::new();
@@ -1972,42 +2133,20 @@ fn merge_stack(
                             break;
                         }
                     }
-                    let live = match poll_pr_ready(github, owner, repo_name, pr.number) {
-                        Ok(live) => live,
-                        Err(err) => {
+                    // Resolve readiness: with `--watch`, a child stopped only on
+                    // pending CI is polled until its checks pass and it merges,
+                    // rather than stopping for a manual re-run (STA-118). The probe
+                    // + retryable classification lives in `await_pr_ready`.
+                    match await_pr_ready(github, owner, repo_name, branch, pr.number, watch) {
+                        Gate::Ready => {}
+                        Gate::Stop(stop) => {
+                            stopped = Some(stop);
+                            break;
+                        }
+                        Gate::Failed(err) => {
                             loop_err = Some(err);
                             break;
                         }
-                    };
-                    if !live.ready() {
-                        // Probe the CI rollup so a child blocked only because its
-                        // restacked commit's checks are still running surfaces as a
-                        // retryable "waiting on CI" stop, distinct from a hard block
-                        // (conflict, review). An agent reads `retryable` to decide
-                        // poll-and-retry vs. give up; `stacc merge --watch` keys on it.
-                        let checks = github
-                            .pull_request_checks_within(
-                                owner,
-                                repo_name,
-                                &[pr.number],
-                                std::time::Duration::from_secs(10),
-                            )
-                            .ok()
-                            .and_then(|mut m| m.remove(&pr.number))
-                            .and_then(|c| c.checks);
-                        let reason =
-                            stacc_github::merge_rejection_for(live.mergeable_state.as_deref(), checks);
-                        let retryable = reason.is_retryable();
-                        stopped = Some(json!({
-                            "kind": "not_ready",
-                            "branch": branch,
-                            "number": pr.number,
-                            "readiness": super::readiness_str(live.mergeable_state.as_deref()),
-                            "rejection": serde_json::to_value(reason).unwrap_or(Value::Null),
-                            "retryable": retryable,
-                            "reason": if retryable { "waiting on required checks" } else { "not cleanly mergeable" },
-                        }));
-                        break;
                     }
                     match github.merge_pull_request(owner, repo_name, pr.number) {
                         Ok(outcome) if outcome.merged => {
@@ -3265,6 +3404,59 @@ mod tests {
     use std::process::Command;
 
     use super::*;
+
+    // STA-118: the `--watch` wait loop. Driven by closures so it is exercised
+    // without real time or network; `no_sleep` makes the budget the only bound.
+    fn no_sleep(_: std::time::Duration) {}
+
+    #[test]
+    fn watch_stops_as_soon_as_the_change_is_ready() {
+        let samples = std::cell::RefCell::new(
+            vec![
+                ReadyPoll { ready: false, retryable: true },
+                ReadyPoll { ready: false, retryable: true },
+                ReadyPoll { ready: true, retryable: false },
+            ]
+            .into_iter(),
+        );
+        let outcome = watch_for_ready(
+            || samples.borrow_mut().next().expect("poll past samples"),
+            no_sleep,
+            std::time::Duration::ZERO,
+            10,
+        );
+        assert!(matches!(outcome, WatchOutcome::Ready));
+    }
+
+    #[test]
+    fn watch_stops_hard_when_checks_fail() {
+        let samples = std::cell::RefCell::new(
+            vec![
+                ReadyPoll { ready: false, retryable: true },
+                ReadyPoll { ready: false, retryable: false },
+            ]
+            .into_iter(),
+        );
+        let outcome = watch_for_ready(
+            || samples.borrow_mut().next().expect("poll past samples"),
+            no_sleep,
+            std::time::Duration::ZERO,
+            10,
+        );
+        assert!(matches!(outcome, WatchOutcome::Failed));
+    }
+
+    #[test]
+    fn watch_times_out_while_still_pending() {
+        // Always pending: the budget (2 polls) is the only thing that ends it.
+        let outcome = watch_for_ready(
+            || ReadyPoll { ready: false, retryable: true },
+            no_sleep,
+            std::time::Duration::ZERO,
+            2,
+        );
+        assert!(matches!(outcome, WatchOutcome::TimedOut));
+    }
 
     fn run_git(dir: &Path, args: &[&str]) {
         let status = Command::new("git")
