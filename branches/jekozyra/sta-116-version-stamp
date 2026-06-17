@@ -1,7 +1,7 @@
 {
   "base": {
     "name": "jekozyra/sta-118-merge-ci-wait",
-    "hash": "3b3322adeaabd19c9ed53278ebc37a52df47c9fa"
+    "hash": "169cac37d9215d9c69c917772e766580b51dbf44"
   },
   "pr": {
     "number": 107,
