@@ -1882,7 +1882,27 @@ fn retarget_children_to_trunk(
     state: &State,
     chain: &[String],
 ) -> Result<(), Error> {
-    for branch in chain.iter().skip(1) {
+    // Retarget (1) every in-chain non-bottom PR and (2) every open PR whose
+    // state-parent is the chain top but is itself outside the chain. Case (2)
+    // covers a partial merge (user on a mid-stack branch): the chain top's branch
+    // is deleted on merge, which would orphan any upstack child PR that still
+    // points at it as its base.
+    let chain_set: BTreeSet<&str> = chain.iter().map(String::as_str).collect();
+    let top_upstack: Vec<String> = chain
+        .last()
+        .map(|top| {
+            ops::children(&state.branches, top)
+                .into_iter()
+                .filter(|b| !chain_set.contains(b.as_str()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let to_retarget: Vec<&String> = chain
+        .iter()
+        .skip(1)
+        .chain(top_upstack.iter())
+        .collect();
+    for branch in to_retarget {
         let Some(pr) = state.branches.get(branch).and_then(|b| b.pr.as_ref()) else {
             continue;
         };
