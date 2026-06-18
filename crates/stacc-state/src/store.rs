@@ -380,6 +380,8 @@ mod tests {
                     number: 3,
                     url: None,
                 }),
+                pr_title: None,
+                pr_description: None,
             },
         );
         State {
@@ -459,6 +461,8 @@ mod tests {
                     hash: "abc".into(),
                 },
                 pr: None,
+                pr_title: None,
+                pr_description: None,
             },
         );
         store.save(&state).unwrap();
@@ -475,6 +479,8 @@ mod tests {
                 hash: "0".repeat(40),
             },
             pr: None,
+            pr_title: None,
+            pr_description: None,
         }
     }
 

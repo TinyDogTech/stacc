@@ -1100,6 +1100,8 @@ mod tests {
                             hash: "h".into(),
                         },
                         pr: None,
+                        pr_title: None,
+                        pr_description: None,
                     },
                 )
             })

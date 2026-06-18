@@ -57,6 +57,8 @@ fn track_pr(p: &std::path::Path, branch: &str, base: &str, number: u64) {
                 hash: git_out(p, &["rev-parse", base]),
             },
             pr: Some(PullRequest { number, url: None }),
+            pr_title: None,
+            pr_description: None,
         },
     );
     store.save(&state).unwrap();
@@ -239,6 +241,8 @@ fn sync_keeps_a_missing_ref_branch_with_an_open_pr() {
         BranchState {
             base: Base { name: "main".into(), hash: "h".into() },
             pr: Some(PullRequest { number: 9, url: None }),
+            pr_title: None,
+            pr_description: None,
         },
     );
     store.save(&state).unwrap();
@@ -307,6 +311,8 @@ fn sync_reports_a_merged_and_gone_branch_as_merged_not_pruned() {
         BranchState {
             base: Base { name: "main".into(), hash: "h".into() },
             pr: Some(PullRequest { number: 3, url: None }),
+            pr_title: None,
+            pr_description: None,
         },
     );
     store.save(&state).unwrap();
@@ -400,6 +406,8 @@ fn sync_detects_merged_and_reparents_children() {
         BranchState {
             base: Base { name: "main".into(), hash: "h1".into() },
             pr: Some(PullRequest { number: 1, url: None }),
+            pr_title: None,
+            pr_description: None,
         },
     );
     state.branches.insert(
@@ -407,6 +415,8 @@ fn sync_detects_merged_and_reparents_children() {
         BranchState {
             base: Base { name: "feature-1".into(), hash: "h2".into() },
             pr: Some(PullRequest { number: 2, url: None }),
+            pr_title: None,
+            pr_description: None,
         },
     );
     store.save(&state).unwrap();
@@ -496,6 +506,8 @@ fn sync_uses_fork_point_when_recorded_base_is_stale() {
                 hash: "0000000000000000000000000000000000000000".into(),
             },
             pr: None,
+            pr_title: None,
+            pr_description: None,
         },
     );
     store.save(&state).unwrap();

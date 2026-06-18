@@ -360,6 +360,8 @@ mod tests {
                             hash: "h".into(),
                         },
                         pr: None,
+                        pr_title: None,
+                        pr_description: None,
                     },
                 )
             })
@@ -437,6 +439,8 @@ mod tests {
                             hash: "0".repeat(40),
                         },
                         pr: None,
+                        pr_title: None,
+                        pr_description: None,
                     },
                 )
             })
@@ -463,6 +467,8 @@ mod tests {
                     hash: main_root,
                 },
                 pr: None,
+                pr_title: None,
+                pr_description: None,
             },
         );
         branches.insert(
@@ -473,6 +479,8 @@ mod tests {
                     hash: a_tip,
                 },
                 pr: None,
+                pr_title: None,
+                pr_description: None,
             },
         );
         let state = State {
@@ -552,6 +560,8 @@ mod tests {
                     hash: "0".repeat(40),
                 },
                 pr: None,
+                pr_title: None,
+                pr_description: None,
             },
         );
         State {
@@ -674,6 +684,8 @@ mod tests {
                     hash: "0".repeat(40),
                 },
                 pr: None,
+                pr_title: None,
+                pr_description: None,
             },
         );
         // Advance main so the real branches need restacking.
@@ -724,6 +736,8 @@ mod tests {
                     hash: "0".repeat(40),
                 },
                 pr: None,
+                pr_title: None,
+                pr_description: None,
             },
         );
         // Make `a` conflict with main on a shared file.
@@ -788,6 +802,8 @@ mod tests {
                     hash: "1".repeat(40),
                 },
                 pr: None,
+                pr_title: None,
+                pr_description: None,
             },
         );
         let mut state = State {

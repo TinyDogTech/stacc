@@ -130,6 +130,8 @@ fn track_pr(p: &Path, branch: &str, base: &str, number: u64) {
                 hash: rev(p, base),
             },
             pr: Some(PullRequest { number, url: None }),
+            pr_title: None,
+            pr_description: None,
         },
     );
     store.save(&state).unwrap();

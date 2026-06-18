@@ -124,6 +124,8 @@ pub fn track(args: &TrackArgs, format: OutputFormat) -> Result<(), Error> {
                     hash: base_hash.clone(),
                 },
                 pr: None,
+                pr_title: None,
+                pr_description: None,
             },
         );
         Ok(())
@@ -309,6 +311,8 @@ pub fn create(args: &CreateArgs, format: OutputFormat) -> Result<(), Error> {
                         hash: base_hash.clone(),
                     },
                     pr: None,
+                    pr_title: None,
+                    pr_description: None,
                 },
             );
             apply_insert(state);
@@ -328,6 +332,8 @@ pub fn create(args: &CreateArgs, format: OutputFormat) -> Result<(), Error> {
                 hash: base_hash.clone(),
             },
             pr: None,
+            pr_title: None,
+            pr_description: None,
         },
     );
     apply_insert(&mut state);
@@ -657,21 +663,19 @@ pub fn submit(args: &SubmitArgs, format: OutputFormat) -> Result<(), Error> {
     // The PR records to write back, applied together in one transactional update
     // after the network work so a concurrent change to another branch survives.
     let mut pr_updates: Vec<(String, PullRequest)> = Vec::new();
+    // Caller-supplied title/description for the current branch, to persist in
+    // state so re-submits reuse them without repeating the flags.
+    let mut title_update: Option<(String, String)> = None;
+    let mut desc_update: Option<(String, String)> = None;
 
     for branch in &chain {
         let is_current = branch == &current;
-        let base = state
-            .branches
-            .get(branch)
-            .expect("branch is in chain")
-            .base
-            .name
-            .clone();
+        let branch_state = state.branches.get(branch).expect("branch is in chain");
+        let base = branch_state.base.name.clone();
+        let stored_title = branch_state.pr_title.clone();
+        let stored_desc = branch_state.pr_description.clone();
 
-        let recorded = state
-            .branches
-            .get(branch)
-            .and_then(|b| b.pr.as_ref().map(|pr| pr.number));
+        let recorded = branch_state.pr.as_ref().map(|pr| pr.number);
 
         // --update-only: a branch with no PR is skipped entirely (not even
         // pushed), and reported, instead of getting a new PR.
@@ -699,16 +703,30 @@ pub fn submit(args: &SubmitArgs, format: OutputFormat) -> Result<(), Error> {
 
         git.push_force_with_lease(&repo.remote, branch)?;
 
-        let title = git.commit_subject(branch)?;
-        // --description applies to the branch the user is actually submitting;
-        // the others fall back to their own commit body.
-        let body = if is_current {
-            match &args.description {
-                Some(value) => resolve_description(value)?,
-                None => git.commit_body(branch)?,
+        // Title: --title (current branch only) > stored pr_title > commit subject.
+        // Description: --description (current branch only) > stored pr_description > commit body.
+        let title = if is_current {
+            match &args.title {
+                Some(t) => {
+                    title_update = Some((branch.clone(), t.clone()));
+                    t.clone()
+                }
+                None => stored_title.unwrap_or_else(|| git.commit_subject(branch).unwrap_or_default()),
             }
         } else {
-            git.commit_body(branch)?
+            stored_title.unwrap_or_else(|| git.commit_subject(branch).unwrap_or_default())
+        };
+        let body = if is_current {
+            match &args.description {
+                Some(value) => {
+                    let resolved = resolve_description(value)?;
+                    desc_update = Some((branch.clone(), resolved.clone()));
+                    resolved
+                }
+                None => stored_desc.unwrap_or_else(|| git.commit_body(branch).unwrap_or_default()),
+            }
+        } else {
+            stored_desc.unwrap_or_else(|| git.commit_body(branch).unwrap_or_default())
         };
 
         let pr = match existing {
@@ -757,6 +775,16 @@ pub fn submit(args: &SubmitArgs, format: OutputFormat) -> Result<(), Error> {
         for (branch, pr) in &pr_updates {
             if let Some(branch_state) = state.branches.get_mut(branch) {
                 branch_state.pr = Some(pr.clone());
+            }
+        }
+        if let Some((branch, title)) = &title_update {
+            if let Some(branch_state) = state.branches.get_mut(branch) {
+                branch_state.pr_title = Some(title.clone());
+            }
+        }
+        if let Some((branch, desc)) = &desc_update {
+            if let Some(branch_state) = state.branches.get_mut(branch) {
+                branch_state.pr_description = Some(desc.clone());
             }
         }
         Ok(())

@@ -60,6 +60,8 @@ fn track_pr(p: &Path, branch: &str, number: u64, url: Option<&str>) {
                 number,
                 url: url.map(String::from),
             }),
+            pr_title: None,
+            pr_description: None,
         },
     );
     store.save(&state).unwrap();
