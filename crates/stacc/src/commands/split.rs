@@ -404,6 +404,8 @@ fn apply_split_chain(
                     hash: prev_hash.clone(),
                 },
                 pr: None,
+                pr_title: None,
+                pr_description: None,
             },
         );
         prev_name.clone_from(name);

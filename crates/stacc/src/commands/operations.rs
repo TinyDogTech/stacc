@@ -2686,6 +2686,8 @@ fn rollback_fold(git: &Git, op: &recovery::Operation) {
                     number,
                     url: pr_url.clone(),
                 }),
+                pr_title: None,
+                pr_description: None,
             },
         );
         for (child, pre_hash) in children_pre {

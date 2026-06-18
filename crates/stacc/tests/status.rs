@@ -100,6 +100,8 @@ fn status_with_pr_fetches_live_state() {
                 number: 5,
                 url: None,
             }),
+            pr_title: None,
+            pr_description: None,
         },
     );
     store.save(&state).unwrap();

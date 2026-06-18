@@ -30,6 +30,14 @@ pub struct BranchState {
     pub base: Base,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr: Option<PullRequest>,
+    /// Caller-supplied PR title, persisted across re-submits. Overrides the
+    /// commit subject when set; falls back to commit subject when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_title: Option<String>,
+    /// Caller-supplied PR body, persisted across re-submits. Overrides the
+    /// commit body when set; falls back to commit body when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_description: Option<String>,
 }
 
 /// A record of a branch dropped by `stacc merged`, kept in the `disposals` blob
@@ -72,6 +80,8 @@ mod tests {
                 number: 7,
                 url: None,
             }),
+            pr_title: None,
+            pr_description: None,
         };
         let json = serde_json::to_string(&state).unwrap();
         let back: BranchState = serde_json::from_str(&json).unwrap();
@@ -86,6 +96,8 @@ mod tests {
                 hash: "abc123".into(),
             },
             pr: None,
+            pr_title: None,
+            pr_description: None,
         };
         let json = serde_json::to_string(&state).unwrap();
         assert!(!json.contains("pr"));
@@ -96,6 +108,43 @@ mod tests {
         let json = r#"{"base":{"name":"main","hash":"abc"}}"#;
         let state: BranchState = serde_json::from_str(json).unwrap();
         assert_eq!(state.pr, None);
+        assert_eq!(state.pr_title, None);
+        assert_eq!(state.pr_description, None);
+    }
+
+    #[test]
+    fn pr_title_and_description_roundtrip() {
+        let state = BranchState {
+            base: Base {
+                name: "main".into(),
+                hash: "abc123".into(),
+            },
+            pr: None,
+            pr_title: Some("Custom title".into()),
+            pr_description: Some("Custom body".into()),
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(json.contains("pr_title"), "pr_title in json: {json}");
+        assert!(json.contains("pr_description"), "pr_description in json: {json}");
+        let back: BranchState = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.pr_title.as_deref(), Some("Custom title"));
+        assert_eq!(back.pr_description.as_deref(), Some("Custom body"));
+    }
+
+    #[test]
+    fn pr_title_and_description_omitted_when_absent() {
+        let state = BranchState {
+            base: Base {
+                name: "main".into(),
+                hash: "abc123".into(),
+            },
+            pr: None,
+            pr_title: None,
+            pr_description: None,
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(!json.contains("pr_title"), "absent pr_title omitted: {json}");
+        assert!(!json.contains("pr_description"), "absent pr_description omitted: {json}");
     }
 
     #[test]

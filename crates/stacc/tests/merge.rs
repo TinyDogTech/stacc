@@ -87,6 +87,8 @@ fn track_pr(p: &Path, branch: &str, base: &str, number: u64) {
                 hash: git_out(p, &["rev-parse", base]),
             },
             pr: Some(PullRequest { number, url: None }),
+            pr_title: None,
+            pr_description: None,
         },
     );
     store.save(&state).unwrap();
@@ -1223,6 +1225,8 @@ fn track_no_pr(p: &Path, branch: &str, base: &str) {
                 hash: git_out(p, &["rev-parse", base]),
             },
             pr: None,
+            pr_title: None,
+            pr_description: None,
         },
     );
     store.save(&state).unwrap();

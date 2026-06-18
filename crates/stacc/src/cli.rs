@@ -399,8 +399,15 @@ pub struct CheckoutArgs {
 /// Arguments for `stacc submit`.
 #[derive(Debug, clap::Args)]
 pub struct SubmitArgs {
+    /// PR title for the current branch. Persisted in stack state so re-submits
+    /// reuse it without repeating the flag. Defaults to the branch's commit
+    /// subject when not set and no stored title exists.
+    #[arg(long)]
+    pub title: Option<String>,
+
     /// PR body: a literal string, or `@path` to read from a file.
-    /// Defaults to the branch's latest commit body.
+    /// Persisted in stack state so re-submits reuse it without repeating the
+    /// flag. Defaults to the branch's latest commit body.
     #[arg(long)]
     pub description: Option<String>,
 

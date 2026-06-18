@@ -146,6 +146,8 @@ fn submit_updates_existing_pr() {
                 number: 3,
                 url: None,
             }),
+            pr_title: None,
+            pr_description: None,
         },
     );
     store.save(&state).unwrap();
@@ -584,6 +586,173 @@ fn submit_description_applies_only_to_current_branch() {
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
     mock_f1.assert();
     mock_f2.assert();
+}
+
+#[test]
+fn submit_title_flag_sends_custom_title() {
+    let (tmp, _bare) = setup();
+    assert!(stacc(tmp.path(), &["init"]).status.success());
+    run_git(tmp.path(), &["checkout", "-q", "-b", "feature"]);
+    run_git(tmp.path(), &["commit", "-q", "--allow-empty", "-m", "Commit subject"]);
+    assert!(stacc(tmp.path(), &["track"]).status.success());
+
+    let server = MockServer::start();
+    // The mock requires the custom title, not the commit subject.
+    let mock = server.mock(|when, then| {
+        when.method(httpmock::Method::POST)
+            .path("/repos/TinyDogTech/stacc/pulls")
+            .body_contains(r#""title":"Custom PR Title""#);
+        then.status(201).json_body(pr_body(70));
+    });
+
+    let out = stacc_env(
+        tmp.path(),
+        &["submit", "--title", "Custom PR Title", "--format", "json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    mock.assert();
+}
+
+#[test]
+fn submit_title_persists_to_state() {
+    let (tmp, _bare) = setup();
+    assert!(stacc(tmp.path(), &["init"]).status.success());
+    run_git(tmp.path(), &["checkout", "-q", "-b", "feature"]);
+    run_git(tmp.path(), &["commit", "-q", "--allow-empty", "-m", "Commit subject"]);
+    assert!(stacc(tmp.path(), &["track"]).status.success());
+
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(httpmock::Method::POST)
+            .path("/repos/TinyDogTech/stacc/pulls");
+        then.status(201).json_body(pr_body(71));
+    });
+
+    let out = stacc_env(
+        tmp.path(),
+        &["submit", "--title", "Stored Title", "--format", "json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+
+    let show = Command::new("git")
+        .arg("-C")
+        .arg(tmp.path())
+        .args(["show", "refs/stacc/data:branches/feature"])
+        .output()
+        .unwrap();
+    let blob = String::from_utf8_lossy(&show.stdout);
+    assert!(blob.contains(r#""pr_title": "Stored Title""#), "pr_title in state blob: {blob}");
+}
+
+#[test]
+fn submit_persisted_title_survives_resubmit() {
+    let (tmp, _bare) = setup();
+    assert!(stacc(tmp.path(), &["init"]).status.success());
+    run_git(tmp.path(), &["checkout", "-q", "-b", "feature"]);
+    run_git(tmp.path(), &["commit", "-q", "--allow-empty", "-m", "Commit subject"]);
+    assert!(stacc(tmp.path(), &["track"]).status.success());
+
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(httpmock::Method::POST)
+            .path("/repos/TinyDogTech/stacc/pulls");
+        then.status(201).json_body(pr_body(72));
+    });
+    // The re-submit update must carry the stored title, not the commit subject.
+    let resubmit_mock = server.mock(|when, then| {
+        when.method(httpmock::Method::PATCH)
+            .path("/repos/TinyDogTech/stacc/pulls/72")
+            .body_contains(r#""title":"Stored Title""#);
+        then.status(200).json_body(pr_body(72));
+    });
+
+    // First submit: sets --title and persists it.
+    let out = stacc_env(
+        tmp.path(),
+        &["submit", "--title", "Stored Title", "--format", "json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(out.status.success(), "first submit stderr: {}", String::from_utf8_lossy(&out.stderr));
+
+    // Second submit: no --title flag; stored title must be used.
+    let out = stacc_env(
+        tmp.path(),
+        &["submit", "--format", "json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(out.status.success(), "resubmit stderr: {}", String::from_utf8_lossy(&out.stderr));
+    resubmit_mock.assert();
+}
+
+#[test]
+fn submit_description_persists_to_state() {
+    let (tmp, _bare) = setup();
+    assert!(stacc(tmp.path(), &["init"]).status.success());
+    run_git(tmp.path(), &["checkout", "-q", "-b", "feature"]);
+    run_git(tmp.path(), &["commit", "-q", "--allow-empty", "-m", "Commit subject"]);
+    assert!(stacc(tmp.path(), &["track"]).status.success());
+
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(httpmock::Method::POST)
+            .path("/repos/TinyDogTech/stacc/pulls");
+        then.status(201).json_body(pr_body(73));
+    });
+
+    let out = stacc_env(
+        tmp.path(),
+        &["submit", "--description", "Stored body", "--format", "json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+
+    let show = Command::new("git")
+        .arg("-C")
+        .arg(tmp.path())
+        .args(["show", "refs/stacc/data:branches/feature"])
+        .output()
+        .unwrap();
+    let blob = String::from_utf8_lossy(&show.stdout);
+    assert!(blob.contains(r#""pr_description": "Stored body""#), "pr_description in state blob: {blob}");
+}
+
+#[test]
+fn submit_persisted_description_survives_resubmit() {
+    let (tmp, _bare) = setup();
+    assert!(stacc(tmp.path(), &["init"]).status.success());
+    run_git(tmp.path(), &["checkout", "-q", "-b", "feature"]);
+    run_git(tmp.path(), &["commit", "-q", "--allow-empty", "-m", "Commit subject"]);
+    assert!(stacc(tmp.path(), &["track"]).status.success());
+
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(httpmock::Method::POST)
+            .path("/repos/TinyDogTech/stacc/pulls");
+        then.status(201).json_body(pr_body(74));
+    });
+    let resubmit_mock = server.mock(|when, then| {
+        when.method(httpmock::Method::PATCH)
+            .path("/repos/TinyDogTech/stacc/pulls/74")
+            .body_contains("Stored body");
+        then.status(200).json_body(pr_body(74));
+    });
+
+    let out = stacc_env(
+        tmp.path(),
+        &["submit", "--description", "Stored body", "--format", "json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(out.status.success(), "first submit stderr: {}", String::from_utf8_lossy(&out.stderr));
+
+    let out = stacc_env(
+        tmp.path(),
+        &["submit", "--format", "json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(out.status.success(), "resubmit stderr: {}", String::from_utf8_lossy(&out.stderr));
+    resubmit_mock.assert();
 }
 
 // F3: the GitHub-only boundary. In forge-less or local mode, `submit` is
