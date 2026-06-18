@@ -215,6 +215,86 @@ fn merge_squashes_ready_downstack_and_stops_at_unready() {
     assert!(log.contains(r#""name":"top""#), "got: {log}");
 }
 
+// STA-119: merging from a mid-stack branch (chain = [a, b]) must also retarget
+// the PR of the direct upstack child of the chain top (c, whose state-base is b).
+// Without the fix, deleting b's branch on merge orphans c's PR base.
+#[test]
+fn merge_retargets_upstack_child_of_chain_top() {
+    let tmp = repo();
+    let p = tmp.path();
+    // main -> a -> b -> c (linear stack).  User is on `b`; chain = [a, b].
+    // `c` is outside the merge chain but its PR base (b) will be deleted on merge.
+    run_git(p, &["checkout", "-q", "-b", "a"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "a"]);
+    run_git(p, &["checkout", "-q", "-b", "b"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "b"]);
+    run_git(p, &["checkout", "-q", "-b", "c"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "c"]);
+    track_pr(p, "a", "main", 1);
+    track_pr(p, "b", "a", 2);
+    track_pr(p, "c", "b", 3);
+
+    let server = MockServer::start();
+    let base = "/repos/stacc-sandbox/example";
+    server.mock(|w, t| {
+        w.method(Method::GET).path(format!("{base}/branches/main/protection"));
+        t.status(404).json_body(serde_json::json!({ "message": "not protected" }));
+    });
+    server.mock(|w, t| {
+        w.method(Method::GET).path(format!("{base}/pulls/1"));
+        t.status(200).json_body(pr_open(1, "clean"));
+    });
+    server.mock(|w, t| {
+        w.method(Method::GET).path(format!("{base}/pulls/2"));
+        t.status(200).json_body(pr_open(2, "clean"));
+    });
+    // c's PR is checked during retarget (open-state guard before PATCH).
+    server.mock(|w, t| {
+        w.method(Method::GET).path(format!("{base}/pulls/3"));
+        t.status(200).json_body(pr_open(3, "clean"));
+    });
+    // b (PR #2) is retargeted because it is the non-bottom member of the chain.
+    let patch2 = server.mock(|w, t| {
+        w.method(Method::PATCH)
+            .path(format!("{base}/pulls/2"))
+            .json_body(serde_json::json!({ "base": "main" }));
+        t.status(200).json_body(pr_open(2, "clean"));
+    });
+    // STA-119: c (PR #3) must also be retargeted; its base (b) is deleted on merge.
+    let patch3 = server.mock(|w, t| {
+        w.method(Method::PATCH)
+            .path(format!("{base}/pulls/3"))
+            .json_body(serde_json::json!({ "base": "main" }));
+        t.status(200).json_body(pr_open(3, "clean"));
+    });
+    let merge1 = server.mock(|w, t| {
+        w.method(Method::PUT).path(format!("{base}/pulls/1/merge"));
+        t.status(200).json_body(serde_json::json!({ "merged": true }));
+    });
+    let merge2 = server.mock(|w, t| {
+        w.method(Method::PUT).path(format!("{base}/pulls/2/merge"));
+        t.status(200).json_body(serde_json::json!({ "merged": true }));
+    });
+
+    run_git(p, &["checkout", "-q", "b"]);
+    let out = stacc_env(
+        p,
+        &["merge", "--offline", "--format", "json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains(r#""number":1"#) && s.contains(r#""number":2"#), "got: {s}");
+    merge1.assert();
+    merge2.assert();
+    patch2.assert();
+    patch3.assert();
+}
+
 // STA-118: a PR blocked only because its CI is still running is a *retryable*
 // stop. The stop JSON must say so (`rejection: checks_pending`, `retryable:
 // true`) so an agent (or `merge --watch`) polls and retries instead of treating
@@ -903,9 +983,18 @@ fn merge_restores_the_starting_branch() {
         w.method(Method::GET).path(format!("{base}/pulls/2"));
         t.status(200).json_body(pr_open(2, "clean"));
     });
+    // c's PR (#3) is checked + retargeted: it is the upstack child of chain-top b.
+    server.mock(|w, t| {
+        w.method(Method::GET).path(format!("{base}/pulls/3"));
+        t.status(200).json_body(pr_open(3, "clean"));
+    });
     server.mock(|w, t| {
         w.method(Method::PATCH).path(format!("{base}/pulls/2"));
         t.status(200).json_body(pr_open(2, "clean"));
+    });
+    server.mock(|w, t| {
+        w.method(Method::PATCH).path(format!("{base}/pulls/3"));
+        t.status(200).json_body(pr_open(3, "clean"));
     });
     server.mock(|w, t| {
         w.method(Method::PUT).path(format!("{base}/pulls/1/merge"));
