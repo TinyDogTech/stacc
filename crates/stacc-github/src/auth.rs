@@ -19,10 +19,9 @@ use crate::error::GitHubError;
 const DEFAULT_DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
 const DEFAULT_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
 
-/// Placeholder. Replace this constant once the OAuth App is registered under
-/// `TinyDogTech` (see the STA-17 PR description for the steps). Local dev can
-/// override at run time via `STACC_OAUTH_CLIENT_ID`.
-const DEFAULT_OAUTH_CLIENT_ID: &str = "stacc-oauth-client-id-placeholder";
+/// TinyDogTech OAuth App client ID. Public value, safe to commit.
+/// Override at run time via `STACC_OAUTH_CLIENT_ID`.
+const DEFAULT_OAUTH_CLIENT_ID: &str = "Ov23liFhPhaxJwFRBDhN";
 
 /// OAuth App scopes work coarsely, `repo` is the narrowest scope that grants
 /// PR read/write. Users who want least privilege should mint a fine-grained
