@@ -2,5 +2,11 @@
   "base": {
     "name": "main",
     "hash": "d7a24d956cf22555e2608520a78231e5c189aa62"
-  }
+  },
+  "pr": {
+    "number": 110,
+    "url": "https://github.com/TinyDogTech/stacc/pull/110"
+  },
+  "pr_title": "feat(stacc): [STA-122] add --title flag and persist per-branch PR title/body",
+  "pr_description": "Closes STA-122.\n\nAdds `--title` flag to `stacc submit` to set the PR title independently of the commit subject. Both `--title` and `--description` are now persisted in `BranchState` as `pr_title` / `pr_description` in `refs/stacc/data`, so re-submits reuse stored values without repeating the flags. Falls back to commit subject/body when no stored value exists. Stack submits apply each branch's own stored metadata independently.\n\n## Changes\n\n- `BranchState` gains two optional serde fields: `pr_title` and `pr_description` (backward compatible; absent on old state reads as `None`)\n- `SubmitArgs` gains `--title` (`title: Option<String>`)\n- `submit()` reads stored title/description as fallback and persists them to state when flags are provided\n- 5 new integration tests; 611/611 pass\n\n## Test plan\n\n- [ ] `cargo test` passes (611 tests)\n- [ ] `submit_title_flag_sends_custom_title`: `--title` sent to GitHub as PR title\n- [ ] `submit_title_persists_to_state`: state blob contains `pr_title` after `--title` submit\n- [ ] `submit_persisted_title_survives_resubmit`: re-submit without `--title` sends stored title to GitHub PATCH\n- [ ] `submit_description_persists_to_state`: state blob contains `pr_description` after `--description` submit\n- [ ] `submit_persisted_description_survives_resubmit`: re-submit without `--description` sends stored body"
 }
