@@ -801,3 +801,159 @@ fn submit_in_local_mode_is_unavailable_even_on_a_github_remote() {
     assert!(s.contains("local mode is on"), "names local mode: {s}");
     assert!(s.contains("open a change through your forge"), "forge-generic guidance: {s}");
 }
+
+// STA-121: reflow hard-wrapped commit bodies so they render as paragraphs on GitHub.
+
+#[test]
+fn submit_reflowed_wrapped_commit_body_on_create() {
+    let (tmp, _bare) = setup();
+    assert!(stacc(tmp.path(), &["init"]).status.success());
+    run_git(tmp.path(), &["checkout", "-q", "-b", "feature"]);
+    // Commit with a conventionally-wrapped body.
+    run_git(
+        tmp.path(),
+        &[
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "Add feature\n\nThis is the first sentence of the body\nwrapped before seventy-two columns.",
+        ],
+    );
+    assert!(stacc(tmp.path(), &["track"]).status.success());
+
+    let server = MockServer::start();
+    // The POST body must contain the reflowed paragraph as a single line.
+    let mock = server.mock(|when, then| {
+        when.method(httpmock::Method::POST)
+            .path("/repos/TinyDogTech/stacc/pulls")
+            .body_contains(
+                "This is the first sentence of the body wrapped before seventy-two columns.",
+            );
+        then.status(201).json_body(pr_body(80));
+    });
+
+    let out = stacc_env(
+        tmp.path(),
+        &["submit", "--format", "json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    mock.assert();
+}
+
+#[test]
+fn submit_reflowed_multi_paragraph_commit_body() {
+    let (tmp, _bare) = setup();
+    assert!(stacc(tmp.path(), &["init"]).status.success());
+    run_git(tmp.path(), &["checkout", "-q", "-b", "feature"]);
+    run_git(
+        tmp.path(),
+        &[
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "Add feature\n\nFirst paragraph line one\nfirst paragraph line two.\n\nSecond paragraph line one\nsecond paragraph line two.",
+        ],
+    );
+    assert!(stacc(tmp.path(), &["track"]).status.success());
+
+    let server = MockServer::start();
+    let mock = server.mock(|when, then| {
+        when.method(httpmock::Method::POST)
+            .path("/repos/TinyDogTech/stacc/pulls")
+            .body_contains("First paragraph line one first paragraph line two.")
+            .body_contains("Second paragraph line one second paragraph line two.");
+        then.status(201).json_body(pr_body(81));
+    });
+
+    let out = stacc_env(
+        tmp.path(),
+        &["submit", "--format", "json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    mock.assert();
+}
+
+#[test]
+fn submit_description_flag_bypasses_reflow() {
+    // Text passed via --description is sent as-is, not reflowed.
+    let (tmp, _bare) = setup();
+    assert!(stacc(tmp.path(), &["init"]).status.success());
+    run_git(tmp.path(), &["checkout", "-q", "-b", "feature"]);
+    run_git(
+        tmp.path(),
+        &[
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "Add feature\n\nWrapped body that\nwould be reflowed.",
+        ],
+    );
+    assert!(stacc(tmp.path(), &["track"]).status.success());
+
+    let server = MockServer::start();
+    // The POST body must contain the literal --description text, not the reflowed commit body.
+    let mock = server.mock(|when, then| {
+        when.method(httpmock::Method::POST)
+            .path("/repos/TinyDogTech/stacc/pulls")
+            .body_contains("My explicit description");
+        then.status(201).json_body(pr_body(82));
+    });
+
+    let out = stacc_env(
+        tmp.path(),
+        &["submit", "--description", "My explicit description", "--format", "json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    mock.assert();
+}
+
+// STA-121: re-submit without --description and no stored_desc must omit the body
+// field in the PATCH so GitHub preserves any manual PR body edits.
+
+#[test]
+fn submit_resubmit_without_description_omits_body_in_patch() {
+    let (tmp, _bare) = setup();
+    assert!(stacc(tmp.path(), &["init"]).status.success());
+    run_git(tmp.path(), &["checkout", "-q", "-b", "feature"]);
+    run_git(tmp.path(), &["commit", "-q", "--allow-empty", "-m", "Preserve body test"]);
+    assert!(stacc(tmp.path(), &["track"]).status.success());
+
+    let server = MockServer::start();
+    // First submit: CREATE. No body constraint; just let it succeed.
+    server.mock(|when, then| {
+        when.method(httpmock::Method::POST)
+            .path("/repos/TinyDogTech/stacc/pulls");
+        then.status(201).json_body(pr_body(90));
+    });
+
+    let out = stacc_env(
+        tmp.path(),
+        &["submit", "--format", "json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(out.status.success(), "first submit stderr: {}", String::from_utf8_lossy(&out.stderr));
+
+    // Second submit: UPDATE. No --description, no stored_desc.
+    // The PATCH body must be exactly {"title":"Preserve body test","base":"main"}
+    // -- the "body" key must be absent so the manual PR body is not overwritten.
+    let resubmit_mock = server.mock(|when, then| {
+        when.method(httpmock::Method::PATCH)
+            .path("/repos/TinyDogTech/stacc/pulls/90")
+            .body(r#"{"title":"Preserve body test","base":"main"}"#);
+        then.status(200).json_body(pr_body(90));
+    });
+
+    let out = stacc_env(
+        tmp.path(),
+        &["submit", "--format", "json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(out.status.success(), "resubmit stderr: {}", String::from_utf8_lossy(&out.stderr));
+    resubmit_mock.assert();
+}
