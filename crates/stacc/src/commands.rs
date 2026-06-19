@@ -865,28 +865,72 @@ fn resolve_description(value: &str) -> Result<String, Error> {
 /// Reflow a commit body for use as a PR description.
 ///
 /// Commit bodies are conventionally hard-wrapped at ~72 columns. GitHub renders
-/// each bare newline as `<br>`, breaking mid-sentence. This joins lines within
-/// each blank-line-separated paragraph into a single line, then re-joins
-/// paragraphs with `\n\n`. Applied only to `commit_body()` fallback paths; text
-/// from `--description` or stored descriptions passes through unchanged.
+/// each bare newline as `<br>`, breaking mid-sentence.
 fn reflow_body(text: &str) -> String {
-    let mut paragraphs: Vec<String> = Vec::new();
-    let mut current: Vec<&str> = Vec::new();
+    let mut out = String::with_capacity(text.len());
+    let mut in_para = false;
     for line in text.lines() {
-        let trimmed = line.trim_end();
-        if trimmed.is_empty() {
-            if !current.is_empty() {
-                paragraphs.push(current.join(" "));
-                current.clear();
+        let t = line.trim_end();
+        if t.is_empty() {
+            if in_para {
+                out.push_str("\n\n");
+                in_para = false;
             }
         } else {
-            current.push(trimmed);
+            if in_para {
+                out.push(' ');
+            }
+            out.push_str(t);
+            in_para = true;
         }
     }
-    if !current.is_empty() {
-        paragraphs.push(current.join(" "));
+    out
+}
+
+#[cfg(test)]
+mod reflow_tests {
+    use super::reflow_body;
+
+    #[test]
+    fn empty_string() {
+        assert_eq!(reflow_body(""), "");
     }
-    paragraphs.join("\n\n")
+
+    #[test]
+    fn single_line_is_noop() {
+        assert_eq!(reflow_body("One complete sentence."), "One complete sentence.");
+    }
+
+    #[test]
+    fn joins_wrapped_paragraph() {
+        assert_eq!(
+            reflow_body("First line\nsecond line\nthird line."),
+            "First line second line third line."
+        );
+    }
+
+    #[test]
+    fn preserves_paragraph_breaks() {
+        assert_eq!(
+            reflow_body("Para one line one\npara one line two.\n\nPara two."),
+            "Para one line one para one line two.\n\nPara two."
+        );
+    }
+
+    #[test]
+    fn trailing_newline_no_extra_separator() {
+        assert_eq!(reflow_body("One line.\n"), "One line.");
+    }
+
+    #[test]
+    fn multiple_blank_lines_collapse_to_one_separator() {
+        assert_eq!(reflow_body("Para one.\n\n\n\nPara two."), "Para one.\n\nPara two.");
+    }
+
+    #[test]
+    fn strips_trailing_whitespace_per_line() {
+        assert_eq!(reflow_body("First line   \nsecond line."), "First line second line.");
+    }
 }
 
 /// `stacc rename`: rename the current branch, updating local state, children,

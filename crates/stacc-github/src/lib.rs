@@ -1031,4 +1031,30 @@ mod tests {
         let gh = GitHub::with_base_url("t", server.base_url());
         assert!(!gh.branch_protected("o", "r", "main").unwrap());
     }
+
+    #[test]
+    fn pull_request_update_body_absent_when_none() {
+        let update = PullRequestUpdate {
+            title: Some("My PR".to_string()),
+            body: None,
+            base: Some("main".to_string()),
+        };
+        let json = serde_json::to_string(&update).unwrap();
+        assert!(
+            !json.contains("\"body\""),
+            "body must be absent from PATCH JSON when None: {json}"
+        );
+        assert_eq!(json, r#"{"title":"My PR","base":"main"}"#);
+    }
+
+    #[test]
+    fn pull_request_update_body_present_when_some() {
+        let update = PullRequestUpdate {
+            title: Some("My PR".to_string()),
+            body: Some("Description.".to_string()),
+            base: Some("main".to_string()),
+        };
+        let json = serde_json::to_string(&update).unwrap();
+        assert!(json.contains(r#""body":"Description.""#));
+    }
 }
