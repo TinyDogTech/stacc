@@ -89,7 +89,7 @@ fn down_and_up_move_one_level() {
 fn down_with_steps_clamps_at_trunk() {
     let tmp = linear_stack();
     let p = tmp.path();
-    let out = stacc(p, &["down", "5", "--format", "json"]);
+    let out = stacc(p, &["down", "5", "--json"]);
     assert!(out.status.success());
     assert_eq!(current_branch(p), "main");
     assert!(
@@ -103,7 +103,7 @@ fn down_with_steps_clamps_at_trunk() {
 fn up_from_the_tip_is_a_no_op() {
     let tmp = linear_stack(); // on c, the tip
     let p = tmp.path();
-    let out = stacc(p, &["up", "--format", "json"]);
+    let out = stacc(p, &["up", "--json"]);
     assert!(out.status.success());
     assert_eq!(current_branch(p), "c");
     assert!(
@@ -128,7 +128,7 @@ fn top_and_bottom_jump_the_stack() {
 fn up_with_multiple_children_errors_with_choices() {
     let tmp = forked_stack(); // on a, children b + c
     let p = tmp.path();
-    let out = stacc(p, &["up", "--format", "json"]);
+    let out = stacc(p, &["up", "--json"]);
     assert!(!out.status.success());
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains(r#""type":"ambiguous""#), "got: {s}");
@@ -141,7 +141,7 @@ fn up_with_multiple_children_errors_with_choices() {
 fn top_at_a_fork_errors_with_choices() {
     let tmp = forked_stack();
     let p = tmp.path();
-    let out = stacc(p, &["top", "--format", "json"]);
+    let out = stacc(p, &["top", "--json"]);
     assert!(!out.status.success());
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains(r#""type":"ambiguous""#), "got: {s}");

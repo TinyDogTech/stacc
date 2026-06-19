@@ -84,7 +84,7 @@ fn restack_default_scope_leaves_downstack_untouched() {
     // From `b`, the default scope is `b` + its upstack (empty). `a` is downstack
     // and drifted, but out of scope, nothing is restacked.
     run_git(p, &["checkout", "-q", "b"]);
-    let out = stacc(p, &["restack", "--format", "json"]);
+    let out = stacc(p, &["restack", "--json"]);
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -99,7 +99,7 @@ fn restack_stack_scope_repairs_whole_stack() {
     let tmp = drifted_stack();
     let p = tmp.path();
     run_git(p, &["checkout", "-q", "b"]);
-    let out = stacc(p, &["restack", "--stack", "--format", "json"]);
+    let out = stacc(p, &["restack", "--stack", "--json"]);
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -112,7 +112,7 @@ fn restack_stack_scope_repairs_whole_stack() {
     assert!(git_ok(p, &["merge-base", "--is-ancestor", "main", "b"]));
     assert!(git_ok(p, &["merge-base", "--is-ancestor", "a", "b"]));
     // Idempotent: a second --stack restack is a no-op.
-    let again = stacc(p, &["restack", "--stack", "--format", "json"]);
+    let again = stacc(p, &["restack", "--stack", "--json"]);
     assert!(String::from_utf8_lossy(&again.stdout).contains(r#""restacked":[]"#));
 }
 
@@ -145,7 +145,7 @@ fn restack_skips_a_branch_whose_git_ref_is_gone() {
 #[test]
 fn restack_requires_init() {
     let tmp = repo();
-    let out = stacc(tmp.path(), &["restack", "--format", "json"]);
+    let out = stacc(tmp.path(), &["restack", "--json"]);
     assert!(!out.status.success());
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains("not initialized"), "got: {s}");
@@ -184,7 +184,7 @@ fn restack_default_scope_restacks_current_upstack() {
     let p = tmp.path();
     // From `a` (drifted off main), the default scope is `a` + its upstack `b`.
     run_git(p, &["checkout", "-q", "a"]);
-    let out = stacc(p, &["restack", "--format", "json"]);
+    let out = stacc(p, &["restack", "--json"]);
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -226,7 +226,7 @@ fn restack_only_restacks_just_the_current_branch() {
     // to `a` alone.
     run_git(p, &["checkout", "-q", "a"]);
     let b_before = sha(p, "b");
-    let out = stacc(p, &["restack", "--only", "--format", "json"]);
+    let out = stacc(p, &["restack", "--only", "--json"]);
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -252,7 +252,7 @@ fn restack_downstack_restacks_ancestors_not_children() {
 
     run_git(p, &["checkout", "-q", "b"]);
     let c_before = sha(p, "c");
-    let out = stacc(p, &["restack", "--downstack", "--format", "json"]);
+    let out = stacc(p, &["restack", "--downstack", "--json"]);
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -272,7 +272,7 @@ fn restack_upstack_is_the_default_made_explicit() {
     let tmp = drifted_stack();
     let p = tmp.path();
     run_git(p, &["checkout", "-q", "a"]);
-    let out = stacc(p, &["restack", "--upstack", "--format", "json"]);
+    let out = stacc(p, &["restack", "--upstack", "--json"]);
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -308,7 +308,7 @@ fn restack_on_trunk_errors() {
     let tmp = drifted_stack();
     let p = tmp.path();
     run_git(p, &["checkout", "-q", "main"]);
-    let out = stacc(p, &["restack", "--format", "json"]);
+    let out = stacc(p, &["restack", "--json"]);
     assert!(!out.status.success());
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("trunk"),

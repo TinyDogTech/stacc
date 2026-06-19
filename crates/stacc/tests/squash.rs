@@ -122,7 +122,7 @@ fn squash_collapses_three_commits_and_restacks_the_upstack() {
     let b_before = rev(p, "b");
 
     run_git(p, &["checkout", "-q", "a"]);
-    let out = stacc(p, &["squash", "--format", "json"]);
+    let out = stacc(p, &["squash", "--json"]);
     assert!(
         out.status.success(),
         "squash failed: {}",
@@ -191,7 +191,7 @@ fn squash_refuses_a_branch_not_restacked_onto_its_base() {
     run_git(p, &["commit", "-q", "--amend", "--allow-empty", "-m", "first, amended"]);
     run_git(p, &["checkout", "-q", "a"]);
 
-    let out = stacc(p, &["squash", "--format", "json"]);
+    let out = stacc(p, &["squash", "--json"]);
     assert!(!out.status.success(), "squash must refuse: {:?}", json(&out));
     let v = json(&out);
     assert_eq!(v["type"], "usage", "structured refusal: {v}");
@@ -216,7 +216,7 @@ fn squash_on_a_single_commit_branch_is_a_reported_noop() {
     track(p, "main");
     let tip_before = rev(p, "a");
 
-    let out = stacc(p, &["squash", "--format", "json"]);
+    let out = stacc(p, &["squash", "--json"]);
     assert!(
         out.status.success(),
         "a no-op squash is not an error: {}",
@@ -241,7 +241,7 @@ fn squash_default_message_concatenates_oldest_first() {
     write_commit(p, "g.txt", "g\n", "newer subject");
     track(p, "main");
 
-    let out = stacc(p, &["squash", "--format", "json"]);
+    let out = stacc(p, &["squash", "--json"]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
 
     // Both subjects (and the body) appear, oldest first.
@@ -262,7 +262,7 @@ fn squash_message_flag_overrides_the_subject() {
     write_commit(p, "g.txt", "g\n", "c2");
     track(p, "main");
 
-    let out = stacc(p, &["squash", "--message", "one commit to rule them all", "--format", "json"]);
+    let out = stacc(p, &["squash", "--message", "one commit to rule them all", "--json"]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let v = json(&out);
     assert_eq!(v["squashed"], 2);
@@ -303,7 +303,7 @@ fn squash_refuses_when_an_upstack_branch_is_in_another_worktree() {
         &["worktree", "add", "-q", holder.path().join("wt-b").to_str().unwrap(), "b"],
     );
 
-    let out = stacc(p, &["squash", "--format", "json"]);
+    let out = stacc(p, &["squash", "--json"]);
     assert!(!out.status.success(), "squash must refuse: {:?}", json(&out));
     let v = json(&out);
     assert_eq!(

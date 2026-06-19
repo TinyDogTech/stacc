@@ -46,7 +46,7 @@ fn status_on_trunk() {
     let tmp = repo();
     assert!(stacc(tmp.path(), &["init"]).status.success());
 
-    let out = stacc(tmp.path(), &["status", "--format", "json"]);
+    let out = stacc(tmp.path(), &["status", "--json"]);
     assert!(out.status.success());
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains(r#""trunk":true"#), "got: {s}");
@@ -58,7 +58,7 @@ fn status_untracked_branch() {
     assert!(stacc(tmp.path(), &["init"]).status.success());
     run_git(tmp.path(), &["checkout", "-q", "-b", "feature"]);
 
-    let out = stacc(tmp.path(), &["status", "--format", "json"]);
+    let out = stacc(tmp.path(), &["status", "--json"]);
     assert!(out.status.success());
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains(r#""tracked":false"#), "got: {s}");
@@ -71,7 +71,7 @@ fn status_tracked_without_pr() {
     run_git(tmp.path(), &["checkout", "-q", "-b", "feature"]);
     assert!(stacc(tmp.path(), &["track"]).status.success());
 
-    let out = stacc(tmp.path(), &["status", "--format", "json"]);
+    let out = stacc(tmp.path(), &["status", "--json"]);
     assert!(out.status.success());
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains(r#""base":"main""#), "got: {s}");
@@ -118,7 +118,7 @@ fn status_with_pr_fetches_live_state() {
 
     let out = stacc_env(
         tmp.path(),
-        &["status", "--format", "json"],
+        &["status", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(

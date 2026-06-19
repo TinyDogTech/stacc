@@ -75,7 +75,7 @@ fn pr_emits_the_recorded_url() {
     run_git(p, &["commit", "-q", "--allow-empty", "-m", "f"]);
     track_pr(p, "feat", 7, Some("https://github.com/owner/repo/pull/7"));
 
-    let out = stacc(p, &["pr", "--format", "json"]);
+    let out = stacc(p, &["pr", "--json"]);
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -97,7 +97,7 @@ fn pr_constructs_the_url_when_none_recorded() {
     run_git(p, &["commit", "-q", "--allow-empty", "-m", "f"]);
     track_pr(p, "feat", 9, None); // no recorded URL
 
-    let out = stacc(p, &["pr", "--format", "json"]);
+    let out = stacc(p, &["pr", "--json"]);
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -137,7 +137,7 @@ fn pr_on_a_detached_head_errors() {
     let tmp = repo();
     let p = tmp.path();
     run_git(p, &["checkout", "-q", "--detach"]);
-    let out = stacc(p, &["pr", "--format", "json"]);
+    let out = stacc(p, &["pr", "--json"]);
     assert!(!out.status.success());
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("detached"),
@@ -154,7 +154,7 @@ fn pr_without_a_recorded_pr_errors() {
     run_git(p, &["commit", "-q", "--allow-empty", "-m", "f"]);
     assert!(stacc(p, &["track"]).status.success()); // tracked, but no PR
 
-    let out = stacc(p, &["pr", "--format", "json"]);
+    let out = stacc(p, &["pr", "--json"]);
     assert!(!out.status.success());
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("no PR recorded"),
@@ -173,7 +173,7 @@ fn co_alias_checks_out() {
     run_git(p, &["checkout", "-q", "main"]);
 
     // `co` is the shipped alias for `checkout`.
-    let out = stacc(p, &["co", "feat", "--format", "json"]);
+    let out = stacc(p, &["co", "feat", "--json"]);
     assert!(
         out.status.success(),
         "stderr: {}",

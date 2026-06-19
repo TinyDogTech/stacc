@@ -81,7 +81,7 @@ fn submit_creates_pr_and_records_it() {
 
     let out = stacc_env(
         tmp.path(),
-        &["submit", "--format", "json"],
+        &["submit", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
@@ -118,7 +118,7 @@ fn submit_sends_description_as_body() {
 
     let out = stacc_env(
         tmp.path(),
-        &["submit", "--description", "Custom description", "--format", "json"],
+        &["submit", "--description", "Custom description", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
@@ -161,7 +161,7 @@ fn submit_updates_existing_pr() {
 
     let out = stacc_env(
         tmp.path(),
-        &["submit", "--format", "json"],
+        &["submit", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
@@ -204,7 +204,7 @@ fn submit_adopts_an_existing_pr_by_head() {
 
     let out = stacc_env(
         tmp.path(),
-        &["submit", "--format", "json"],
+        &["submit", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
@@ -228,7 +228,7 @@ fn submit_adopts_an_existing_pr_by_head() {
     // A second submit reads the recorded number: update again, no new lookup.
     let out = stacc_env(
         tmp.path(),
-        &["submit", "--format", "json"],
+        &["submit", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
@@ -275,7 +275,7 @@ fn submit_requires_tracked_branch() {
     run_git(tmp.path(), &["checkout", "-q", "-b", "feature"]);
 
     // Not tracked, no GitHub env needed, it should fail before any network.
-    let out = stacc(tmp.path(), &["submit", "--format", "json"]);
+    let out = stacc(tmp.path(), &["submit", "--json"]);
     assert!(!out.status.success());
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains("not tracked"), "got: {s}");
@@ -286,7 +286,7 @@ fn submit_rejects_trunk() {
     let (tmp, _bare) = setup();
     assert!(stacc(tmp.path(), &["init"]).status.success());
 
-    let out = stacc(tmp.path(), &["submit", "--format", "json"]); // on main
+    let out = stacc(tmp.path(), &["submit", "--json"]); // on main
     assert!(!out.status.success());
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains("trunk"), "got: {s}");
@@ -326,7 +326,7 @@ fn submit_walks_the_downstack() {
 
     let out = stacc_env(
         tmp.path(),
-        &["submit", "--format", "json"],
+        &["submit", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
@@ -388,7 +388,7 @@ fn submit_stack_submits_the_whole_stack_downstack_first() {
 
     let out = stacc_env(
         tmp.path(),
-        &["submit", "--stack", "--format", "json"],
+        &["submit", "--stack", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
@@ -435,7 +435,7 @@ fn submit_update_only_skips_branches_without_prs() {
 
     let out = stacc_env(
         tmp.path(),
-        &["submit", "--update-only", "--format", "json"],
+        &["submit", "--update-only", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
@@ -463,7 +463,7 @@ fn submit_draft_creates_a_draft_pr() {
 
     let out = stacc_env(
         tmp.path(),
-        &["submit", "--draft", "--format", "json"],
+        &["submit", "--draft", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
@@ -488,7 +488,7 @@ fn submit_without_draft_sends_draft_false() {
 
     let out = stacc_env(
         tmp.path(),
-        &["submit", "--format", "json"],
+        &["submit", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
@@ -521,7 +521,7 @@ fn submit_re_pushes_a_rebased_branch_via_lease() {
     // First submit, creates the PR and lands `feature` on the bare remote.
     let out = stacc_env(
         tmp.path(),
-        &["submit", "--format", "json"],
+        &["submit", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
@@ -536,7 +536,7 @@ fn submit_re_pushes_a_rebased_branch_via_lease() {
     // Re-submit, lease push lets the rewritten ref overwrite the old tip.
     let out = stacc_env(
         tmp.path(),
-        &["submit", "--format", "json"],
+        &["submit", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
@@ -580,7 +580,7 @@ fn submit_description_applies_only_to_current_branch() {
 
     let out = stacc_env(
         tmp.path(),
-        &["submit", "--description", "Top branch description", "--format", "json"],
+        &["submit", "--description", "Top branch description", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
@@ -607,7 +607,7 @@ fn submit_title_flag_sends_custom_title() {
 
     let out = stacc_env(
         tmp.path(),
-        &["submit", "--title", "Custom PR Title", "--format", "json"],
+        &["submit", "--title", "Custom PR Title", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
@@ -631,7 +631,7 @@ fn submit_title_persists_to_state() {
 
     let out = stacc_env(
         tmp.path(),
-        &["submit", "--title", "Stored Title", "--format", "json"],
+        &["submit", "--title", "Stored Title", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
@@ -671,7 +671,7 @@ fn submit_persisted_title_survives_resubmit() {
     // First submit: sets --title and persists it.
     let out = stacc_env(
         tmp.path(),
-        &["submit", "--title", "Stored Title", "--format", "json"],
+        &["submit", "--title", "Stored Title", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(out.status.success(), "first submit stderr: {}", String::from_utf8_lossy(&out.stderr));
@@ -679,7 +679,7 @@ fn submit_persisted_title_survives_resubmit() {
     // Second submit: no --title flag; stored title must be used.
     let out = stacc_env(
         tmp.path(),
-        &["submit", "--format", "json"],
+        &["submit", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(out.status.success(), "resubmit stderr: {}", String::from_utf8_lossy(&out.stderr));
@@ -703,7 +703,7 @@ fn submit_description_persists_to_state() {
 
     let out = stacc_env(
         tmp.path(),
-        &["submit", "--description", "Stored body", "--format", "json"],
+        &["submit", "--description", "Stored body", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
@@ -741,14 +741,14 @@ fn submit_persisted_description_survives_resubmit() {
 
     let out = stacc_env(
         tmp.path(),
-        &["submit", "--description", "Stored body", "--format", "json"],
+        &["submit", "--description", "Stored body", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(out.status.success(), "first submit stderr: {}", String::from_utf8_lossy(&out.stderr));
 
     let out = stacc_env(
         tmp.path(),
-        &["submit", "--format", "json"],
+        &["submit", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(out.status.success(), "resubmit stderr: {}", String::from_utf8_lossy(&out.stderr));
@@ -772,7 +772,7 @@ fn submit_on_a_non_github_remote_is_unavailable_with_a_forge_generic_message() {
     run_git(p, &["commit", "-q", "--allow-empty", "-m", "Add feature"]);
     assert!(stacc(p, &["track"]).status.success());
 
-    let out = stacc(p, &["submit", "--format", "json"]);
+    let out = stacc(p, &["submit", "--json"]);
     assert!(!out.status.success(), "submit on a non-GitHub remote is unavailable");
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains(r#""type":"usage""#), "usage error, not a crash: {s}");
@@ -795,7 +795,7 @@ fn submit_in_local_mode_is_unavailable_even_on_a_github_remote() {
     // github.com URL with a working push target.
     assert!(stacc(p, &["config", "set", "local", "true"]).status.success());
 
-    let out = stacc(p, &["submit", "--format", "json"]);
+    let out = stacc(p, &["submit", "--json"]);
     assert!(!out.status.success(), "local mode makes submit unavailable");
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains("local mode is on"), "names local mode: {s}");
@@ -835,7 +835,7 @@ fn submit_reflowed_wrapped_commit_body_on_create() {
 
     let out = stacc_env(
         tmp.path(),
-        &["submit", "--format", "json"],
+        &["submit", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
@@ -870,7 +870,7 @@ fn submit_reflowed_multi_paragraph_commit_body() {
 
     let out = stacc_env(
         tmp.path(),
-        &["submit", "--format", "json"],
+        &["submit", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
@@ -906,7 +906,7 @@ fn submit_description_flag_bypasses_reflow() {
 
     let out = stacc_env(
         tmp.path(),
-        &["submit", "--description", "My explicit description", "--format", "json"],
+        &["submit", "--description", "My explicit description", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
@@ -934,7 +934,7 @@ fn submit_resubmit_without_description_omits_body_in_patch() {
 
     let out = stacc_env(
         tmp.path(),
-        &["submit", "--format", "json"],
+        &["submit", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(out.status.success(), "first submit stderr: {}", String::from_utf8_lossy(&out.stderr));
@@ -951,7 +951,7 @@ fn submit_resubmit_without_description_omits_body_in_patch() {
 
     let out = stacc_env(
         tmp.path(),
-        &["submit", "--format", "json"],
+        &["submit", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(out.status.success(), "resubmit stderr: {}", String::from_utf8_lossy(&out.stderr));

@@ -136,7 +136,7 @@ fn reorder_repoints_bases_and_restacks_into_the_new_order() {
     let p = tmp.path();
     linear_stack(p);
 
-    let out = stacc(p, &["reorder", "--order", "b,a,c", "--format", "json"]);
+    let out = stacc(p, &["reorder", "--order", "b,a,c", "--json"]);
     assert!(
         out.status.success(),
         "reorder failed: {}",
@@ -163,7 +163,7 @@ fn reorder_repoints_bases_and_restacks_into_the_new_order() {
     assert!(git_ok(p, &["cat-file", "-e", "c:a.txt"]), "c still sees the whole chain");
 
     // The full chain is intact in the log, and the finish is clean.
-    let log = String::from_utf8_lossy(&stacc(p, &["log", "--format", "json"]).stdout).into_owned();
+    let log = String::from_utf8_lossy(&stacc(p, &["log", "--json"]).stdout).into_owned();
     for name in ["a", "b", "c"] {
         assert!(log.contains(&format!(r#""name":"{name}""#)), "{name} tracked: {log}");
     }
@@ -180,10 +180,10 @@ fn reorder_rejects_unknown_duplicate_missing_and_absent_order_specs() {
     let tips = [rev(p, "a"), rev(p, "b"), rev(p, "c")];
 
     let cases: &[(&[&str], &str)] = &[
-        (&["reorder", "--order", "b,a,zz", "--format", "json"], "zz"),
-        (&["reorder", "--order", "b,b,c", "--format", "json"], "more than once"),
-        (&["reorder", "--order", "b,a", "--format", "json"], "missing c"),
-        (&["reorder", "--format", "json"], "missing --order"),
+        (&["reorder", "--order", "b,a,zz", "--json"], "zz"),
+        (&["reorder", "--order", "b,b,c", "--json"], "more than once"),
+        (&["reorder", "--order", "b,a", "--json"], "missing c"),
+        (&["reorder", "--json"], "missing --order"),
     ];
     for (args, needle) in cases {
         let out = stacc(p, args);
@@ -209,14 +209,14 @@ fn reorder_refuses_the_trunk_and_an_untracked_branch() {
     linear_stack(p);
 
     run_git(p, &["checkout", "-q", "main"]);
-    let out = stacc(p, &["reorder", "--order", "b,a,c", "--format", "json"]);
+    let out = stacc(p, &["reorder", "--order", "b,a,c", "--json"]);
     assert!(!out.status.success());
     let v = json(&out);
     assert_eq!(v["type"], "usage");
     assert!(v["message"].as_str().unwrap().contains("trunk"), "{v}");
 
     run_git(p, &["checkout", "-q", "-b", "feral", "main"]);
-    let out = stacc(p, &["reorder", "--order", "feral", "--format", "json"]);
+    let out = stacc(p, &["reorder", "--order", "feral", "--json"]);
     assert!(!out.status.success());
     let v = json(&out);
     assert_eq!(v["type"], "usage");
@@ -230,7 +230,7 @@ fn reorder_with_the_current_order_is_a_noop() {
     linear_stack(p);
     let tips = [rev(p, "a"), rev(p, "b"), rev(p, "c")];
 
-    let out = stacc(p, &["reorder", "--order", "a,b,c", "--format", "json"]);
+    let out = stacc(p, &["reorder", "--order", "a,b,c", "--json"]);
     assert!(
         out.status.success(),
         "noop reorder failed: {}",
@@ -254,7 +254,7 @@ fn continue_of_a_conflicted_reorder_finishes_the_reorder() {
 
     // Swapping two branches that edit the same file conflicts on b's rebase
     // first (its shared.txt edit replays onto a trunk without the file).
-    let out = stacc(p, &["reorder", "--order", "b,a", "--format", "json"]);
+    let out = stacc(p, &["reorder", "--order", "b,a", "--json"]);
     assert!(!out.status.success(), "expected a conflict on b");
     let v = json(&out);
     assert_eq!(v["type"], "conflict", "structured conflict: {v}");
@@ -268,7 +268,7 @@ fn continue_of_a_conflicted_reorder_finishes_the_reorder() {
     // must keep its reorder identity.
     std::fs::write(p.join("shared.txt"), "b-resolved\n").expect("write");
     run_git(p, &["add", "shared.txt"]);
-    let out = stacc(p, &["continue", "--format", "json"]);
+    let out = stacc(p, &["continue", "--json"]);
     assert!(!out.status.success(), "expected a follow-up conflict on a");
     let v = json(&out);
     assert_eq!(v["type"], "conflict", "{v}");
@@ -278,7 +278,7 @@ fn continue_of_a_conflicted_reorder_finishes_the_reorder() {
 
     std::fs::write(p.join("shared.txt"), "a-resolved\n").expect("write");
     run_git(p, &["add", "shared.txt"]);
-    let out = stacc(p, &["continue", "--format", "json"]);
+    let out = stacc(p, &["continue", "--json"]);
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -316,14 +316,14 @@ fn abort_of_a_conflicted_reorder_restores_every_branch_and_base() {
         ("c", rev(p, "c"), base_of(p, "c")),
     ];
 
-    let out = stacc(p, &["reorder", "--order", "c,b,a", "--format", "json"]);
+    let out = stacc(p, &["reorder", "--order", "c,b,a", "--json"]);
     assert!(!out.status.success(), "expected a conflict on b");
     let v = json(&out);
     assert_eq!(v["type"], "conflict", "{v}");
     assert_eq!(v["branch"], "b");
     assert_ne!(rev(p, "c"), pre[2].1, "c already rebased before the conflict");
 
-    let out = stacc(p, &["abort", "--format", "json"]);
+    let out = stacc(p, &["abort", "--json"]);
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -354,7 +354,7 @@ fn reorder_refuses_when_a_branch_is_checked_out_in_another_worktree() {
         &["worktree", "add", "-q", holder.path().join("wt-a").to_str().unwrap(), "a"],
     );
 
-    let out = stacc(p, &["reorder", "--order", "b,a,c", "--format", "json"]);
+    let out = stacc(p, &["reorder", "--order", "b,a,c", "--json"]);
     assert!(!out.status.success(), "reorder must refuse: {:?}", json(&out));
     let v = json(&out);
     assert_eq!(v["type"], "worktree_conflict", "{v}");
@@ -375,7 +375,7 @@ fn reorder_refuses_a_dirty_working_tree() {
 
     std::fs::write(p.join("c.txt"), "uncommitted edit\n").expect("write");
 
-    let out = stacc(p, &["reorder", "--order", "b,a,c", "--format", "json"]);
+    let out = stacc(p, &["reorder", "--order", "b,a,c", "--json"]);
     assert!(!out.status.success(), "reorder must refuse: {:?}", json(&out));
     let v = json(&out);
     assert_eq!(v["type"], "usage", "{v}");

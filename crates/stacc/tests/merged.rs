@@ -228,7 +228,7 @@ fn merged_json_reports_the_branch_and_evidence() {
     run_git(p, &["checkout", "-q", "main"]);
     run_git(p, &["merge", "-q", "--ff-only", "a"]);
 
-    let out = stacc(p, &["merged", "a", "--format", "json"]);
+    let out = stacc(p, &["merged", "a", "--json"]);
     assert!(out.status.success());
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
     assert_eq!(v["op"], "merged");

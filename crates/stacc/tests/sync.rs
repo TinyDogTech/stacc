@@ -172,7 +172,7 @@ fn sync_is_noop_without_prs() {
     run_git(tmp.path(), &["checkout", "-q", "-b", "feature"]);
     assert!(stacc(tmp.path(), &["track"]).status.success());
 
-    let out = stacc(tmp.path(), &["sync", "--offline", "--format", "json"]);
+    let out = stacc(tmp.path(), &["sync", "--offline", "--json"]);
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains(r#""merged":[]"#), "got: {s}");
@@ -195,13 +195,13 @@ fn sync_prunes_a_branch_whose_git_ref_is_gone() {
     run_git(p, &["checkout", "-q", "main"]);
     run_git(p, &["branch", "-D", "ghost"]);
 
-    let out = stacc(p, &["sync", "--offline", "--format", "json"]);
+    let out = stacc(p, &["sync", "--offline", "--json"]);
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
     let s = String::from_utf8_lossy(&out.stdout).into_owned();
     assert!(s.contains(r#""pruned":["ghost"]"#), "pruned reported: {s}");
 
     // ghost is gone from state; child reparented off it onto main.
-    let j = String::from_utf8_lossy(&stacc(p, &["log", "--format", "json"]).stdout).into_owned();
+    let j = String::from_utf8_lossy(&stacc(p, &["log", "--json"]).stdout).into_owned();
     assert!(!j.contains(r#""name":"ghost""#), "ghost dropped: {j}");
     assert!(j.contains(r#""name":"child""#), "child kept: {j}");
     assert!(!j.contains(r#""base":"ghost""#), "child no longer bases on ghost: {j}");
@@ -218,12 +218,12 @@ fn sync_no_prune_keeps_a_branch_whose_git_ref_is_gone() {
     run_git(p, &["checkout", "-q", "main"]);
     run_git(p, &["branch", "-D", "ghost"]);
 
-    let out = stacc(p, &["sync", "--offline", "--no-prune", "--format", "json"]);
+    let out = stacc(p, &["sync", "--offline", "--no-prune", "--json"]);
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
     let s = String::from_utf8_lossy(&out.stdout).into_owned();
     assert!(s.contains(r#""pruned":[]"#), "nothing pruned under --no-prune: {s}");
 
-    let j = String::from_utf8_lossy(&stacc(p, &["log", "--format", "json"]).stdout).into_owned();
+    let j = String::from_utf8_lossy(&stacc(p, &["log", "--json"]).stdout).into_owned();
     assert!(j.contains(r#""name":"ghost""#), "ghost kept under --no-prune: {j}");
 }
 
@@ -261,7 +261,7 @@ fn sync_keeps_a_missing_ref_branch_with_an_open_pr() {
 
     let out = stacc_env(
         p,
-        &["sync", "--format", "json"],
+        &["sync", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
@@ -269,7 +269,7 @@ fn sync_keeps_a_missing_ref_branch_with_an_open_pr() {
     assert!(s.contains(r#""pruned":[]"#), "open-PR branch must not be pruned: {s}");
     assert!(s.contains(r#""merged":[]"#), "open PR is not merged: {s}");
 
-    let j = String::from_utf8_lossy(&stacc(p, &["log", "--format", "json"]).stdout).into_owned();
+    let j = String::from_utf8_lossy(&stacc(p, &["log", "--json"]).stdout).into_owned();
     assert!(j.contains(r#""name":"feature""#), "open-PR branch kept: {j}");
 }
 
@@ -287,13 +287,13 @@ fn sync_prunes_multiple_missing_ref_branches() {
         run_git(p, &["branch", "-D", b]);
     }
 
-    let out = stacc(p, &["sync", "--offline", "--format", "json"]);
+    let out = stacc(p, &["sync", "--offline", "--json"]);
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
     let s = String::from_utf8_lossy(&out.stdout).into_owned();
     // Both pruned, in sorted (BTreeSet) order.
     assert!(s.contains(r#""pruned":["ghost-a","ghost-b"]"#), "both pruned, sorted: {s}");
 
-    let j = String::from_utf8_lossy(&stacc(p, &["log", "--format", "json"]).stdout).into_owned();
+    let j = String::from_utf8_lossy(&stacc(p, &["log", "--json"]).stdout).into_owned();
     assert!(!j.contains("ghost-a") && !j.contains("ghost-b"), "both dropped: {j}");
 }
 
@@ -330,7 +330,7 @@ fn sync_reports_a_merged_and_gone_branch_as_merged_not_pruned() {
 
     let out = stacc_env(
         p,
-        &["sync", "--format", "json"],
+        &["sync", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
@@ -360,7 +360,7 @@ fn sync_pretty_reports_pruned() {
 #[test]
 fn sync_requires_init() {
     let tmp = repo();
-    let out = stacc(tmp.path(), &["sync", "--format", "json"]);
+    let out = stacc(tmp.path(), &["sync", "--json"]);
     assert!(!out.status.success());
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains("not initialized"), "got: {s}");
@@ -378,7 +378,7 @@ fn sync_unreachable_forge_falls_back_to_forge_less_with_a_note() {
     run_git(p, &["checkout", "-q", "-b", "feature"]);
     assert!(stacc(p, &["track"]).status.success());
 
-    let out = stacc(p, &["sync", "--format", "json"]);
+    let out = stacc(p, &["sync", "--json"]);
     assert!(
         out.status.success(),
         "an unreachable API falls back to forge-less, it does not error: {}",
@@ -440,7 +440,7 @@ fn sync_detects_merged_and_reparents_children() {
 
     let out = stacc_env(
         tmp.path(),
-        &["sync", "--format", "json"],
+        &["sync", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
@@ -468,7 +468,7 @@ fn sync_restacks_onto_advanced_trunk() {
     commit_file(tmp.path(), "b.txt", "b\n", "trunk work");
     run_git(tmp.path(), &["checkout", "-q", "feature"]);
 
-    let out = stacc(tmp.path(), &["sync", "--offline", "--format", "json"]);
+    let out = stacc(tmp.path(), &["sync", "--offline", "--json"]);
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains(r#""restacked":["feature"]"#), "got: {s}");
@@ -512,7 +512,7 @@ fn sync_uses_fork_point_when_recorded_base_is_stale() {
     );
     store.save(&state).unwrap();
 
-    let out = stacc(tmp.path(), &["sync", "--offline", "--format", "json"]);
+    let out = stacc(tmp.path(), &["sync", "--offline", "--json"]);
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains(r#""restacked":["feature"]"#), "got: {s}");
@@ -536,7 +536,7 @@ fn sync_conflict_writes_context_then_continue_completes() {
     run_git(tmp.path(), &["checkout", "-q", "feature"]);
 
     // First sync: conflict -> structured error + context + continuation files.
-    let out = stacc(tmp.path(), &["sync", "--offline", "--format", "json"]);
+    let out = stacc(tmp.path(), &["sync", "--offline", "--json"]);
     assert!(!out.status.success());
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains(r#""type":"conflict""#), "got: {s}");
@@ -554,7 +554,7 @@ fn sync_conflict_writes_context_then_continue_completes() {
     write(tmp.path(), "conflict.txt", "resolved\n");
     run_git(tmp.path(), &["add", "conflict.txt"]);
 
-    let out2 = stacc(tmp.path(), &["sync", "--continue", "--format", "json"]);
+    let out2 = stacc(tmp.path(), &["sync", "--continue", "--json"]);
     assert!(out2.status.success(), "stderr: {}", String::from_utf8_lossy(&out2.stderr));
     let s2 = String::from_utf8_lossy(&out2.stdout);
     assert!(s2.contains(r#""restacked":["feature"]"#), "got: {s2}");
@@ -584,7 +584,7 @@ fn sync_deletes_the_merged_branchs_ref_and_keeps_unmerged_ones() {
 
     let out = stacc_env(
         p,
-        &["sync", "--format", "json"],
+        &["sync", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
@@ -611,7 +611,7 @@ fn sync_keep_branches_keeps_the_merged_ref() {
 
     let out = stacc_env(
         p,
-        &["sync", "--keep-branches", "--format", "json"],
+        &["sync", "--keep-branches", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
@@ -640,7 +640,7 @@ fn sync_keeps_a_merged_branch_checked_out_in_another_worktree() {
 
     let out = stacc_env(
         p,
-        &["sync", "--format", "json"],
+        &["sync", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
@@ -665,7 +665,7 @@ fn sync_on_the_merged_branch_ends_on_the_trunk_with_the_ref_gone() {
 
     let out = stacc_env(
         p,
-        &["sync", "--format", "json"],
+        &["sync", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
@@ -685,7 +685,7 @@ fn sync_offline_without_pr_detection_deletes_nothing() {
     assert!(stacc(p, &["track"]).status.success());
 
     // No PRs recorded, so no merge detection: nothing to clean.
-    let out = stacc(p, &["sync", "--offline", "--format", "json"]);
+    let out = stacc(p, &["sync", "--offline", "--json"]);
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains(r#""cleaned":[]"#), "got: {s}");
@@ -734,7 +734,7 @@ fn sync_adopts_a_merged_pr_created_outside_stacc_and_cleans_up() {
 
     let out = stacc_env(
         p,
-        &["sync", "--format", "json"],
+        &["sync", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
@@ -766,7 +766,7 @@ fn sync_adopts_an_open_pr_and_records_it() {
 
     let out = stacc_env(
         p,
-        &["sync", "--format", "json"],
+        &["sync", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
@@ -832,7 +832,7 @@ fn sync_does_not_adopt_a_closed_unmerged_pr() {
 
     let out = stacc_env(
         p,
-        &["sync", "--format", "json"],
+        &["sync", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
@@ -856,7 +856,7 @@ fn sync_adoption_leaves_a_branch_without_any_pr_alone() {
 
     let out = stacc_env(
         p,
-        &["sync", "--format", "json"],
+        &["sync", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
@@ -880,7 +880,7 @@ fn sync_without_credentials_falls_back_to_forge_less_with_a_note() {
     commit_file(p, "f.txt", "1", "feature");
     assert!(stacc(p, &["track"]).status.success());
 
-    let out = stacc_no_token(p, &["sync", "--format", "json"]);
+    let out = stacc_no_token(p, &["sync", "--json"]);
     assert!(
         out.status.success(),
         "a missing token falls back to forge-less, it does not error: {}",
@@ -905,7 +905,7 @@ fn sync_error_does_not_leak_a_credentialed_remote_url() {
     run_git(p, &["checkout", "-q", "-b", "feature"]);
     assert!(stacc(p, &["track"]).status.success());
 
-    let out = stacc(p, &["sync", "--format", "json"]);
+    let out = stacc(p, &["sync", "--json"]);
     assert!(!out.status.success());
     let combined = format!(
         "{}{}",
@@ -925,7 +925,7 @@ fn sync_offline_marks_detection_skipped() {
     commit_file(p, "f.txt", "1", "feature");
     assert!(stacc(p, &["track"]).status.success());
 
-    let out = stacc_no_token(p, &["sync", "--offline", "--format", "json"]);
+    let out = stacc_no_token(p, &["sync", "--offline", "--json"]);
     assert!(
         out.status.success(),
         "offline succeeds without credentials: {}",
@@ -942,7 +942,7 @@ fn sync_empty_stack_succeeds_without_credentials() {
     let (tmp, _bare) = online_repo();
     let p = tmp.path();
     // No tracked branches: nothing needs the API, even without a token.
-    let out = stacc_no_token(p, &["sync", "--format", "json"]);
+    let out = stacc_no_token(p, &["sync", "--json"]);
     assert!(
         out.status.success(),
         "an empty sync needs no credentials: {}",
@@ -983,7 +983,7 @@ fn sync_aborts_when_an_adoption_lookup_fails_and_persists_partial() {
 
     let out = stacc_env(
         p,
-        &["sync", "--format", "json"],
+        &["sync", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(!out.status.success(), "a failed lookup must abort the sync");
@@ -1012,14 +1012,14 @@ fn sync_continue_needs_no_credentials() {
     run_git(p, &["checkout", "-q", "feature"]);
 
     // Offline sync conflicts (no credentials needed to reach the restack).
-    let out = stacc_no_token(p, &["sync", "--offline", "--format", "json"]);
+    let out = stacc_no_token(p, &["sync", "--offline", "--json"]);
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stdout).contains(r#""type":"conflict""#));
 
     // Resolve, then continue with no token: the resume must not need credentials.
     write(p, "conflict.txt", "resolved\n");
     run_git(p, &["add", "conflict.txt"]);
-    let out2 = stacc_no_token(p, &["sync", "--continue", "--format", "json"]);
+    let out2 = stacc_no_token(p, &["sync", "--continue", "--json"]);
     assert!(
         out2.status.success(),
         "continue resumes without credentials: {}",
@@ -1054,7 +1054,7 @@ fn sync_skips_a_tree_identical_branch_instead_of_rebasing() {
 
     squash_feature_onto_main(p);
 
-    let out = stacc_no_token(p, &["sync", "--offline", "--format", "json"]);
+    let out = stacc_no_token(p, &["sync", "--offline", "--json"]);
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("look squash-merged"), "notice surfaced: {err}");
@@ -1075,7 +1075,7 @@ fn sync_does_not_flag_a_branch_already_on_its_base() {
     run_git(p, &["checkout", "-q", "-b", "feature"]);
     assert!(stacc(p, &["track"]).status.success());
 
-    let out = stacc_no_token(p, &["sync", "--offline", "--format", "json"]);
+    let out = stacc_no_token(p, &["sync", "--offline", "--json"]);
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(!err.contains("squash-merged"), "an ancestor branch must not be flagged: {err}");
@@ -1093,7 +1093,7 @@ fn explicit_restack_does_not_apply_the_squash_merge_guard() {
 
     // `stacc restack` is an explicit op: the sync-only guard must stay off, so
     // the branch is restacked normally rather than skipped as squash-merged.
-    let out = stacc(p, &["restack", "--format", "json"]);
+    let out = stacc(p, &["restack", "--json"]);
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(!err.contains("squash-merged"), "restack must not apply the sync-only guard: {err}");

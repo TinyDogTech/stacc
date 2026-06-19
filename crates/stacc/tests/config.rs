@@ -50,7 +50,7 @@ fn json(out: &Output) -> serde_json::Value {
 fn set_then_get_round_trips_through_the_repo_file() {
     let tmp = repo();
 
-    let out = stacc(tmp.path(), &["config", "set", "trunk", "develop", "--format", "json"]);
+    let out = stacc(tmp.path(), &["config", "set", "trunk", "develop", "--json"]);
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
     let v = json(&out);
     assert_eq!(v["status"], "set");
@@ -63,7 +63,7 @@ fn set_then_get_round_trips_through_the_repo_file() {
     assert!(text.contains("trunk = \"develop\""), "got: {text}");
 
     // ...and get resolves it with source repo.
-    let out = stacc(tmp.path(), &["config", "get", "trunk", "--format", "json"]);
+    let out = stacc(tmp.path(), &["config", "get", "trunk", "--json"]);
     assert!(out.status.success());
     let v = json(&out);
     assert_eq!(v["value"], "develop");
@@ -79,12 +79,12 @@ fn repo_value_overrides_global_and_list_reports_both_sources() {
     assert!(stacc(tmp.path(), &["config", "set", "trunk", "repo-trunk"]).status.success());
     assert!(stacc(tmp.path(), &["config", "set", "remote", "upstream", "--global"]).status.success());
 
-    let out = stacc(tmp.path(), &["config", "get", "trunk", "--format", "json"]);
+    let out = stacc(tmp.path(), &["config", "get", "trunk", "--json"]);
     let v = json(&out);
     assert_eq!(v["value"], "repo-trunk");
     assert_eq!(v["source"], "repo");
 
-    let out = stacc(tmp.path(), &["config", "list", "--format", "json"]);
+    let out = stacc(tmp.path(), &["config", "list", "--json"]);
     assert!(out.status.success());
     let v = json(&out);
     assert_eq!(v["op"], "config");
@@ -105,13 +105,13 @@ fn detected_values_resolve_when_no_file_sets_them() {
         &["remote", "add", "origin", "https://example.com/r.git"],
     );
 
-    let out = stacc(tmp.path(), &["config", "get", "trunk", "--format", "json"]);
+    let out = stacc(tmp.path(), &["config", "get", "trunk", "--json"]);
     assert!(out.status.success());
     let v = json(&out);
     assert_eq!(v["value"], "main");
     assert_eq!(v["source"], "detected");
 
-    let out = stacc(tmp.path(), &["config", "get", "remote", "--format", "json"]);
+    let out = stacc(tmp.path(), &["config", "get", "remote", "--json"]);
     let v = json(&out);
     assert_eq!(v["value"], "origin");
     assert_eq!(v["source"], "detected");
@@ -126,7 +126,7 @@ fn unknown_key_is_a_structured_error_naming_the_valid_keys() {
         vec!["config", "unset", "bogus"],
     ] {
         let mut args = sub.clone();
-        args.extend(["--format", "json"]);
+        args.extend(["--json"]);
         let out = stacc(tmp.path(), &args);
         assert!(!out.status.success(), "{sub:?} should fail");
         let v = json(&out);
@@ -143,7 +143,7 @@ fn unknown_key_is_a_structured_error_naming_the_valid_keys() {
 fn get_of_an_unset_key_is_null_and_exits_zero() {
     let tmp = repo(); // no remote, no files: remote is unset everywhere
 
-    let out = stacc(tmp.path(), &["config", "get", "remote", "--format", "json"]);
+    let out = stacc(tmp.path(), &["config", "get", "remote", "--json"]);
     assert!(out.status.success());
     let v = json(&out);
     assert!(v["value"].is_null(), "got: {v}");
@@ -159,12 +159,12 @@ fn get_of_an_unset_key_is_null_and_exits_zero() {
 fn set_alias_is_picked_up_by_the_alias_loader() {
     let tmp = repo();
 
-    let out = stacc(tmp.path(), &["config", "set", "aliases.statlog", "log", "--format", "json"]);
+    let out = stacc(tmp.path(), &["config", "set", "aliases.statlog", "log", "--json"]);
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
 
     // `statlog` -> `log`, which errors "not initialized" on this repo: the
     // alias expanded through the real startup loader and dispatched.
-    let out = stacc(tmp.path(), &["statlog", "--format", "json"]);
+    let out = stacc(tmp.path(), &["statlog", "--json"]);
     assert!(!out.status.success());
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("not initialized"),
@@ -173,7 +173,7 @@ fn set_alias_is_picked_up_by_the_alias_loader() {
     );
 
     // And the config surface resolves it.
-    let out = stacc(tmp.path(), &["config", "get", "aliases.statlog", "--format", "json"]);
+    let out = stacc(tmp.path(), &["config", "get", "aliases.statlog", "--json"]);
     let v = json(&out);
     assert_eq!(v["value"], "log");
     assert_eq!(v["source"], "repo");
@@ -185,13 +185,13 @@ fn unset_removes_the_key() {
     assert!(stacc(tmp.path(), &["config", "set", "remote", "upstream"]).status.success());
     assert!(stacc(tmp.path(), &["config", "set", "aliases.x", "log"]).status.success());
 
-    let out = stacc(tmp.path(), &["config", "unset", "remote", "--format", "json"]);
+    let out = stacc(tmp.path(), &["config", "unset", "remote", "--json"]);
     assert!(out.status.success());
     let v = json(&out);
     assert_eq!(v["status"], "unset");
     assert_eq!(v["key"], "remote");
 
-    let out = stacc(tmp.path(), &["config", "get", "remote", "--format", "json"]);
+    let out = stacc(tmp.path(), &["config", "get", "remote", "--json"]);
     assert!(out.status.success());
     assert!(json(&out)["value"].is_null());
 
@@ -206,25 +206,25 @@ fn global_ops_and_list_work_outside_a_git_repo() {
     // A plain directory: no git repo, no stacc state.
     let tmp = TempDir::new().expect("temp dir");
 
-    let out = stacc(tmp.path(), &["config", "set", "trunk", "main", "--global", "--format", "json"]);
+    let out = stacc(tmp.path(), &["config", "set", "trunk", "main", "--global", "--json"]);
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
     assert!(tmp.path().join(".config/stacc/config.toml").exists());
 
-    let out = stacc(tmp.path(), &["config", "get", "trunk", "--format", "json"]);
+    let out = stacc(tmp.path(), &["config", "get", "trunk", "--json"]);
     assert!(out.status.success());
     let v = json(&out);
     assert_eq!(v["value"], "main");
     assert_eq!(v["source"], "global");
 
-    let out = stacc(tmp.path(), &["config", "list", "--format", "json"]);
+    let out = stacc(tmp.path(), &["config", "list", "--json"]);
     assert!(out.status.success());
     let v = json(&out);
     assert_eq!(v["values"]["trunk"]["source"], "global");
     assert!(v["values"]["remote"]["value"].is_null());
 
-    let out = stacc(tmp.path(), &["config", "unset", "trunk", "--global", "--format", "json"]);
+    let out = stacc(tmp.path(), &["config", "unset", "trunk", "--global", "--json"]);
     assert!(out.status.success());
-    let out = stacc(tmp.path(), &["config", "get", "trunk", "--format", "json"]);
+    let out = stacc(tmp.path(), &["config", "get", "trunk", "--json"]);
     assert!(out.status.success());
     assert!(json(&out)["value"].is_null());
 }

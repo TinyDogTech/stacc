@@ -63,7 +63,7 @@ fn known_command_is_not_proxied() {
     let tmp = repo();
     // `log` is a stacc command: without init it errors with stacc's message,
     // proving it isn't passed through to `git log` (which would succeed).
-    let out = stacc(tmp.path(), &["log", "--format", "json"]);
+    let out = stacc(tmp.path(), &["log", "--json"]);
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stdout).contains("not initialized"));
 }

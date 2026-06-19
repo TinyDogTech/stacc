@@ -79,7 +79,7 @@ fn json(out: &Output) -> serde_json::Value {
 }
 
 fn log_json(dir: &Path) -> String {
-    String::from_utf8_lossy(&stacc(dir, &["log", "--format", "json"]).stdout).into_owned()
+    String::from_utf8_lossy(&stacc(dir, &["log", "--json"]).stdout).into_owned()
 }
 
 fn rebase_in_progress(dir: &Path) -> bool {
@@ -162,7 +162,7 @@ fn fold_merges_into_the_parent_and_reparents_children() {
     let c_tip = rev(p, "c");
 
     run_git(p, &["checkout", "-q", "b"]);
-    let out = stacc(p, &["fold", "--format", "json"]);
+    let out = stacc(p, &["fold", "--json"]);
     assert!(
         out.status.success(),
         "fold failed: {}",
@@ -220,7 +220,7 @@ fn fold_refuses_a_branch_not_restacked_onto_its_parent() {
     let main_after = rev(p, "main");
     run_git(p, &["checkout", "-q", "a"]);
 
-    let out = stacc(p, &["fold", "--format", "json"]);
+    let out = stacc(p, &["fold", "--json"]);
     assert!(!out.status.success(), "fold must refuse: {:?}", json(&out));
     let v = json(&out);
     assert_eq!(v["type"], "usage", "structured refusal: {v}");
@@ -251,7 +251,7 @@ fn fold_of_a_leaf_just_fast_forwards_the_parent() {
     track(p, "a");
     let b_tip = rev(p, "b");
 
-    let out = stacc(p, &["fold", "--format", "json"]);
+    let out = stacc(p, &["fold", "--json"]);
     assert!(
         out.status.success(),
         "fold failed: {}",
@@ -278,7 +278,7 @@ fn fold_onto_the_trunk_works_but_warns() {
     track(p, "main");
     let a_tip = rev(p, "a");
 
-    let out = stacc(p, &["fold", "--format", "json"]);
+    let out = stacc(p, &["fold", "--json"]);
     assert!(
         out.status.success(),
         "fold onto the trunk is allowed: {}",
@@ -330,7 +330,7 @@ fn abort_of_a_conflicted_fold_restores_the_pre_fold_state() {
     let b_tip = rev(p, "b");
     let c_tip = rev(p, "c");
 
-    let out = stacc(p, &["fold", "--format", "json"]);
+    let out = stacc(p, &["fold", "--json"]);
     assert!(!out.status.success(), "expected a conflict on c");
     let v = json(&out);
     assert_eq!(v["type"], "conflict", "structured conflict: {v}");
@@ -339,7 +339,7 @@ fn abort_of_a_conflicted_fold_restores_the_pre_fold_state() {
     assert!(cont.contains(r#""op":"fold""#), "got: {cont}");
     assert!(cont.contains(r#""branch":"b""#), "got: {cont}");
 
-    let out = stacc(p, &["abort", "--format", "json"]);
+    let out = stacc(p, &["abort", "--json"]);
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -367,14 +367,14 @@ fn continue_of_a_conflicted_fold_finishes_the_fold() {
     let b_tip = rev(p, "b");
 
     assert!(
-        !stacc(p, &["fold", "--format", "json"]).status.success(),
+        !stacc(p, &["fold", "--json"]).status.success(),
         "expected a conflict on c"
     );
 
     // Resolve the conflict and continue.
     std::fs::write(p.join("shared.txt"), "resolved\n").expect("write");
     run_git(p, &["add", "shared.txt"]);
-    let out = stacc(p, &["continue", "--format", "json"]);
+    let out = stacc(p, &["continue", "--json"]);
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -420,7 +420,7 @@ fn fold_refuses_when_the_parent_is_checked_out_in_another_worktree() {
         &["worktree", "add", "-q", holder.path().join("wt-a").to_str().unwrap(), "a"],
     );
 
-    let out = stacc(p, &["fold", "--format", "json"]);
+    let out = stacc(p, &["fold", "--json"]);
     assert!(!out.status.success(), "fold must refuse: {:?}", json(&out));
     let v = json(&out);
     assert_eq!(
@@ -460,7 +460,7 @@ fn fold_close_closes_the_recorded_pr() {
 
     let out = stacc_env(
         p,
-        &["fold", "--close", "--format", "json"],
+        &["fold", "--close", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(
@@ -497,7 +497,7 @@ fn fold_close_failure_is_reported_not_fatal() {
 
     let out = stacc_env(
         p,
-        &["fold", "--close", "--format", "json"],
+        &["fold", "--close", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(

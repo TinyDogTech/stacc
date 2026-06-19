@@ -111,7 +111,7 @@ fn absorb_lands_two_hunks_in_their_blame_commits_and_restacks_upstack() {
     stage(p, "f.txt", "aaa\nBBB\nccc\n");
     stage(p, "g.txt", "xxx\nYYY\nzzz\n");
 
-    let out = stacc(p, &["absorb", "--format", "json"]);
+    let out = stacc(p, &["absorb", "--json"]);
     assert!(
         out.status.success(),
         "absorb failed: {}",
@@ -189,7 +189,7 @@ fn absorb_maps_by_blame_not_newest_clean_apply() {
 
     // Dry-run first: the mapping must name c1, the introducing commit.
     let c1 = rev(p, "a~1");
-    let dry = stacc(p, &["absorb", "--dry-run", "--format", "json"]);
+    let dry = stacc(p, &["absorb", "--dry-run", "--json"]);
     assert!(dry.status.success(), "{}", String::from_utf8_lossy(&dry.stderr));
     let dv = json(&dry);
     let mapping = dv["mapping"].as_array().expect("mapping array");
@@ -202,7 +202,7 @@ fn absorb_maps_by_blame_not_newest_clean_apply() {
 
     // Now apply for real and confirm c1's rewrite (a~1) carries the edit and c2
     // (the tip) did NOT swallow it at its own boundary.
-    let out = stacc(p, &["absorb", "--format", "json"]);
+    let out = stacc(p, &["absorb", "--json"]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let new_c1 = rev(p, "a~1");
     assert_eq!(
@@ -230,7 +230,7 @@ fn absorb_dry_run_emits_mapping_and_mutates_nothing() {
     stage(p, "f.txt", "aaa\nBBB\nccc\n");
     stage(p, "new.txt", "brand new\n");
 
-    let out = stacc(p, &["absorb", "--dry-run", "--format", "json"]);
+    let out = stacc(p, &["absorb", "--dry-run", "--json"]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let v = json(&out);
     assert_eq!(v["dry_run"], true);
@@ -280,7 +280,7 @@ fn absorb_leaves_ambiguous_hunks_staged_and_reported() {
     // blames c2, so the hunk's old range spans two commits -> ambiguous.
     stage(p, "f.txt", "edited-1\nedited-2\n");
 
-    let out = stacc(p, &["absorb", "--format", "json"]);
+    let out = stacc(p, &["absorb", "--json"]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let v = json(&out);
     assert_eq!(v["absorbed"], 0, "nothing absorbed: {v}");
@@ -319,7 +319,7 @@ fn absorb_reports_unsupported_kinds_with_distinct_reasons() {
     std::fs::write(p.join("b.dat"), [0u8, 1, 2, 0, 3]).unwrap();
     run_git(p, &["add", "b.dat"]);
 
-    let out = stacc(p, &["absorb", "--format", "json"]);
+    let out = stacc(p, &["absorb", "--json"]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let v = json(&out);
     assert_eq!(v["absorbed"], 0, "nothing absorbable: {v}");
@@ -351,7 +351,7 @@ fn absorb_that_maps_nothing_leaves_the_repo_untouched_and_no_rebase() {
     // Only an unsupported change is staged (a new file): nothing maps.
     stage(p, "new.txt", "nope\n");
 
-    let out = stacc(p, &["absorb", "--format", "json"]);
+    let out = stacc(p, &["absorb", "--json"]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let v = json(&out);
     assert_eq!(v["absorbed"], 0);
@@ -389,7 +389,7 @@ fn absorb_leaves_only_the_unabsorbed_hunks_as_unstaged_changes() {
     stage(p, "f.txt", "aaa\nBBB\nccc\n");
     stage(p, "new.txt", "leftover\n");
 
-    let out = stacc(p, &["absorb", "--format", "json"]);
+    let out = stacc(p, &["absorb", "--json"]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let v = json(&out);
     assert_eq!(v["absorbed"], 1, "only the f.txt hunk absorbed: {v}");
@@ -435,7 +435,7 @@ fn absorb_upstack_conflict_is_resumable_via_continue() {
     run_git(p, &["checkout", "-q", "a"]);
     stage(p, "shared.txt", "a-version\n");
 
-    let out = stacc(p, &["absorb", "--format", "json"]);
+    let out = stacc(p, &["absorb", "--json"]);
     assert!(!out.status.success(), "the upstack restack should conflict");
     let v = json(&out);
     assert_eq!(v["type"], "conflict", "structured conflict, not a strand: {v}");
@@ -447,7 +447,7 @@ fn absorb_upstack_conflict_is_resumable_via_continue() {
     // Resolve and continue: the conflict drains and `b` lands on the absorbed `a`.
     std::fs::write(p.join("shared.txt"), "resolved\n").unwrap();
     run_git(p, &["add", "shared.txt"]);
-    let cont = stacc(p, &["continue", "--format", "json"]);
+    let cont = stacc(p, &["continue", "--json"]);
     assert!(cont.status.success(), "{}", String::from_utf8_lossy(&cont.stderr));
     assert!(!rebase_in_progress(p), "no rebase left after continue");
     assert!(
@@ -487,7 +487,7 @@ fn absorb_refuses_when_an_upstack_branch_is_in_another_worktree() {
     // Stage a mappable edit on `a`, then absorb: it must refuse before mutating.
     stage(p, "f.txt", "aaa\nBBB\nccc\n");
 
-    let out = stacc(p, &["absorb", "--format", "json"]);
+    let out = stacc(p, &["absorb", "--json"]);
     assert!(!out.status.success(), "absorb must refuse: {:?}", json(&out));
     let v = json(&out);
     assert_eq!(

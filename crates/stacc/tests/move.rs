@@ -69,7 +69,7 @@ fn move_reparents_onto_a_new_base() {
     run_git(p, &["checkout", "-q", "main"]);
     create(p, "b", "b.txt", "b\n"); // left checked out on b
 
-    let out = stacc(p, &["move", "--onto", "a", "--format", "json"]);
+    let out = stacc(p, &["move", "--onto", "a", "--json"]);
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -98,7 +98,7 @@ fn move_moves_the_whole_subtree() {
 
     // Move a (with its child b) onto c.
     run_git(p, &["checkout", "-q", "a"]);
-    let out = stacc(p, &["move", "--onto", "c", "--format", "json"]);
+    let out = stacc(p, &["move", "--onto", "c", "--json"]);
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -149,7 +149,7 @@ fn move_only_moves_the_branch_alone_and_children_stay() {
     // Move ONLY a onto c; its child b must stay put on a's old position.
     run_git(p, &["checkout", "-q", "a"]);
     let b_before = sha(p, "b");
-    let out = stacc(p, &["move", "--onto", "c", "--only", "--format", "json"]);
+    let out = stacc(p, &["move", "--onto", "c", "--only", "--json"]);
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -179,7 +179,7 @@ fn move_only_without_children_just_moves_the_branch() {
     run_git(p, &["checkout", "-q", "main"]);
     create(p, "b", "b.txt", "b\n"); // left on b
 
-    let out = stacc(p, &["move", "--onto", "a", "--only", "--format", "json"]);
+    let out = stacc(p, &["move", "--onto", "a", "--only", "--json"]);
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -200,7 +200,7 @@ fn move_onto_own_upstack_errors() {
     create(p, "b", "b.txt", "b\n");
     run_git(p, &["checkout", "-q", "a"]);
 
-    let out = stacc(p, &["move", "--onto", "b", "--format", "json"]);
+    let out = stacc(p, &["move", "--onto", "b", "--json"]);
     assert!(!out.status.success());
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("cycle"),
@@ -230,7 +230,7 @@ fn move_conflict_records_continuation_and_continue_finishes() {
 
     std::fs::write(p.join("shared.txt"), "resolved\n").expect("write");
     run_git(p, &["add", "shared.txt"]);
-    let out = stacc(p, &["continue", "--format", "json"]);
+    let out = stacc(p, &["continue", "--json"]);
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -256,14 +256,14 @@ fn abort_of_a_conflicted_move_restores_the_base() {
         "expected a conflict"
     );
 
-    let out = stacc(p, &["abort", "--format", "json"]);
+    let out = stacc(p, &["abort", "--json"]);
     assert!(
         out.status.success(),
         "stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
     // a's recorded base rolled back to main, and a does not descend c.
-    let log = String::from_utf8_lossy(&stacc(p, &["log", "--format", "json"]).stdout).into_owned();
+    let log = String::from_utf8_lossy(&stacc(p, &["log", "--json"]).stdout).into_owned();
     assert!(log.contains(r#""name":"a""#), "got: {log}");
     // The rollback put a back on main, so nothing is based on c any more (a
     // staying on c would leave `"base":"c"` in the tree).
@@ -279,7 +279,7 @@ fn move_onto_a_downstack_ancestor_is_rejected() {
     // flatten a out, which move does not do.
     create(p, "a", "a.txt", "a\n");
     create(p, "b", "b.txt", "b\n"); // on b
-    let out = stacc(p, &["move", "--onto", "main", "--format", "json"]);
+    let out = stacc(p, &["move", "--onto", "main", "--json"]);
     assert!(!out.status.success());
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("already descends"),
@@ -293,7 +293,7 @@ fn move_onto_the_current_base_is_rejected() {
     let tmp = init_repo();
     let p = tmp.path();
     create(p, "a", "a.txt", "a\n"); // a on main
-    let out = stacc(p, &["move", "--onto", "main", "--format", "json"]);
+    let out = stacc(p, &["move", "--onto", "main", "--json"]);
     assert!(!out.status.success());
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("already based on"),
@@ -307,7 +307,7 @@ fn move_onto_an_untracked_base_is_rejected() {
     let tmp = init_repo();
     let p = tmp.path();
     create(p, "a", "a.txt", "a\n");
-    let out = stacc(p, &["move", "--onto", "ghost", "--format", "json"]);
+    let out = stacc(p, &["move", "--onto", "ghost", "--json"]);
     assert!(!out.status.success());
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("not the trunk or a tracked branch"),
@@ -342,7 +342,7 @@ fn abort_after_a_partial_move_keeps_the_move_and_warns() {
     );
 
     // Abort: x (and c) already restacked onto n, so the move is KEPT + warned.
-    let out = stacc(p, &["abort", "--format", "json"]);
+    let out = stacc(p, &["abort", "--json"]);
     assert!(
         out.status.success(),
         "stderr: {}",

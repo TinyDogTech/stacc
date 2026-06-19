@@ -37,7 +37,7 @@ fn stacc_env(dir: &std::path::Path, args: &[&str], envs: &[(&str, &str)]) -> Out
 /// Run `stacc <args> --format json` expecting success, parsed.
 fn info_json(dir: &std::path::Path, args: &[&str]) -> serde_json::Value {
     let mut full: Vec<&str> = args.to_vec();
-    full.extend(["--format", "json"]);
+    full.extend(["--json"]);
     let out = stacc(dir, &full);
     assert!(
         out.status.success(),
@@ -239,7 +239,7 @@ fn info_body_fetches_the_pr_title_state_and_body() {
 
     let out = stacc_env(
         tmp.path(),
-        &["info", "--body", "--format", "json"],
+        &["info", "--body", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(
@@ -274,7 +274,7 @@ fn info_body_fetch_failure_is_not_fatal() {
     // No mock server: the API URL points at a dead port, so the fetch fails.
     let out = stacc_env(
         tmp.path(),
-        &["info", "--body", "--format", "json"],
+        &["info", "--body", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", "http://127.0.0.1:1")],
     );
     assert!(

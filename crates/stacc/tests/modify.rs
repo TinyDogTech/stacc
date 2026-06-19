@@ -95,7 +95,7 @@ fn modify_amends_and_restacks_the_upstack() {
     std::fs::write(p.join("a.txt"), "a-modified\n").expect("write");
     run_git(p, &["add", "a.txt"]);
 
-    let out = stacc(p, &["modify", "--format", "json"]);
+    let out = stacc(p, &["modify", "--json"]);
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -124,7 +124,7 @@ fn modify_commit_appends_and_restacks() {
     std::fs::write(p.join("a2.txt"), "a2\n").expect("write");
     run_git(p, &["add", "a2.txt"]);
 
-    let out = stacc(p, &["modify", "--commit", "-m", "a2", "--format", "json"]);
+    let out = stacc(p, &["modify", "--commit", "-m", "a2", "--json"]);
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -143,7 +143,7 @@ fn modify_commit_appends_and_restacks() {
 fn modify_on_trunk_errors() {
     let tmp = init_repo();
     let p = tmp.path();
-    let out = stacc(p, &["modify", "--format", "json"]);
+    let out = stacc(p, &["modify", "--json"]);
     assert!(!out.status.success());
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("trunk"),
@@ -157,7 +157,7 @@ fn modify_without_own_commit_suggests_commit() {
     let tmp = init_repo();
     let p = tmp.path();
     assert!(stacc(p, &["create", "empty"]).status.success()); // empty == main tip
-    let out = stacc(p, &["modify", "--format", "json"]);
+    let out = stacc(p, &["modify", "--json"]);
     assert!(!out.status.success());
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("--commit"),
@@ -180,7 +180,7 @@ fn modify_conflict_records_modify_continuation_and_continue_finishes() {
 
     std::fs::write(p.join("shared.txt"), "resolved\n").expect("write");
     run_git(p, &["add", "shared.txt"]);
-    let out = stacc(p, &["continue", "--format", "json"]);
+    let out = stacc(p, &["continue", "--json"]);
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -212,7 +212,7 @@ fn abort_of_a_conflicted_modify_restores_the_amend() {
     // a was amended mid-operation.
     assert_ne!(git_out(p, &["rev-parse", "a"]), a_before);
 
-    let out = stacc(p, &["abort", "--format", "json"]);
+    let out = stacc(p, &["abort", "--json"]);
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -258,7 +258,7 @@ fn abort_keeps_the_amend_when_a_child_already_restacked() {
     assert_ne!(a_amended, a_before);
     assert!(git_ok(p, &["merge-base", "--is-ancestor", "a", "b"]));
 
-    let out = stacc(p, &["abort", "--format", "json"]);
+    let out = stacc(p, &["abort", "--json"]);
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -283,7 +283,7 @@ fn modify_on_untracked_branch_errors() {
     let tmp = init_repo();
     let p = tmp.path();
     run_git(p, &["checkout", "-q", "-b", "loose"]);
-    let out = stacc(p, &["modify", "--format", "json"]);
+    let out = stacc(p, &["modify", "--json"]);
     assert!(!out.status.success());
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("not tracked"),
@@ -297,7 +297,7 @@ fn modify_amend_with_nothing_staged_errors() {
     let tmp = stack_main_a_b();
     let p = tmp.path();
     // On `a` (which has its own commit), nothing staged and no -m: pure no-op.
-    let out = stacc(p, &["modify", "--format", "json"]);
+    let out = stacc(p, &["modify", "--json"]);
     assert!(!out.status.success());
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("nothing staged"),
@@ -313,7 +313,7 @@ fn modify_all_stages_everything_then_amends() {
     std::fs::write(p.join("a.txt"), "a-edited\n").expect("write"); // tracked, unstaged
     std::fs::write(p.join("x.txt"), "x\n").expect("write"); // untracked
 
-    let out = stacc(p, &["modify", "--all", "--format", "json"]);
+    let out = stacc(p, &["modify", "--all", "--json"]);
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -351,7 +351,7 @@ fn modify_all_drops_a_path_the_change_adds_to_gitignore() {
     // Ignore it and touch it, then fold with --all.
     std::fs::write(p.join(".gitignore"), "cache/\n").expect("write");
     std::fs::write(p.join("cache/idx"), "v2\n").expect("write");
-    let out = stacc(p, &["modify", "--all", "--format", "json"]);
+    let out = stacc(p, &["modify", "--all", "--json"]);
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -377,7 +377,7 @@ fn modify_into_lands_staged_changes_in_a_downstack_tip() {
     std::fs::write(p.join("a.txt"), "a-into\n").expect("write");
     run_git(p, &["add", "a.txt"]);
 
-    let out = stacc(p, &["modify", "--into", "a", "--format", "json"]);
+    let out = stacc(p, &["modify", "--into", "a", "--json"]);
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -404,7 +404,7 @@ fn modify_into_a_non_downstack_branch_errors() {
     let tmp = stack_main_a_b();
     let p = tmp.path();
     // On a; b is in a's UPstack, not its downstack.
-    let out = stacc(p, &["modify", "--into", "b", "--format", "json"]);
+    let out = stacc(p, &["modify", "--into", "b", "--json"]);
     assert!(!out.status.success());
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("downstack"),
@@ -419,7 +419,7 @@ fn modify_edit_rewords_without_changing_the_tree() {
     let p = tmp.path();
     let tree_before = git_out(p, &["rev-parse", "a^{tree}"]);
 
-    let out = stacc(p, &["modify", "--edit", "-m", "a1 reworded", "--format", "json"]);
+    let out = stacc(p, &["modify", "--edit", "-m", "a1 reworded", "--json"]);
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -435,7 +435,7 @@ fn modify_edit_rewords_without_changing_the_tree() {
 fn modify_edit_without_message_errors() {
     let tmp = stack_main_a_b();
     let p = tmp.path();
-    let out = stacc(p, &["modify", "--edit", "--format", "json"]);
+    let out = stacc(p, &["modify", "--edit", "--json"]);
     assert!(!out.status.success());
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("--message"),
@@ -452,7 +452,7 @@ fn modify_patch_includes_only_matching_paths_and_keeps_the_rest_staged() {
     std::fs::write(p.join("x.txt"), "x\n").expect("write");
     run_git(p, &["add", "a.txt", "x.txt"]);
 
-    let out = stacc(p, &["modify", "--patch", "a.txt", "--format", "json"]);
+    let out = stacc(p, &["modify", "--patch", "a.txt", "--json"]);
     assert!(
         out.status.success(),
         "stderr: {}",

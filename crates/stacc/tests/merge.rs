@@ -182,7 +182,7 @@ fn merge_squashes_ready_downstack_and_stops_at_unready() {
     run_git(p, &["checkout", "-q", "top"]);
     let out = stacc_env(
         p,
-        &["merge", "--offline", "--format", "json"],
+        &["merge", "--offline", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(
@@ -209,7 +209,7 @@ fn merge_squashes_ready_downstack_and_stops_at_unready() {
         String::from_utf8_lossy(&out.stderr)
     );
     // bottom + middle dropped from state; top remains.
-    let log = String::from_utf8_lossy(&stacc(p, &["log", "--format", "json"]).stdout).into_owned();
+    let log = String::from_utf8_lossy(&stacc(p, &["log", "--json"]).stdout).into_owned();
     assert!(
         !log.contains(r#""name":"bottom""#) && !log.contains(r#""name":"middle""#),
         "merged branches not dropped: {log}"
@@ -281,7 +281,7 @@ fn merge_retargets_upstack_child_of_chain_top() {
     run_git(p, &["checkout", "-q", "b"]);
     let out = stacc_env(
         p,
-        &["merge", "--offline", "--format", "json"],
+        &["merge", "--offline", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(
@@ -384,7 +384,7 @@ fn merge_retargets_off_chain_child_of_intermediate_chain_branch() {
     run_git(p, &["checkout", "-q", "d"]);
     let out = stacc_env(
         p,
-        &["merge", "--offline", "--format", "json"],
+        &["merge", "--offline", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(
@@ -443,7 +443,7 @@ fn merge_marks_a_ci_pending_stop_retryable() {
     run_git(p, &["checkout", "-q", "feat"]);
     let out = stacc_env(
         p,
-        &["merge", "--offline", "--format", "json"],
+        &["merge", "--offline", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(
@@ -495,7 +495,7 @@ fn merge_watch_times_out_and_reports_the_retryable_stop() {
         p,
         &[
             "merge", "--offline", "--watch", "--watch-timeout", "1", "--watch-interval", "1",
-            "--format", "json",
+            "--json",
         ],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
@@ -549,7 +549,7 @@ fn merge_watch_does_not_wait_on_a_hard_block() {
         p,
         &[
             "merge", "--offline", "--watch", "--watch-timeout", "60", "--watch-interval", "1",
-            "--format", "json",
+            "--json",
         ],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
@@ -590,7 +590,7 @@ fn merge_with_nothing_ready_is_a_noop() {
     run_git(p, &["checkout", "-q", "feat"]);
     let out = stacc_env(
         p,
-        &["merge", "--offline", "--format", "json"],
+        &["merge", "--offline", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(
@@ -602,7 +602,7 @@ fn merge_with_nothing_ready_is_a_noop() {
     assert!(s.contains(r#""merged":[]"#), "got: {s}");
     assert!(s.contains(r#""readiness":"blocked""#), "got: {s}");
     // Nothing dropped: feat is still tracked.
-    let log = String::from_utf8_lossy(&stacc(p, &["log", "--format", "json"]).stdout).into_owned();
+    let log = String::from_utf8_lossy(&stacc(p, &["log", "--json"]).stdout).into_owned();
     assert!(log.contains(r#""name":"feat""#), "got: {log}");
 }
 
@@ -649,7 +649,7 @@ fn merge_reconciles_the_prefix_when_a_later_pr_is_no_longer_mergeable() {
     run_git(p, &["checkout", "-q", "top"]);
     let out = stacc_env(
         p,
-        &["merge", "--offline", "--format", "json"],
+        &["merge", "--offline", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     // NotMergeable mid-loop is a clean stop, not a hard error.
@@ -663,7 +663,7 @@ fn merge_reconciles_the_prefix_when_a_later_pr_is_no_longer_mergeable() {
     assert!(s.contains("no longer mergeable"), "stopped reason: {s}");
     merge1.assert();
     // The merged prefix WAS reconciled: bottom is dropped, top remains.
-    let log = String::from_utf8_lossy(&stacc(p, &["log", "--format", "json"]).stdout).into_owned();
+    let log = String::from_utf8_lossy(&stacc(p, &["log", "--json"]).stdout).into_owned();
     assert!(
         !log.contains(r#""name":"bottom""#),
         "merged bottom not reconciled: {log}"
@@ -693,7 +693,7 @@ fn merge_with_a_protected_trunk_emits_no_warning() {
     run_git(p, &["checkout", "-q", "feat"]);
     let out = stacc_env(
         p,
-        &["merge", "--offline", "--format", "json"],
+        &["merge", "--offline", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(
@@ -754,7 +754,7 @@ fn merge_skips_a_pr_already_merged_out_of_band_and_surfaces_the_sha() {
     run_git(p, &["checkout", "-q", "top"]);
     let out = stacc_env(
         p,
-        &["merge", "--offline", "--format", "json"],
+        &["merge", "--offline", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     // Does not stall or error on the out-of-band-merged bottom.
@@ -771,7 +771,7 @@ fn merge_skips_a_pr_already_merged_out_of_band_and_surfaces_the_sha() {
     assert!(s.contains(r#""out_of_band":false"#), "got: {s}");
     merge2.assert(); // top WAS merged by us
     // Both branches dropped from state by the reconcile.
-    let log = String::from_utf8_lossy(&stacc(p, &["log", "--format", "json"]).stdout).into_owned();
+    let log = String::from_utf8_lossy(&stacc(p, &["log", "--json"]).stdout).into_owned();
     assert!(
         !log.contains(r#""name":"bottom""#) && !log.contains(r#""name":"top""#),
         "got: {log}"
@@ -830,7 +830,7 @@ fn merge_continues_past_a_mid_chain_out_of_band_merge() {
     run_git(p, &["checkout", "-q", "top"]);
     let out = stacc_env(
         p,
-        &["merge", "--offline", "--format", "json"],
+        &["merge", "--offline", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(
@@ -846,7 +846,7 @@ fn merge_continues_past_a_mid_chain_out_of_band_merge() {
     );
     merge1.assert();
     merge3.assert();
-    let log = String::from_utf8_lossy(&stacc(p, &["log", "--format", "json"]).stdout).into_owned();
+    let log = String::from_utf8_lossy(&stacc(p, &["log", "--json"]).stdout).into_owned();
     assert!(
         !log.contains(r#""name":"bottom""#)
             && !log.contains(r#""name":"middle""#)
@@ -873,7 +873,7 @@ fn merge_require_protected_refuses_an_unprotected_trunk() {
     run_git(p, &["checkout", "-q", "feat"]);
     let out = stacc_env(
         p,
-        &["merge", "--offline", "--require-protected", "--format", "json"],
+        &["merge", "--offline", "--require-protected", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(!out.status.success());
@@ -888,7 +888,7 @@ fn merge_require_protected_refuses_an_unprotected_trunk() {
 fn merge_on_the_trunk_errors() {
     let tmp = repo();
     let p = tmp.path();
-    let out = stacc(p, &["merge", "--format", "json"]); // on main
+    let out = stacc(p, &["merge", "--json"]); // on main
     assert!(!out.status.success());
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("cannot merge the trunk"),
@@ -951,7 +951,7 @@ fn merge_online_restacks_and_force_pushes_each_child() {
     run_git(p, &["checkout", "-q", "b"]);
     let out = stacc_env(
         p,
-        &["merge", "--format", "json"],
+        &["merge", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(
@@ -974,7 +974,7 @@ fn merge_online_restacks_and_force_pushes_each_child() {
     assert!(!bare_b.contains("a1"), "b dropped a's commit via the restack: {bare_b}");
 
     // Both branches dropped from state.
-    let log = String::from_utf8_lossy(&stacc(p, &["log", "--format", "json"]).stdout).into_owned();
+    let log = String::from_utf8_lossy(&stacc(p, &["log", "--json"]).stdout).into_owned();
     assert!(
         !log.contains(r#""name":"a""#) && !log.contains(r#""name":"b""#),
         "both dropped: {log}"
@@ -1036,7 +1036,7 @@ fn merge_online_force_pushes_the_correct_branch_at_each_level() {
 
     let out = stacc_env(
         p,
-        &["merge", "--format", "json"],
+        &["merge", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(out.status.success(), "stdout: {}\nstderr: {}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
@@ -1056,7 +1056,7 @@ fn merge_online_force_pushes_the_correct_branch_at_each_level() {
     let bare_c = git_out(bare.path(), &["log", "--format=%s", "c"]);
     assert!(bare_c.contains("c1") && !bare_c.contains("a1"), "c: {bare_c}");
 
-    let log = String::from_utf8_lossy(&stacc(p, &["log", "--format", "json"]).stdout).into_owned();
+    let log = String::from_utf8_lossy(&stacc(p, &["log", "--json"]).stdout).into_owned();
     assert!(
         !log.contains(r#""name":"a""#) && !log.contains(r#""name":"b""#) && !log.contains(r#""name":"c""#),
         "all dropped: {log}"
@@ -1121,7 +1121,7 @@ fn merge_restores_the_starting_branch() {
     // merge_of_the_whole_stack_ends_on_the_trunk_with_refs_gone).
     let out = stacc_env(
         p,
-        &["merge", "--offline", "--keep-branches", "--format", "json"],
+        &["merge", "--offline", "--keep-branches", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
@@ -1189,7 +1189,7 @@ fn merge_lands_on_first_child_when_starting_branch_merges() {
     // No --keep-branches: b's ref is deleted after merge.
     let out = stacc_env(
         p,
-        &["merge", "--offline", "--format", "json"],
+        &["merge", "--offline", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
@@ -1251,7 +1251,7 @@ fn merge_deletes_merged_refs_and_keeps_the_stopped_branch() {
     run_git(p, &["checkout", "-q", "top"]);
     let out = stacc_env(
         p,
-        &["merge", "--offline", "--format", "json"],
+        &["merge", "--offline", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(
@@ -1309,7 +1309,7 @@ fn merge_keep_branches_keeps_the_merged_refs() {
     run_git(p, &["checkout", "-q", "top"]);
     let out = stacc_env(
         p,
-        &["merge", "--offline", "--keep-branches", "--format", "json"],
+        &["merge", "--offline", "--keep-branches", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(
@@ -1323,7 +1323,7 @@ fn merge_keep_branches_keeps_the_merged_refs() {
     // Both merged and dropped from state, but the local refs survive.
     assert!(ref_exists(p, "bottom"), "bottom's ref must survive --keep-branches");
     assert!(ref_exists(p, "top"), "top's ref must survive --keep-branches");
-    let log = String::from_utf8_lossy(&stacc(p, &["log", "--format", "json"]).stdout).into_owned();
+    let log = String::from_utf8_lossy(&stacc(p, &["log", "--json"]).stdout).into_owned();
     assert!(
         !log.contains(r#""name":"bottom""#) && !log.contains(r#""name":"top""#),
         "state still drops merged branches: {log}"
@@ -1373,7 +1373,7 @@ fn merge_of_the_whole_stack_ends_on_the_trunk_with_refs_gone() {
     run_git(p, &["checkout", "-q", "b"]);
     let out = stacc_env(
         p,
-        &["merge", "--offline", "--format", "json"],
+        &["merge", "--offline", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(
@@ -1455,7 +1455,7 @@ fn merge_adopts_a_gh_created_open_pr_and_merges_it() {
 
     let out = stacc_env(
         p,
-        &["merge", "--offline", "--format", "json"],
+        &["merge", "--offline", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     // The whole point of adoption: no prior `stacc sync`/`submit` required.
@@ -1475,7 +1475,7 @@ fn merge_adopts_a_gh_created_open_pr_and_merges_it() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(!ref_exists(p, "feature"), "merged ref must be gone");
-    let log = String::from_utf8_lossy(&stacc(p, &["log", "--format", "json"]).stdout).into_owned();
+    let log = String::from_utf8_lossy(&stacc(p, &["log", "--json"]).stdout).into_owned();
     assert!(!log.contains(r#""name":"feature""#), "feature dropped from state: {log}");
 }
 
@@ -1500,7 +1500,7 @@ fn merge_aborts_when_an_adoption_lookup_fails() {
 
     let out = stacc_env(
         p,
-        &["merge", "--offline", "--format", "json"],
+        &["merge", "--offline", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(!out.status.success(), "a failed adoption lookup must abort merge");
@@ -1529,7 +1529,7 @@ fn forge_error_envelope_is_neutral_schema_versioned_and_scrubbed() {
 
     let out = stacc_env(
         p,
-        &["merge", "--offline", "--format", "json"],
+        &["merge", "--offline", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(!out.status.success());
@@ -1595,7 +1595,7 @@ fn merge_retargets_an_adopted_mid_chain_pr_to_the_trunk() {
     run_git(p, &["checkout", "-q", "top"]);
     let out = stacc_env(
         p,
-        &["merge", "--offline", "--format", "json"],
+        &["merge", "--offline", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(
@@ -1639,7 +1639,7 @@ fn merge_reconciles_an_adopted_out_of_band_merged_pr() {
 
     let out = stacc_env(
         p,
-        &["merge", "--offline", "--format", "json"],
+        &["merge", "--offline", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(
@@ -1652,7 +1652,7 @@ fn merge_reconciles_an_adopted_out_of_band_merged_pr() {
     assert!(s.contains(r#""out_of_band":true"#), "counted like a merged-out-of-band PR: {s}");
     assert!(s.contains(r#""cleaned":["feature"]"#), "got: {s}");
     assert!(!ref_exists(p, "feature"), "merged ref must be gone");
-    let log = String::from_utf8_lossy(&stacc(p, &["log", "--format", "json"]).stdout).into_owned();
+    let log = String::from_utf8_lossy(&stacc(p, &["log", "--json"]).stdout).into_owned();
     assert!(!log.contains(r#""name":"feature""#), "feature dropped from state: {log}");
 }
 
@@ -1674,7 +1674,7 @@ fn merge_stops_with_no_pr_when_github_has_none() {
 
     let out = stacc_env(
         p,
-        &["merge", "--offline", "--format", "json"],
+        &["merge", "--offline", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(
@@ -1717,7 +1717,7 @@ fn merge_does_not_adopt_a_closed_unmerged_pr() {
 
     let out = stacc_env(
         p,
-        &["merge", "--offline", "--format", "json"],
+        &["merge", "--offline", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(
@@ -1749,7 +1749,7 @@ fn merge_on_a_non_github_remote_is_unavailable_with_a_forge_generic_message() {
     run_git(p, &["commit", "-q", "--allow-empty", "-m", "f1"]);
     assert!(stacc(p, &["track", "--base", "main"]).status.success());
 
-    let out = stacc(p, &["merge", "--format", "json"]);
+    let out = stacc(p, &["merge", "--json"]);
     assert!(!out.status.success(), "merge on a non-GitHub remote is unavailable");
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains(r#""type":"usage""#), "usage error, not a crash: {s}");
@@ -1770,7 +1770,7 @@ fn merge_in_local_mode_is_unavailable_even_on_a_github_remote() {
     // github.com URL.
     assert!(stacc(p, &["config", "set", "local", "true"]).status.success());
 
-    let out = stacc(p, &["merge", "--format", "json"]);
+    let out = stacc(p, &["merge", "--json"]);
     assert!(!out.status.success(), "local mode makes merge unavailable");
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains("local mode is on"), "names local mode: {s}");

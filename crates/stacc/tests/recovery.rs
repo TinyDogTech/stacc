@@ -80,7 +80,7 @@ fn continue_resumes_a_conflicted_restack() {
     std::fs::write(p.join("shared.txt"), "resolved\n").expect("write");
     run_git(p, &["add", "shared.txt"]);
 
-    let out = stacc(p, &["continue", "--format", "json"]);
+    let out = stacc(p, &["continue", "--json"]);
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -100,7 +100,7 @@ fn abort_undoes_a_conflicted_restack() {
     let tmp = conflicted_restack();
     let p = tmp.path();
 
-    let out = stacc(p, &["abort", "--format", "json"]);
+    let out = stacc(p, &["abort", "--json"]);
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -119,7 +119,7 @@ fn continue_with_nothing_in_progress_errors() {
     let tmp = repo();
     let p = tmp.path();
     assert!(stacc(p, &["init"]).status.success());
-    let out = stacc(p, &["continue", "--format", "json"]);
+    let out = stacc(p, &["continue", "--json"]);
     assert!(!out.status.success());
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("no operation in progress"),
@@ -133,7 +133,7 @@ fn abort_with_nothing_in_progress_errors() {
     let tmp = repo();
     let p = tmp.path();
     assert!(stacc(p, &["init"]).status.success());
-    let out = stacc(p, &["abort", "--format", "json"]);
+    let out = stacc(p, &["abort", "--json"]);
     assert!(!out.status.success());
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("nothing to abort"),
@@ -150,7 +150,7 @@ fn conflict_error_names_continue_and_abort() {
     // (conflicted_restack left a rebase in progress; abort first to reset.)
     assert!(stacc(p, &["abort"]).status.success());
     run_git(p, &["checkout", "-q", "a"]);
-    let out = stacc(p, &["restack", "--stack", "--format", "json"]);
+    let out = stacc(p, &["restack", "--stack", "--json"]);
     assert!(!out.status.success());
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains(r#""continue":"stacc continue""#), "got: {s}");
@@ -185,7 +185,7 @@ fn continue_drains_the_rest_of_the_stack() {
     std::fs::write(p.join("shared.txt"), "resolved\n").expect("write");
     run_git(p, &["add", "shared.txt"]);
 
-    let out = stacc(p, &["continue", "--format", "json"]);
+    let out = stacc(p, &["continue", "--json"]);
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -217,7 +217,7 @@ fn abort_refuses_a_foreign_rebase() {
         .status();
     assert!(rebase_in_progress(p), "expected a foreign rebase in progress");
 
-    let out = stacc(p, &["abort", "--format", "json"]);
+    let out = stacc(p, &["abort", "--json"]);
     assert!(!out.status.success());
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("non-stacc rebase"),
@@ -236,7 +236,7 @@ fn continue_clears_a_stale_continuation() {
     run_git(p, &["rebase", "--abort"]);
     assert!(p.join(".git/stacc-continue.json").exists());
 
-    let out = stacc(p, &["continue", "--format", "json"]);
+    let out = stacc(p, &["continue", "--json"]);
     assert!(!out.status.success());
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("stale"),
@@ -251,7 +251,7 @@ fn abort_clears_a_stale_continuation_without_a_rebase() {
     let tmp = conflicted_restack();
     let p = tmp.path();
     run_git(p, &["rebase", "--abort"]); // rebase gone, continuation stale
-    let out = stacc(p, &["abort", "--format", "json"]);
+    let out = stacc(p, &["abort", "--json"]);
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -276,7 +276,7 @@ fn conflict_with_an_unwritable_continuation_aborts_to_a_clean_tree() {
     std::fs::create_dir(p.join(".git/stacc-continue.json")).expect("mkdir");
 
     // JSON keeps the error on one line (pretty/miette wraps it).
-    let out = stacc(p, &["restack", "--stack", "--format", "json"]);
+    let out = stacc(p, &["restack", "--stack", "--json"]);
     assert!(!out.status.success());
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("rebase aborted to a clean tree"),
@@ -309,7 +309,7 @@ fn continue_refuses_when_the_rebase_head_does_not_match() {
     assert!(rebase_in_progress(p), "expected a rebase on c");
 
     // continue sees the continuation (records `a`) but git is rebasing `c`.
-    let out = stacc(p, &["continue", "--format", "json"]);
+    let out = stacc(p, &["continue", "--json"]);
     assert!(!out.status.success());
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("not the recorded `a`"),
@@ -336,7 +336,7 @@ fn continue_refuses_an_unverifiable_apply_style_rebase() {
         .status();
     assert!(rebase_in_progress(p), "expected an apply-style rebase");
 
-    let out = stacc(p, &["continue", "--format", "json"]);
+    let out = stacc(p, &["continue", "--json"]);
     assert!(!out.status.success());
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("cannot confirm"),
