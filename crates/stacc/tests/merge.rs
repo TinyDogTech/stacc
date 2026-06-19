@@ -297,6 +297,114 @@ fn merge_retargets_upstack_child_of_chain_top() {
     patch3.assert();
 }
 
+// STA-125: retarget must cover non-chain children of intermediate chain branches
+// (the fork case). Stack: main -> a -> b -> {c, d} where user is on d;
+// chain = [a, b, d].  c is a non-chain child of the intermediate branch b.
+// When b is deleted on merge, c's PR base would be orphaned unless c is
+// also retargeted.  The STA-119 fix only covered children of chain.last();
+// this test asserts that children of intermediate chain members are covered too.
+#[test]
+fn merge_retargets_off_chain_child_of_intermediate_chain_branch() {
+    let tmp = repo();
+    let p = tmp.path();
+    // main -> a -> b -> c  (fork 1: off-chain, NOT merged)
+    //              b -> d  (fork 2: user on d; chain = [a, b, d])
+    run_git(p, &["checkout", "-q", "-b", "a"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "a"]);
+    run_git(p, &["checkout", "-q", "-b", "b"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "b"]);
+    run_git(p, &["checkout", "-q", "-b", "c"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "c"]);
+    run_git(p, &["checkout", "-q", "b"]);
+    run_git(p, &["checkout", "-q", "-b", "d"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "d"]);
+    track_pr(p, "a", "main", 1);
+    track_pr(p, "b", "a", 2);
+    track_pr(p, "c", "b", 3); // off-chain child of intermediate branch b
+    track_pr(p, "d", "b", 4); // user is here; chain = [a, b, d]
+
+    let server = MockServer::start();
+    let base = "/repos/stacc-sandbox/example";
+    server.mock(|w, t| {
+        w.method(Method::GET).path(format!("{base}/branches/main/protection"));
+        t.status(404).json_body(serde_json::json!({ "message": "not protected" }));
+    });
+    server.mock(|w, t| {
+        w.method(Method::GET).path(format!("{base}/pulls/1"));
+        t.status(200).json_body(pr_open(1, "clean"));
+    });
+    server.mock(|w, t| {
+        w.method(Method::GET).path(format!("{base}/pulls/2"));
+        t.status(200).json_body(pr_open(2, "clean"));
+    });
+    // c's PR is checked during retarget (open-state guard before PATCH).
+    server.mock(|w, t| {
+        w.method(Method::GET).path(format!("{base}/pulls/3"));
+        t.status(200).json_body(pr_open(3, "clean"));
+    });
+    server.mock(|w, t| {
+        w.method(Method::GET).path(format!("{base}/pulls/4"));
+        t.status(200).json_body(pr_open(4, "clean"));
+    });
+    // b (PR #2) retargeted: non-bottom in-chain member.
+    let patch2 = server.mock(|w, t| {
+        w.method(Method::PATCH)
+            .path(format!("{base}/pulls/2"))
+            .json_body(serde_json::json!({ "base": "main" }));
+        t.status(200).json_body(pr_open(2, "clean"));
+    });
+    // STA-125: c (PR #3) must be retargeted even though it is a child of the
+    // *intermediate* chain branch b, not of chain.last() (d).
+    let patch3 = server.mock(|w, t| {
+        w.method(Method::PATCH)
+            .path(format!("{base}/pulls/3"))
+            .json_body(serde_json::json!({ "base": "main" }));
+        t.status(200).json_body(pr_open(3, "clean"));
+    });
+    // d (PR #4) retargeted: non-bottom in-chain member.
+    let patch4 = server.mock(|w, t| {
+        w.method(Method::PATCH)
+            .path(format!("{base}/pulls/4"))
+            .json_body(serde_json::json!({ "base": "main" }));
+        t.status(200).json_body(pr_open(4, "clean"));
+    });
+    let merge1 = server.mock(|w, t| {
+        w.method(Method::PUT).path(format!("{base}/pulls/1/merge"));
+        t.status(200).json_body(serde_json::json!({ "merged": true }));
+    });
+    let merge2 = server.mock(|w, t| {
+        w.method(Method::PUT).path(format!("{base}/pulls/2/merge"));
+        t.status(200).json_body(serde_json::json!({ "merged": true }));
+    });
+    let merge4 = server.mock(|w, t| {
+        w.method(Method::PUT).path(format!("{base}/pulls/4/merge"));
+        t.status(200).json_body(serde_json::json!({ "merged": true }));
+    });
+
+    run_git(p, &["checkout", "-q", "d"]);
+    let out = stacc_env(
+        p,
+        &["merge", "--offline", "--format", "json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        s.contains(r#""number":1"#) && s.contains(r#""number":2"#) && s.contains(r#""number":4"#),
+        "expected PRs 1, 2, 4 in merged output; got: {s}"
+    );
+    merge1.assert();
+    merge2.assert();
+    merge4.assert();
+    patch2.assert();
+    patch4.assert();
+    patch3.assert(); // the key STA-125 assertion: off-chain child of intermediate branch
+}
+
 // STA-118: a PR blocked only because its CI is still running is a *retryable*
 // stop. The stop JSON must say so (`rejection: checks_pending`, `retryable:
 // true`) so an agent (or `merge --watch`) polls and retries instead of treating
@@ -1020,6 +1128,74 @@ fn merge_restores_the_starting_branch() {
     // merge ran from `b` and merged a + b; HEAD is restored to `b`, not left on
     // `c` (which the upstack restack would otherwise leave it on).
     assert_eq!(git_out(p, &["rev-parse", "--abbrev-ref", "HEAD"]), "b");
+}
+
+// STA-125: when the starting branch is itself merged (its local ref deleted),
+// land on the first surviving direct child instead of the trunk.  This lets
+// the user run `stacc submit` immediately after the merge without a manual
+// `stacc checkout` first.
+#[test]
+fn merge_lands_on_first_child_when_starting_branch_merges() {
+    let tmp = repo();
+    let p = tmp.path();
+    // main -> a -> b -> c.  Merge from `b`: a and b both merge, c survives.
+    // Without --keep-branches, b's ref is deleted; HEAD should land on c.
+    run_git(p, &["checkout", "-q", "-b", "a"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "a1"]);
+    run_git(p, &["checkout", "-q", "-b", "b"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "b1"]);
+    run_git(p, &["checkout", "-q", "-b", "c"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "c1"]);
+    track_pr(p, "a", "main", 1);
+    track_pr(p, "b", "a", 2);
+    track_pr(p, "c", "b", 3);
+
+    let server = MockServer::start();
+    let base = "/repos/stacc-sandbox/example";
+    server.mock(|w, t| {
+        w.method(Method::GET).path(format!("{base}/branches/main/protection"));
+        t.status(404).json_body(serde_json::json!({ "message": "x" }));
+    });
+    server.mock(|w, t| {
+        w.method(Method::GET).path(format!("{base}/pulls/1"));
+        t.status(200).json_body(pr_open(1, "clean"));
+    });
+    server.mock(|w, t| {
+        w.method(Method::GET).path(format!("{base}/pulls/2"));
+        t.status(200).json_body(pr_open(2, "clean"));
+    });
+    server.mock(|w, t| {
+        w.method(Method::GET).path(format!("{base}/pulls/3"));
+        t.status(200).json_body(pr_open(3, "clean"));
+    });
+    server.mock(|w, t| {
+        w.method(Method::PATCH).path(format!("{base}/pulls/2"));
+        t.status(200).json_body(pr_open(2, "clean"));
+    });
+    server.mock(|w, t| {
+        w.method(Method::PATCH).path(format!("{base}/pulls/3"));
+        t.status(200).json_body(pr_open(3, "clean"));
+    });
+    server.mock(|w, t| {
+        w.method(Method::PUT).path(format!("{base}/pulls/1/merge"));
+        t.status(200).json_body(serde_json::json!({ "merged": true }));
+    });
+    server.mock(|w, t| {
+        w.method(Method::PUT).path(format!("{base}/pulls/2/merge"));
+        t.status(200).json_body(serde_json::json!({ "merged": true }));
+    });
+
+    run_git(p, &["checkout", "-q", "b"]);
+    // No --keep-branches: b's ref is deleted after merge.
+    let out = stacc_env(
+        p,
+        &["merge", "--offline", "--format", "json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    // b merged and its ref was deleted; HEAD must be c (first surviving child),
+    // not main (the old trunk fallback).
+    assert_eq!(git_out(p, &["rev-parse", "--abbrev-ref", "HEAD"]), "c");
 }
 
 #[test]
