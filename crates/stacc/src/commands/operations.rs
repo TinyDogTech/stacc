@@ -1806,6 +1806,13 @@ pub fn merge(args: &MergeArgs, format: OutputFormat) -> Result<(), Error> {
         }
     }
 
+    // Capture the direct children of the starting branch before state is mutated
+    // by the merge walk. If `current` is itself merged (its local ref deleted),
+    // the checkout at the end of `merge` falls back to the first surviving child
+    // rather than the trunk, so the user can immediately run `stacc submit`
+    // without a manual `stacc checkout` first (STA-125).
+    let current_children: Vec<String> = ops::children(&state.branches, &current);
+
     // Retarget every non-bottom open PR to the trunk UP FRONT, before any parent
     // merges. A child PR whose base is the parent's branch is closed (un-
     // reopenably) when GitHub deletes that branch on merge; pointing it at the
@@ -1878,10 +1885,15 @@ pub fn merge(args: &MergeArgs, format: OutputFormat) -> Result<(), Error> {
     // branch. Skip when a conflict left a rebase in progress (HEAD must stay on
     // the conflicting branch for `stacc continue`). The starting branch may have
     // been merged and dropped from state but its local ref still exists; fall
-    // back to the trunk only if it is truly gone.
+    // back to the first surviving direct child (so `stacc submit` works
+    // immediately without a manual checkout), or the trunk if no children survive.
     if !git.rebase_in_progress() {
-        let target = if git.ref_missing(&current) {
-            &repo.trunk
+        let target: &str = if git.ref_missing(&current) {
+            current_children
+                .iter()
+                .find(|b| !git.ref_missing(b))
+                .map(String::as_str)
+                .unwrap_or(&repo.trunk)
         } else {
             &current
         };

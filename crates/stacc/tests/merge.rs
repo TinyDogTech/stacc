@@ -1130,6 +1130,74 @@ fn merge_restores_the_starting_branch() {
     assert_eq!(git_out(p, &["rev-parse", "--abbrev-ref", "HEAD"]), "b");
 }
 
+// STA-125: when the starting branch is itself merged (its local ref deleted),
+// land on the first surviving direct child instead of the trunk.  This lets
+// the user run `stacc submit` immediately after the merge without a manual
+// `stacc checkout` first.
+#[test]
+fn merge_lands_on_first_child_when_starting_branch_merges() {
+    let tmp = repo();
+    let p = tmp.path();
+    // main -> a -> b -> c.  Merge from `b`: a and b both merge, c survives.
+    // Without --keep-branches, b's ref is deleted; HEAD should land on c.
+    run_git(p, &["checkout", "-q", "-b", "a"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "a1"]);
+    run_git(p, &["checkout", "-q", "-b", "b"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "b1"]);
+    run_git(p, &["checkout", "-q", "-b", "c"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "c1"]);
+    track_pr(p, "a", "main", 1);
+    track_pr(p, "b", "a", 2);
+    track_pr(p, "c", "b", 3);
+
+    let server = MockServer::start();
+    let base = "/repos/stacc-sandbox/example";
+    server.mock(|w, t| {
+        w.method(Method::GET).path(format!("{base}/branches/main/protection"));
+        t.status(404).json_body(serde_json::json!({ "message": "x" }));
+    });
+    server.mock(|w, t| {
+        w.method(Method::GET).path(format!("{base}/pulls/1"));
+        t.status(200).json_body(pr_open(1, "clean"));
+    });
+    server.mock(|w, t| {
+        w.method(Method::GET).path(format!("{base}/pulls/2"));
+        t.status(200).json_body(pr_open(2, "clean"));
+    });
+    server.mock(|w, t| {
+        w.method(Method::GET).path(format!("{base}/pulls/3"));
+        t.status(200).json_body(pr_open(3, "clean"));
+    });
+    server.mock(|w, t| {
+        w.method(Method::PATCH).path(format!("{base}/pulls/2"));
+        t.status(200).json_body(pr_open(2, "clean"));
+    });
+    server.mock(|w, t| {
+        w.method(Method::PATCH).path(format!("{base}/pulls/3"));
+        t.status(200).json_body(pr_open(3, "clean"));
+    });
+    server.mock(|w, t| {
+        w.method(Method::PUT).path(format!("{base}/pulls/1/merge"));
+        t.status(200).json_body(serde_json::json!({ "merged": true }));
+    });
+    server.mock(|w, t| {
+        w.method(Method::PUT).path(format!("{base}/pulls/2/merge"));
+        t.status(200).json_body(serde_json::json!({ "merged": true }));
+    });
+
+    run_git(p, &["checkout", "-q", "b"]);
+    // No --keep-branches: b's ref is deleted after merge.
+    let out = stacc_env(
+        p,
+        &["merge", "--offline", "--format", "json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    // b merged and its ref was deleted; HEAD must be c (first surviving child),
+    // not main (the old trunk fallback).
+    assert_eq!(git_out(p, &["rev-parse", "--abbrev-ref", "HEAD"]), "c");
+}
+
 #[test]
 fn merge_deletes_merged_refs_and_keeps_the_stopped_branch() {
     let tmp = repo();
