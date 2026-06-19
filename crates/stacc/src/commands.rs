@@ -723,10 +723,23 @@ pub fn submit(args: &SubmitArgs, format: OutputFormat) -> Result<(), Error> {
                     desc_update = Some((branch.clone(), resolved.clone()));
                     resolved
                 }
-                None => stored_desc.unwrap_or_else(|| git.commit_body(branch).unwrap_or_default()),
+                None => stored_desc
+                    .clone()
+                    .unwrap_or_else(|| reflow_body(&git.commit_body(branch).unwrap_or_default())),
             }
         } else {
-            stored_desc.unwrap_or_else(|| git.commit_body(branch).unwrap_or_default())
+            stored_desc
+                .clone()
+                .unwrap_or_else(|| reflow_body(&git.commit_body(branch).unwrap_or_default()))
+        };
+
+        // Only include body in PATCH when there is an explicit source: --description
+        // on this run, or a previously-stored description. When neither exists, omit
+        // the field so GitHub preserves any manual PR body edits.
+        let update_body: Option<String> = if is_current {
+            desc_update.as_ref().map(|(_, d)| d.clone()).or(stored_desc)
+        } else {
+            stored_desc
         };
 
         let pr = match existing {
@@ -736,7 +749,7 @@ pub fn submit(args: &SubmitArgs, format: OutputFormat) -> Result<(), Error> {
                 number,
                 &PullRequestUpdate {
                     title: Some(title),
-                    body: Some(body),
+                    body: update_body,
                     base: Some(base),
                 },
             )?,
@@ -847,6 +860,33 @@ fn resolve_description(value: &str) -> Result<String, Error> {
             .map_err(|e| Error::Usage(format!("failed to read description file `{path}`: {e}"))),
         None => Ok(value.to_string()),
     }
+}
+
+/// Reflow a commit body for use as a PR description.
+///
+/// Commit bodies are conventionally hard-wrapped at ~72 columns. GitHub renders
+/// each bare newline as `<br>`, breaking mid-sentence. This joins lines within
+/// each blank-line-separated paragraph into a single line, then re-joins
+/// paragraphs with `\n\n`. Applied only to `commit_body()` fallback paths; text
+/// from `--description` or stored descriptions passes through unchanged.
+fn reflow_body(text: &str) -> String {
+    let mut paragraphs: Vec<String> = Vec::new();
+    let mut current: Vec<&str> = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim_end();
+        if trimmed.is_empty() {
+            if !current.is_empty() {
+                paragraphs.push(current.join(" "));
+                current.clear();
+            }
+        } else {
+            current.push(trimmed);
+        }
+    }
+    if !current.is_empty() {
+        paragraphs.push(current.join(" "));
+    }
+    paragraphs.join("\n\n")
 }
 
 /// `stacc rename`: rename the current branch, updating local state, children,
