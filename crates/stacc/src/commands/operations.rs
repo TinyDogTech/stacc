@@ -1774,6 +1774,38 @@ pub fn merge(args: &MergeArgs, format: OutputFormat) -> Result<(), Error> {
         eprintln!("note: adopted PR #{} for `{}`: {}", a.number, a.branch, a.url);
     }
 
+    // Also adopt PRs for off-chain children of any chain branch (branches not
+    // being merged in this run but whose parent branch will be deleted). Without
+    // adoption their externally-opened PRs lack a recorded PR number and the
+    // retarget pass silently skips them. Off-chain children are not in the merge
+    // walk, so their adopted_merged result carries no action here.
+    let chain_set: BTreeSet<&str> = chain.iter().map(String::as_str).collect();
+    let off_chain_children: Vec<String> = chain
+        .iter()
+        .flat_map(|branch| {
+            ops::children(&state.branches, branch)
+                .into_iter()
+                .filter(|b| !chain_set.contains(b.as_str()))
+        })
+        .collect();
+    let off_chain_candidates: Vec<String> = off_chain_children
+        .into_iter()
+        .filter(|name| state.branches.get(name).is_some_and(|b| b.pr.is_none()))
+        .collect();
+    if !off_chain_candidates.is_empty() {
+        let (off_adopted, _) = adopt_prs_among(
+            &github,
+            &owner,
+            &repo_name,
+            &store,
+            &mut state,
+            &off_chain_candidates,
+        )?;
+        for a in &off_adopted {
+            eprintln!("note: adopted PR #{} for `{}`: {}", a.number, a.branch, a.url);
+        }
+    }
+
     // Retarget every non-bottom open PR to the trunk UP FRONT, before any parent
     // merges. A child PR whose base is the parent's branch is closed (un-
     // reopenably) when GitHub deletes that branch on merge; pointing it at the
@@ -1883,24 +1915,25 @@ fn retarget_children_to_trunk(
     chain: &[String],
 ) -> Result<(), Error> {
     // Retarget (1) every in-chain non-bottom PR and (2) every open PR whose
-    // state-parent is the chain top but is itself outside the chain. Case (2)
-    // covers a partial merge (user on a mid-stack branch): the chain top's branch
-    // is deleted on merge, which would orphan any upstack child PR that still
-    // points at it as its base.
+    // state-parent is any chain branch but is itself outside the chain. Case (2)
+    // covers partial merges (user on a mid-stack branch) including forked stacks:
+    // when A -> B -> {C, D} with the user on D, chain = [A, B, D] and C (B's
+    // other child) would be orphaned when B is deleted. Collecting off-chain
+    // children of ALL chain branches (not only chain.last()) covers both the
+    // linear and forked cases.
     let chain_set: BTreeSet<&str> = chain.iter().map(String::as_str).collect();
-    let top_upstack: Vec<String> = chain
-        .last()
-        .map(|top| {
-            ops::children(&state.branches, top)
+    let off_chain_children: Vec<String> = chain
+        .iter()
+        .flat_map(|branch| {
+            ops::children(&state.branches, branch)
                 .into_iter()
                 .filter(|b| !chain_set.contains(b.as_str()))
-                .collect()
         })
-        .unwrap_or_default();
+        .collect();
     let to_retarget: Vec<&String> = chain
         .iter()
         .skip(1)
-        .chain(top_upstack.iter())
+        .chain(off_chain_children.iter())
         .collect();
     for branch in to_retarget {
         let Some(pr) = state.branches.get(branch).and_then(|b| b.pr.as_ref()) else {
