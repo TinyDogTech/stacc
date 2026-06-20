@@ -510,3 +510,267 @@ fn absorb_refuses_when_an_upstack_branch_is_in_another_worktree() {
         "the edit is still staged after the refusal"
     );
 }
+
+#[test]
+fn absorb_cross_branch_routes_hunk_into_downstack_commit() {
+    // A hunk staged on branch `b` that blames a commit on the lower branch `a`
+    // must be absorbed into `a`'s commit chain and `b` restacked onto the new `a`.
+    let tmp = repo_init();
+    let p = tmp.path();
+
+    run_git(p, &["checkout", "-q", "-b", "a"]);
+    write_commit(p, "f.txt", "aaa\nbbb\nccc\n", "a1: add f");
+    track(p, "main");
+
+    run_git(p, &["checkout", "-q", "-b", "b"]);
+    write_commit(p, "g.txt", "xxx\n", "b1: add g");
+    track(p, "a");
+
+    let a_tip_before = rev(p, "a");
+    let b_tip_before = rev(p, "b");
+
+    // Stage an edit to f.txt (introduced by a1 on branch `a`) while on `b`.
+    stage(p, "f.txt", "aaa\nBBB\nccc\n");
+
+    let out = stacc(p, &["absorb", "--json"]);
+    assert!(
+        out.status.success(),
+        "absorb failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v = json(&out);
+    assert_eq!(v["op"], "absorb");
+    assert_eq!(v["absorbed"], 1, "one hunk absorbed: {v}");
+
+    // `a`'s ref must have moved to incorporate the edit.
+    let a_tip_after = rev(p, "a");
+    assert_ne!(a_tip_after, a_tip_before, "a moved to the rewritten tip");
+
+    // The edit landed in `a`'s commit tree.
+    assert_eq!(blob_at(p, &a_tip_after, "f.txt"), "aaa\nBBB\nccc\n");
+
+    // `b` was restacked onto the new `a`.
+    let b_tip_after = rev(p, "b");
+    assert_ne!(b_tip_after, b_tip_before, "b moved onto the new a");
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(p)
+            .args(["merge-base", "--is-ancestor", &a_tip_after, "b"])
+            .status()
+            .unwrap()
+            .success(),
+        "b descends the rewritten a"
+    );
+
+    // No staged changes remain.
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(p)
+            .args(["diff", "--cached", "--quiet"])
+            .status()
+            .unwrap()
+            .success(),
+        "no staged changes after cross-branch absorb"
+    );
+    assert!(!rebase_in_progress(p));
+}
+
+#[test]
+fn absorb_cross_branch_and_own_branch_simultaneously() {
+    // Two hunks staged on `b`: one blames `a`'s commit, one blames `b`'s own
+    // commit. Both must be absorbed in a single call.
+    let tmp = repo_init();
+    let p = tmp.path();
+
+    run_git(p, &["checkout", "-q", "-b", "a"]);
+    write_commit(p, "f.txt", "aaa\nbbb\nccc\n", "a1: add f");
+    track(p, "main");
+
+    run_git(p, &["checkout", "-q", "-b", "b"]);
+    write_commit(p, "g.txt", "xxx\nyyy\nzzz\n", "b1: add g");
+    track(p, "a");
+
+    let a_before = rev(p, "a");
+
+    // Stage: f.txt edit blames a1 (downstack), g.txt edit blames b1 (own).
+    stage(p, "f.txt", "aaa\nBBB\nccc\n");
+    stage(p, "g.txt", "xxx\nYYY\nzzz\n");
+
+    let out = stacc(p, &["absorb", "--json"]);
+    assert!(
+        out.status.success(),
+        "absorb failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v = json(&out);
+    assert_eq!(v["absorbed"], 2, "both hunks absorbed: {v}");
+
+    // `a`'s ref moved (carries f.txt edit).
+    assert_ne!(rev(p, "a"), a_before, "a moved");
+    assert_eq!(blob_at(p, "a", "f.txt"), "aaa\nBBB\nccc\n");
+
+    // `b`'s tip carries both edits.
+    assert_eq!(blob_at(p, "b", "f.txt"), "aaa\nBBB\nccc\n");
+    assert_eq!(blob_at(p, "b", "g.txt"), "xxx\nYYY\nzzz\n");
+
+    // Clean index.
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(p)
+            .args(["diff", "--cached", "--quiet"])
+            .status()
+            .unwrap()
+            .success(),
+        "nothing left staged"
+    );
+    assert!(!rebase_in_progress(p));
+}
+
+#[test]
+fn absorb_cross_branch_dry_run_includes_branch_field() {
+    // --dry-run JSON must include "branch" in both mapping entries and targets
+    // when the blame commit belongs to a downstack branch.
+    let tmp = repo_init();
+    let p = tmp.path();
+
+    run_git(p, &["checkout", "-q", "-b", "a"]);
+    write_commit(p, "f.txt", "aaa\nbbb\nccc\n", "a1: add f");
+    track(p, "main");
+
+    run_git(p, &["checkout", "-q", "-b", "b"]);
+    write_commit(p, "g.txt", "xxx\n", "b1: add g");
+    track(p, "a");
+
+    let a_tip = rev(p, "a");
+    let b_tip = rev(p, "b");
+
+    // Stage an edit blaming a's commit (downstack).
+    stage(p, "f.txt", "aaa\nBBB\nccc\n");
+
+    let out = stacc(p, &["absorb", "--dry-run", "--json"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let v = json(&out);
+    assert_eq!(v["dry_run"], true);
+
+    let mapping = v["mapping"].as_array().expect("mapping array");
+    assert_eq!(mapping.len(), 1, "one mapping entry: {v}");
+    assert_eq!(mapping[0]["branch"], "a", "mapping entry names the downstack branch: {v}");
+
+    let targets = v["targets"].as_array().expect("targets array");
+    assert_eq!(targets.len(), 1, "one target: {v}");
+    assert_eq!(targets[0]["branch"], "a", "target names the downstack branch: {v}");
+
+    // Dry-run mutated nothing.
+    assert_eq!(rev(p, "a"), a_tip, "a did not move");
+    assert_eq!(rev(p, "b"), b_tip, "b did not move");
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(p)
+            .args(["diff", "--cached", "--quiet"])
+            .status()
+            .unwrap()
+            .code()
+            == Some(1),
+        "staged change is still staged after dry-run"
+    );
+}
+
+#[test]
+fn absorb_outside_branch_unchanged_when_not_in_any_chain_branch() {
+    // A hunk whose blame commit is on trunk (before the stack) must stay
+    // outside_branch regardless of cross-branch routing.
+    let tmp = repo_init();
+    let p = tmp.path();
+
+    // A trunk commit that introduces the file we will edit.
+    write_commit(p, "base.txt", "line1\nline2\nline3\n", "trunk: add base");
+    let trunk_commit = rev(p, "main");
+
+    run_git(p, &["checkout", "-q", "-b", "a"]);
+    write_commit(p, "own.txt", "own\n", "a1: own file");
+    track(p, "main");
+
+    run_git(p, &["checkout", "-q", "-b", "b"]);
+    write_commit(p, "other.txt", "other\n", "b1");
+    track(p, "a");
+
+    let a_before = rev(p, "a");
+    let b_before = rev(p, "b");
+
+    // Edit a line introduced by the trunk commit (not in any stack branch).
+    stage(p, "base.txt", "line1\nLINE2\nline3\n");
+
+    let out = stacc(p, &["absorb", "--json"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let v = json(&out);
+    assert_eq!(v["absorbed"], 0, "trunk-origin hunk not absorbed: {v}");
+
+    let unabsorbed = v["unabsorbed"].as_array().expect("unabsorbed array");
+    assert!(
+        unabsorbed.iter().any(|u| u["reason"] == "outside_branch"),
+        "trunk hunk is outside_branch: {v}"
+    );
+
+    // Nothing mutated.
+    assert_eq!(rev(p, "a"), a_before);
+    assert_eq!(rev(p, "b"), b_before);
+    assert_eq!(rev(p, "main"), trunk_commit, "trunk commit unchanged");
+    assert!(!rebase_in_progress(p));
+}
+
+#[test]
+fn absorb_cross_branch_worktree_guard_fires_for_downstack_branch() {
+    // If a downstack branch is checked out in another worktree, absorb must
+    // refuse with worktree_conflict before mutating anything.
+    let tmp = repo_init();
+    let p = tmp.path();
+
+    run_git(p, &["checkout", "-q", "-b", "a"]);
+    write_commit(p, "f.txt", "aaa\nbbb\nccc\n", "a1: add f");
+    track(p, "main");
+
+    run_git(p, &["checkout", "-q", "-b", "b"]);
+    write_commit(p, "g.txt", "xxx\n", "b1");
+    track(p, "a");
+
+    let a_before = rev(p, "a");
+    let b_before = rev(p, "b");
+
+    // Check out `a` (the downstack branch) in a second worktree while on `b`.
+    let holder = TempDir::new().unwrap();
+    run_git(
+        p,
+        &["worktree", "add", "-q", holder.path().join("wt-a").to_str().unwrap(), "a"],
+    );
+
+    // Stage an edit that would route to `a` (the worktree-occupied branch).
+    stage(p, "f.txt", "aaa\nBBB\nccc\n");
+
+    let out = stacc(p, &["absorb", "--json"]);
+    assert!(!out.status.success(), "absorb must refuse: {:?}", json(&out));
+    let v = json(&out);
+    assert_eq!(
+        v["type"], "worktree_conflict",
+        "refused with worktree_conflict: {v}"
+    );
+
+    // Nothing mutated.
+    assert_eq!(rev(p, "a"), a_before, "a did not move");
+    assert_eq!(rev(p, "b"), b_before, "b did not move");
+    assert!(!rebase_in_progress(p));
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(p)
+            .args(["diff", "--cached", "--quiet"])
+            .status()
+            .unwrap()
+            .code()
+            == Some(1),
+        "edit is still staged after refusal"
+    );
+}
