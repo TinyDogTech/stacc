@@ -10,6 +10,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::IsTerminal;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -104,8 +105,8 @@ fn color_enabled(choice: ColorChoice) -> bool {
 }
 
 /// `stacc log`: render the tracked stack from the state ref.
-pub fn log(args: &LogArgs, format: OutputFormat, color: ColorChoice) -> Result<(), Error> {
-    let git = Git::open(".");
+pub fn log(args: &LogArgs, format: OutputFormat, color: ColorChoice, work_dir: &Path) -> Result<(), Error> {
+    let git = Git::open(work_dir);
     let store = StateStore::new(git.clone());
     let mut state = store.load()?;
     let repo = state

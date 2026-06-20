@@ -16,6 +16,7 @@
 //! generalize here and are deliberately not reused.
 
 use std::collections::BTreeSet;
+use std::path::Path;
 
 use serde_json::json;
 use stacc_core::{ops, recovery};
@@ -29,8 +30,8 @@ use crate::error::Error;
 /// `stacc reorder`: see the module docs. Validate everything, snapshot the
 /// pre-state, re-point the chain's bases in one transactional write, then
 /// restack the chain and its descendants through the engine.
-pub fn reorder(args: &ReorderArgs, format: OutputFormat) -> Result<(), Error> {
-    let git = Git::open(".");
+pub fn reorder(args: &ReorderArgs, format: OutputFormat, work_dir: &Path) -> Result<(), Error> {
+    let git = Git::open(work_dir);
     let store = StateStore::new(git.clone());
     let mut state = store.load()?;
     let repo = state

@@ -16,6 +16,7 @@
 //! committed and only the unabsorbed hunks as unstaged modifications.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use serde_json::{json, Value};
 use stacc_core::{ops, recovery};
@@ -53,8 +54,8 @@ struct Mapping {
 /// commits by blame, rewrites those commits' trees in memory, moves the branch
 /// ref, `reset --mixed`es to leave only the unabsorbed hunks unstaged, and
 /// restacks the upstack. `--dry-run` emits the mapping and mutates nothing.
-pub fn absorb(args: &AbsorbArgs, format: OutputFormat) -> Result<(), Error> {
-    let git = Git::open(".");
+pub fn absorb(args: &AbsorbArgs, format: OutputFormat, work_dir: &Path) -> Result<(), Error> {
+    let git = Git::open(work_dir);
     let store = StateStore::new(git.clone());
     let mut state = store.load()?;
     let repo = state

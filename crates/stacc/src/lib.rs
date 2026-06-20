@@ -6,6 +6,8 @@
 use std::collections::{BTreeMap, HashSet};
 use std::process::ExitCode;
 
+use std::path::Path;
+
 use clap::Parser;
 
 mod cli;
@@ -37,8 +39,28 @@ const DEFAULT_ALIASES: &[(&str, &str)] = &[
     ("st", "status"),
 ];
 
+/// Scan `args` for `-C <path>` or `--cwd[=]<path>` before clap parses them,
+/// so alias loading uses the correct directory. Returns `"."` if absent.
+fn pre_scan_work_dir(args: &[String]) -> std::path::PathBuf {
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "-C" || arg == "--cwd" {
+            if let Some(path) = iter.next() {
+                return std::path::PathBuf::from(path);
+            }
+        } else if let Some(path) = arg.strip_prefix("--cwd=") {
+            return std::path::PathBuf::from(path);
+        }
+    }
+    std::path::PathBuf::from(".")
+}
+
 /// Parse the command line, dispatch, and return the process exit code.
 pub fn run() -> ExitCode {
+    // Collect argv first so we can pre-scan for -C/--cwd before alias loading.
+    let raw: Vec<String> = std::env::args().collect();
+    let pre_cwd = pre_scan_work_dir(&raw);
+
     // Aliases load best-effort, lowest precedence first: built-in defaults, then
     // user-global, then repo-local (repo wins).
     let mut aliases: BTreeMap<String, String> = DEFAULT_ALIASES
@@ -46,12 +68,7 @@ pub fn run() -> ExitCode {
         .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
         .collect();
     aliases.extend(stacc_config::aliases_from_file(&stacc_config::user_config_path()));
-    aliases.extend(stacc_config::aliases_from_file(std::path::Path::new(
-        ".stacc.toml",
-    )));
-
-    // Rewrite argv through the alias table before clap sees any of it.
-    let raw: Vec<String> = std::env::args().collect();
+    aliases.extend(stacc_config::aliases_from_file(&pre_cwd.join(".stacc.toml")));
     let args = match expand_aliases(raw, &aliases) {
         Ok(a) => a,
         Err(err) => {
@@ -67,7 +84,8 @@ pub fn run() -> ExitCode {
         return proxy_to_git(args);
     }
 
-    match dispatch(&cli) {
+    let work_dir = cli.global.work_dir();
+    match dispatch(&cli, &work_dir) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             report(err, cli.global.output_format());
@@ -76,45 +94,45 @@ pub fn run() -> ExitCode {
     }
 }
 
-fn dispatch(cli: &Cli) -> Result<(), Error> {
+fn dispatch(cli: &Cli, work_dir: &Path) -> Result<(), Error> {
     match &cli.command {
-        Command::Init(args) => commands::init(args, cli.global.output_format()),
-        Command::Track(args) => commands::track(args, cli.global.output_format()),
-        Command::Untrack(args) => commands::untrack(args, cli.global.output_format()),
-        Command::Create(args) => commands::create(args, cli.global.output_format()),
-        Command::Modify(args) => commands::modify(args, cli.global.output_format()),
-        Command::Log(args) => commands::log(args, cli.global.output_format(), cli.global.color),
-        Command::Status => commands::status(cli.global.output_format()),
-        Command::Info(args) => commands::info(args, cli.global.output_format()),
-        Command::Pr => commands::pr(cli.global.output_format()),
-        Command::Submit(args) => commands::submit(args, cli.global.output_format()),
-        Command::Sync(args) => commands::sync(args, cli.global.output_format()),
-        Command::Restack(args) => commands::restack(args, cli.global.output_format()),
-        Command::Move(args) => commands::move_cmd(args, cli.global.output_format()),
-        Command::Absorb(args) => commands::absorb(args, cli.global.output_format()),
-        Command::Squash(args) => commands::squash(args, cli.global.output_format()),
-        Command::Fold(args) => commands::fold(args, cli.global.output_format()),
-        Command::Split(args) => commands::split(args, cli.global.output_format()),
-        Command::Reorder(args) => commands::reorder(args, cli.global.output_format()),
-        Command::Delete(args) => commands::delete(args, cli.global.output_format()),
-        Command::Pop => commands::pop(cli.global.output_format()),
-        Command::Rename(args) => commands::rename(args, cli.global.output_format()),
-        Command::Merge(args) => commands::merge(args, cli.global.output_format()),
-        Command::Merged(args) => commands::merged(args, cli.global.output_format()),
-        Command::Continue => commands::continue_cmd(cli.global.output_format()),
-        Command::Abort => commands::abort_cmd(cli.global.output_format()),
-        Command::Undo(args) => commands::undo(args, cli.global.output_format()),
-        Command::Up(args) => commands::up(args, cli.global.output_format()),
-        Command::Down(args) => commands::down(args, cli.global.output_format()),
-        Command::Top => commands::top(cli.global.output_format()),
-        Command::Bottom => commands::bottom(cli.global.output_format()),
+        Command::Init(args) => commands::init(args, cli.global.output_format(), work_dir),
+        Command::Track(args) => commands::track(args, cli.global.output_format(), work_dir),
+        Command::Untrack(args) => commands::untrack(args, cli.global.output_format(), work_dir),
+        Command::Create(args) => commands::create(args, cli.global.output_format(), work_dir),
+        Command::Modify(args) => commands::modify(args, cli.global.output_format(), work_dir),
+        Command::Log(args) => commands::log(args, cli.global.output_format(), cli.global.color, work_dir),
+        Command::Status => commands::status(cli.global.output_format(), work_dir),
+        Command::Info(args) => commands::info(args, cli.global.output_format(), work_dir),
+        Command::Pr => commands::pr(cli.global.output_format(), work_dir),
+        Command::Submit(args) => commands::submit(args, cli.global.output_format(), work_dir),
+        Command::Sync(args) => commands::sync(args, cli.global.output_format(), work_dir),
+        Command::Restack(args) => commands::restack(args, cli.global.output_format(), work_dir),
+        Command::Move(args) => commands::move_cmd(args, cli.global.output_format(), work_dir),
+        Command::Absorb(args) => commands::absorb(args, cli.global.output_format(), work_dir),
+        Command::Squash(args) => commands::squash(args, cli.global.output_format(), work_dir),
+        Command::Fold(args) => commands::fold(args, cli.global.output_format(), work_dir),
+        Command::Split(args) => commands::split(args, cli.global.output_format(), work_dir),
+        Command::Reorder(args) => commands::reorder(args, cli.global.output_format(), work_dir),
+        Command::Delete(args) => commands::delete(args, cli.global.output_format(), work_dir),
+        Command::Pop => commands::pop(cli.global.output_format(), work_dir),
+        Command::Rename(args) => commands::rename(args, cli.global.output_format(), work_dir),
+        Command::Merge(args) => commands::merge(args, cli.global.output_format(), work_dir),
+        Command::Merged(args) => commands::merged(args, cli.global.output_format(), work_dir),
+        Command::Continue => commands::continue_cmd(cli.global.output_format(), work_dir),
+        Command::Abort => commands::abort_cmd(cli.global.output_format(), work_dir),
+        Command::Undo(args) => commands::undo(args, cli.global.output_format(), work_dir),
+        Command::Up(args) => commands::up(args, cli.global.output_format(), work_dir),
+        Command::Down(args) => commands::down(args, cli.global.output_format(), work_dir),
+        Command::Top => commands::top(cli.global.output_format(), work_dir),
+        Command::Bottom => commands::bottom(cli.global.output_format(), work_dir),
         Command::Checkout(args) => {
-            commands::checkout(args, cli.global.output_format(), cli.global.no_interactive)
+            commands::checkout(args, cli.global.output_format(), cli.global.no_interactive, work_dir)
         }
-        Command::Parent => commands::parent(cli.global.output_format()),
-        Command::Children => commands::children(cli.global.output_format()),
+        Command::Parent => commands::parent(cli.global.output_format(), work_dir),
+        Command::Children => commands::children(cli.global.output_format(), work_dir),
         Command::Auth(args) => commands::auth(args, cli.global.output_format()),
-        Command::Config(args) => commands::config(args, cli.global.output_format()),
+        Command::Config(args) => commands::config(args, cli.global.output_format(), work_dir),
         // Pure script output; --json is deliberately ignored here.
         Command::Completion(args) => {
             commands::completion(args);
