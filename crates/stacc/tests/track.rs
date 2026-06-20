@@ -39,7 +39,7 @@ fn track_records_branch_with_trunk_base() {
     assert!(stacc(tmp.path(), &["init"]).status.success());
     run_git(tmp.path(), &["checkout", "-q", "-b", "feature"]);
 
-    let out = stacc(tmp.path(), &["track", "--format", "json"]);
+    let out = stacc(tmp.path(), &["track", "--json"]);
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains(r#""status":"tracked""#), "got: {stdout}");
@@ -61,7 +61,7 @@ fn track_requires_init() {
     let tmp = repo();
     run_git(tmp.path(), &["checkout", "-q", "-b", "feature"]);
 
-    let out = stacc(tmp.path(), &["track", "--format", "json"]);
+    let out = stacc(tmp.path(), &["track", "--json"]);
     assert!(!out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("not initialized"), "got: {stdout}");
@@ -72,7 +72,7 @@ fn track_rejects_trunk() {
     let tmp = repo();
     assert!(stacc(tmp.path(), &["init"]).status.success());
 
-    let out = stacc(tmp.path(), &["track", "--format", "json"]); // still on main
+    let out = stacc(tmp.path(), &["track", "--json"]); // still on main
     assert!(!out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("trunk"), "got: {stdout}");
@@ -88,7 +88,7 @@ fn track_accepts_explicit_base() {
 
     let out = stacc(
         tmp.path(),
-        &["track", "--base", "base-branch", "--format", "json"],
+        &["track", "--base", "base-branch", "--json"],
     );
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);

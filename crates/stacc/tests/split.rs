@@ -82,7 +82,7 @@ fn json(out: &Output) -> serde_json::Value {
 }
 
 fn log_json(dir: &Path) -> String {
-    String::from_utf8_lossy(&stacc(dir, &["log", "--format", "json"]).stdout).into_owned()
+    String::from_utf8_lossy(&stacc(dir, &["log", "--json"]).stdout).into_owned()
 }
 
 fn rebase_in_progress(dir: &Path) -> bool {
@@ -127,7 +127,7 @@ fn split_by_commit_creates_branches_at_the_existing_shas() {
     let p = tmp.path();
     let (c1, c2, c3) = three_commit_branch(p);
 
-    let out = stacc(p, &["split", "n1", "n2", "--format", "json"]);
+    let out = stacc(p, &["split", "n1", "n2", "--json"]);
     assert!(
         out.status.success(),
         "split failed: {}",
@@ -168,7 +168,7 @@ fn split_by_commit_wrong_name_count_is_a_usage_error() {
     let p = tmp.path();
     let (_, _, c3) = three_commit_branch(p);
 
-    let out = stacc(p, &["split", "n1", "--format", "json"]);
+    let out = stacc(p, &["split", "n1", "--json"]);
     assert!(!out.status.success(), "must refuse: {:?}", json(&out));
     let v = json(&out);
     assert_eq!(v["type"], "usage", "structured refusal: {v}");
@@ -181,7 +181,7 @@ fn split_by_commit_wrong_name_count_is_a_usage_error() {
     assert_eq!(rev(p, "a"), c3);
 
     // No names at all (no picker off a TTY): also a structured error.
-    let out = stacc(p, &["split", "--format", "json"]);
+    let out = stacc(p, &["split", "--json"]);
     assert!(!out.status.success(), "bare split must refuse: {:?}", json(&out));
     let v = json(&out);
     assert_eq!(v["type"], "usage");
@@ -198,7 +198,7 @@ fn split_by_commit_duplicate_or_existing_name_creates_zero_refs() {
     let (_, _, c3) = three_commit_branch(p);
 
     // Duplicate names in the spec.
-    let out = stacc(p, &["split", "n1", "n1", "--format", "json"]);
+    let out = stacc(p, &["split", "n1", "n1", "--json"]);
     assert!(!out.status.success(), "must refuse: {:?}", json(&out));
     let v = json(&out);
     assert_eq!(v["type"], "usage");
@@ -212,7 +212,7 @@ fn split_by_commit_duplicate_or_existing_name_creates_zero_refs() {
     // is written, so n2 is not created either).
     run_git(p, &["branch", "exists"]);
     let exists_at = rev(p, "exists");
-    let out = stacc(p, &["split", "exists", "n2", "--format", "json"]);
+    let out = stacc(p, &["split", "exists", "n2", "--json"]);
     assert!(!out.status.success(), "must refuse: {:?}", json(&out));
     let v = json(&out);
     assert_eq!(v["type"], "usage");
@@ -233,7 +233,7 @@ fn split_by_commit_rejects_mixing_names_with_by_file() {
     let p = tmp.path();
     three_commit_branch(p);
 
-    let out = stacc(p, &["split", "n1", "--by-file", "src=code", "--format", "json"]);
+    let out = stacc(p, &["split", "n1", "--by-file", "src=code", "--json"]);
     assert!(!out.status.success(), "must refuse: {:?}", json(&out));
     let v = json(&out);
     assert_eq!(v["type"], "usage");
@@ -254,7 +254,7 @@ fn split_by_commit_single_commit_branch_is_a_noop() {
     track(p, "main");
     let tip = rev(p, "a");
 
-    let out = stacc(p, &["split", "--format", "json"]);
+    let out = stacc(p, &["split", "--json"]);
     assert!(
         out.status.success(),
         "nothing-to-split is a no-op, not an error: {}",
@@ -298,7 +298,7 @@ fn split_by_file_partitions_changes_into_stacked_branches() {
 
     let out = stacc(
         p,
-        &["split", "--by-file", "src=code", "--by-file", "docs=docs-branch", "--format", "json"],
+        &["split", "--by-file", "src=code", "--by-file", "docs=docs-branch", "--json"],
     );
     assert!(
         out.status.success(),
@@ -371,7 +371,7 @@ fn split_by_file_orphan_path_is_a_structured_error() {
     track(p, "main");
     let a_before = rev(p, "a");
 
-    let out = stacc(p, &["split", "--by-file", "src=code", "--format", "json"]);
+    let out = stacc(p, &["split", "--by-file", "src=code", "--json"]);
     assert!(!out.status.success(), "must refuse: {:?}", json(&out));
     let v = json(&out);
     assert_eq!(v["type"], "usage", "structured refusal: {v}");
@@ -398,7 +398,7 @@ fn split_by_file_refuses_a_dirty_working_tree() {
     // Dirty a TRACKED file (untracked files do not count).
     std::fs::write(p.join("src/a.rs"), "edited, uncommitted\n").expect("write");
 
-    let out = stacc(p, &["split", "--by-file", "src=code", "--format", "json"]);
+    let out = stacc(p, &["split", "--by-file", "src=code", "--json"]);
     assert!(!out.status.success(), "must refuse: {:?}", json(&out));
     let v = json(&out);
     assert_eq!(v["type"], "usage", "structured refusal: {v}");
@@ -432,7 +432,7 @@ fn split_by_file_refuses_when_a_child_is_in_another_worktree() {
 
     let out = stacc(
         p,
-        &["split", "--by-file", "src=code", "--by-file", "docs=docs-branch", "--format", "json"],
+        &["split", "--by-file", "src=code", "--by-file", "docs=docs-branch", "--json"],
     );
     assert!(!out.status.success(), "must refuse: {:?}", json(&out));
     let v = json(&out);

@@ -39,14 +39,14 @@ fn init_repo(with_origin: bool) -> TempDir {
 fn init_then_idempotent() {
     let tmp = init_repo(true);
 
-    let out = stacc(tmp.path(), &["init", "--format", "json"]);
+    let out = stacc(tmp.path(), &["init", "--json"]);
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains(r#""status":"initialized""#), "got: {stdout}");
     assert!(stdout.contains(r#""trunk":"main""#), "got: {stdout}");
     assert!(stdout.contains(r#""remote":"origin""#), "got: {stdout}");
 
-    let out2 = stacc(tmp.path(), &["init", "--format", "json"]);
+    let out2 = stacc(tmp.path(), &["init", "--json"]);
     assert!(out2.status.success());
     let stdout2 = String::from_utf8_lossy(&out2.stdout);
     assert!(
@@ -59,7 +59,7 @@ fn init_then_idempotent() {
 fn init_errors_without_remote() {
     let tmp = init_repo(false);
 
-    let out = stacc(tmp.path(), &["init", "--format", "json"]);
+    let out = stacc(tmp.path(), &["init", "--json"]);
     assert!(!out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("could not determine remote"), "got: {stdout}");
@@ -72,7 +72,7 @@ fn init_respects_flag_overrides() {
     let out = stacc(
         tmp.path(),
         &[
-            "init", "--format", "json", "--trunk", "trunk-x", "--remote", "upstream",
+            "init", "--json", "--trunk", "trunk-x", "--remote", "upstream",
         ],
     );
     assert!(out.status.success());

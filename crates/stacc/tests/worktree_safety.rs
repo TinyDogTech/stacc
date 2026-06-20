@@ -83,7 +83,7 @@ fn modify_refuses_when_an_upstack_branch_is_checked_out_elsewhere() {
     // `a`'s upstack includes `b`, which lives in another worktree.
     std::fs::write(p.join("a.txt"), "a-modified\n").unwrap();
     run_git(p, &["add", "a.txt"]);
-    let out = stacc(p, &["modify", "--format", "json"]);
+    let out = stacc(p, &["modify", "--json"]);
 
     assert!(!out.status.success(), "modify must refuse");
     assert_eq!(json(&out)["type"], "worktree_conflict");
@@ -105,7 +105,7 @@ fn move_refuses_when_a_subtree_branch_is_checked_out_elsewhere() {
 
     // `a`'s subtree includes `b`, checked out elsewhere, so the move must refuse
     // before re-pointing anything.
-    let out = stacc(p, &["move", "--onto", "side", "--format", "json"]);
+    let out = stacc(p, &["move", "--onto", "side", "--json"]);
     assert!(!out.status.success(), "move must refuse");
     assert_eq!(json(&out)["type"], "worktree_conflict");
     assert_eq!(json(&out)["branch"], "b");
@@ -154,7 +154,7 @@ fn modify_succeeds_when_nothing_is_checked_out_elsewhere() {
 
     std::fs::write(p.join("a.txt"), "a-modified\n").unwrap();
     run_git(p, &["add", "a.txt"]);
-    let out = stacc(p, &["modify", "--format", "json"]);
+    let out = stacc(p, &["modify", "--json"]);
     assert!(out.status.success(), "modify should succeed: {}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(json(&out)["op"], "modify");
 }

@@ -25,7 +25,7 @@ fn stacc(dir: &std::path::Path, args: &[&str]) -> Output {
 /// Run `stacc <args> --format json` expecting success, parsed.
 fn json(dir: &std::path::Path, args: &[&str]) -> serde_json::Value {
     let mut full: Vec<&str> = args.to_vec();
-    full.extend(["--format", "json"]);
+    full.extend(["--json"]);
     let out = stacc(dir, &full);
     assert!(
         out.status.success(),

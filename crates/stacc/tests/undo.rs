@@ -71,7 +71,7 @@ fn undo_restores_a_modified_branch_tip() {
     assert!(stacc(p, &["modify"]).status.success());
     assert_ne!(tip0, rev(p, "a"), "modify amended a");
 
-    let out = stacc(p, &["undo", "--format", "json"]);
+    let out = stacc(p, &["undo", "--json"]);
     assert!(
         out.status.success(),
         "undo failed: {}",
@@ -98,7 +98,7 @@ fn undo_steps_walks_multiple_versions_back() {
         assert!(stacc(p, &["modify"]).status.success()); // V2, V3
     }
 
-    let out = stacc(p, &["undo", "--steps", "2", "--format", "json"]);
+    let out = stacc(p, &["undo", "--steps", "2", "--json"]);
     assert!(
         out.status.success(),
         "undo --steps 2 failed: {}",
@@ -116,12 +116,12 @@ fn undo_of_track_clears_state_without_moving_the_ref() {
     let a_tip = rev(p, "a");
     assert!(stacc(p, &["track"]).status.success());
 
-    let out = stacc(p, &["undo", "--format", "json"]);
+    let out = stacc(p, &["undo", "--json"]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     // `track` did not move the branch ref, so undo leaves it where it is.
     assert_eq!(rev(p, "a"), a_tip);
     // `a` is no longer tracked.
-    let log = json(&stacc(p, &["log", "--format", "json"]));
+    let log = json(&stacc(p, &["log", "--json"]));
     assert!(
         log["stack"].as_array().is_none_or(Vec::is_empty),
         "a is no longer tracked: {log}"
@@ -153,7 +153,7 @@ fn undo_skips_a_branch_checked_out_in_another_worktree() {
         &["worktree", "add", "-q", holder.path().join("wt-b").to_str().unwrap(), "b"],
     );
 
-    let out = stacc(p, &["undo", "--format", "json"]);
+    let out = stacc(p, &["undo", "--json"]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let v = json(&out);
     let skipped = v["worktree_skipped"].as_array().expect("array");
@@ -179,7 +179,7 @@ fn undo_skips_the_current_branch_when_the_tree_is_dirty() {
     // Dirty the working tree, a hard reset would discard this.
     std::fs::write(p.join("a.txt"), "uncommitted\n").unwrap();
 
-    let out = stacc(p, &["undo", "--format", "json"]);
+    let out = stacc(p, &["undo", "--json"]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let v = json(&out);
     assert!(
@@ -193,7 +193,7 @@ fn undo_skips_the_current_branch_when_the_tree_is_dirty() {
 fn undo_beyond_retention_is_a_structured_error() {
     let tmp = repo_init();
     let p = tmp.path();
-    let out = stacc(p, &["undo", "--steps", "100", "--format", "json"]);
+    let out = stacc(p, &["undo", "--steps", "100", "--json"]);
     assert!(!out.status.success(), "should refuse beyond retention");
     let v = json(&out);
     assert_eq!(v["type"], "usage");
@@ -207,7 +207,7 @@ fn undo_beyond_retention_is_a_structured_error() {
 fn undo_with_no_earlier_version_says_nothing_to_undo() {
     let tmp = repo_init(); // only the init version exists
     let p = tmp.path();
-    let out = stacc(p, &["undo", "--format", "json"]);
+    let out = stacc(p, &["undo", "--json"]);
     assert!(!out.status.success(), "nothing to undo");
     assert!(
         json(&out)["message"]

@@ -84,7 +84,7 @@ fn json(out: &Output) -> serde_json::Value {
 }
 
 fn log_json(dir: &Path) -> String {
-    String::from_utf8_lossy(&stacc(dir, &["log", "--format", "json"]).stdout).into_owned()
+    String::from_utf8_lossy(&stacc(dir, &["log", "--json"]).stdout).into_owned()
 }
 
 fn branch_ref_exists(dir: &Path, branch: &str) -> bool {
@@ -172,7 +172,7 @@ fn delete_of_a_merged_branch_reparents_and_restacks_children() {
 
     let out = stacc_env(
         p,
-        &["delete", "b", "--format", "json"],
+        &["delete", "b", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(
@@ -217,7 +217,7 @@ fn delete_of_an_empty_diff_branch_is_safe_without_force() {
     track(p, "a");
     run_git(p, &["checkout", "-q", "a"]);
 
-    let out = stacc(p, &["delete", "b", "--format", "json"]);
+    let out = stacc(p, &["delete", "b", "--json"]);
     assert!(
         out.status.success(),
         "an empty-diff delete needs no --force: {}",
@@ -241,7 +241,7 @@ fn delete_refuses_an_unmerged_branch_and_force_overrides() {
     run_git(p, &["checkout", "-q", "a"]);
     let b_tip = rev(p, "b");
 
-    let out = stacc(p, &["delete", "b", "--format", "json"]);
+    let out = stacc(p, &["delete", "b", "--json"]);
     assert!(!out.status.success(), "must refuse: {:?}", json(&out));
     let v = json(&out);
     assert_eq!(v["type"], "usage", "structured refusal: {v}");
@@ -254,7 +254,7 @@ fn delete_refuses_an_unmerged_branch_and_force_overrides() {
     assert_eq!(rev(p, "b"), b_tip, "nothing mutated");
     assert!(log_json(p).contains(r#""name":"b""#), "b still tracked");
 
-    let out = stacc(p, &["delete", "b", "--force", "--format", "json"]);
+    let out = stacc(p, &["delete", "b", "--force", "--json"]);
     assert!(
         out.status.success(),
         "--force overrides: {}",
@@ -288,7 +288,7 @@ fn delete_refuses_when_the_open_pr_state_says_open() {
 
     let out = stacc_env(
         p,
-        &["delete", "b", "--format", "json"],
+        &["delete", "b", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(!out.status.success(), "an open PR is not safe: {:?}", json(&out));
@@ -321,7 +321,7 @@ fn delete_allows_when_the_pr_is_closed() {
 
     let out = stacc_env(
         p,
-        &["delete", "b", "--format", "json"],
+        &["delete", "b", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(
@@ -349,7 +349,7 @@ fn delete_treats_an_unfetchable_pr_state_as_unsafe() {
     // safe, so the delete is refused.
     let out = stacc_env(
         p,
-        &["delete", "b", "--format", "json"],
+        &["delete", "b", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", DEAD_API)],
     );
     assert!(
@@ -388,7 +388,7 @@ fn delete_close_closes_the_recorded_pr() {
     // --force skips the predicate (and its GET), so only the PATCH is mocked.
     let out = stacc_env(
         p,
-        &["delete", "b", "--force", "--close", "--format", "json"],
+        &["delete", "b", "--force", "--close", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(
@@ -425,7 +425,7 @@ fn delete_close_failure_is_reported_not_fatal() {
 
     let out = stacc_env(
         p,
-        &["delete", "b", "--force", "--close", "--format", "json"],
+        &["delete", "b", "--force", "--close", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     );
     assert!(
@@ -449,7 +449,7 @@ fn delete_refuses_the_trunk() {
     let tmp = repo_init();
     let p = tmp.path();
 
-    let out = stacc(p, &["delete", "main", "--format", "json"]);
+    let out = stacc(p, &["delete", "main", "--json"]);
     assert!(!out.status.success());
     let v = json(&out);
     assert_eq!(v["type"], "usage");
@@ -465,7 +465,7 @@ fn delete_refuses_an_untracked_branch_with_a_raw_git_hint() {
     let p = tmp.path();
     run_git(p, &["branch", "-q", "loose"]);
 
-    let out = stacc(p, &["delete", "loose", "--format", "json"]);
+    let out = stacc(p, &["delete", "loose", "--json"]);
     assert!(!out.status.success());
     let v = json(&out);
     assert_eq!(v["type"], "usage");
@@ -487,7 +487,7 @@ fn delete_of_the_current_branch_checks_out_the_trunk_first() {
     track(p, "main");
 
     // On b, deleting b: stacc must move HEAD to the trunk before deleting.
-    let out = stacc(p, &["delete", "b", "--force", "--format", "json"]);
+    let out = stacc(p, &["delete", "b", "--force", "--json"]);
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -521,7 +521,7 @@ fn delete_refuses_when_a_child_is_in_another_worktree() {
         &["worktree", "add", "-q", holder.path().join("wt-c").to_str().unwrap(), "c"],
     );
 
-    let out = stacc(p, &["delete", "b", "--force", "--format", "json"]);
+    let out = stacc(p, &["delete", "b", "--force", "--json"]);
     assert!(!out.status.success(), "must refuse: {:?}", json(&out));
     let v = json(&out);
     assert_eq!(

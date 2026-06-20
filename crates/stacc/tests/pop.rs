@@ -70,7 +70,7 @@ fn json(out: &Output) -> serde_json::Value {
 }
 
 fn log_json(dir: &Path) -> String {
-    String::from_utf8_lossy(&stacc(dir, &["log", "--format", "json"]).stdout).into_owned()
+    String::from_utf8_lossy(&stacc(dir, &["log", "--json"]).stdout).into_owned()
 }
 
 fn branch_ref_exists(dir: &Path, branch: &str) -> bool {
@@ -129,7 +129,7 @@ fn pop_lands_the_diff_unstaged_and_reparents_children() {
     pop_stack(p);
     let a_tip = rev(p, "a");
 
-    let out = stacc(p, &["pop", "--format", "json"]);
+    let out = stacc(p, &["pop", "--json"]);
     assert!(
         out.status.success(),
         "pop failed: {}",
@@ -202,7 +202,7 @@ fn pop_of_a_leaf_lands_the_diff_with_no_children() {
     write_commit(p, "a.txt", "b-version\n", "b1");
     track(p, "a");
 
-    let out = stacc(p, &["pop", "--format", "json"]);
+    let out = stacc(p, &["pop", "--json"]);
     assert!(
         out.status.success(),
         "pop failed: {}",
@@ -233,7 +233,7 @@ fn pop_refuses_a_dirty_working_tree() {
     // Dirty the tree: the popped diff would collide with this edit.
     std::fs::write(p.join("a.txt"), "uncommitted\n").expect("write");
 
-    let out = stacc(p, &["pop", "--format", "json"]);
+    let out = stacc(p, &["pop", "--json"]);
     assert!(!out.status.success(), "must refuse: {:?}", json(&out));
     let v = json(&out);
     assert_eq!(v["type"], "usage", "structured refusal: {v}");
@@ -254,7 +254,7 @@ fn pop_refuses_the_trunk() {
     let tmp = repo_init();
     let p = tmp.path();
 
-    let out = stacc(p, &["pop", "--format", "json"]);
+    let out = stacc(p, &["pop", "--json"]);
     assert!(!out.status.success());
     let v = json(&out);
     assert_eq!(v["type"], "usage");
@@ -271,7 +271,7 @@ fn pop_refuses_an_untracked_branch() {
     run_git(p, &["checkout", "-q", "-b", "loose"]);
     write_commit(p, "loose.txt", "x\n", "l1");
 
-    let out = stacc(p, &["pop", "--format", "json"]);
+    let out = stacc(p, &["pop", "--json"]);
     assert!(!out.status.success());
     let v = json(&out);
     assert_eq!(v["type"], "usage");
@@ -296,7 +296,7 @@ fn pop_refuses_when_a_child_is_in_another_worktree() {
         &["worktree", "add", "-q", holder.path().join("wt-c").to_str().unwrap(), "c"],
     );
 
-    let out = stacc(p, &["pop", "--format", "json"]);
+    let out = stacc(p, &["pop", "--json"]);
     assert!(!out.status.success(), "must refuse: {:?}", json(&out));
     let v = json(&out);
     assert_eq!(

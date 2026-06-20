@@ -21,17 +21,27 @@ pub struct Cli {
 /// Flags accepted by every subcommand.
 #[derive(Debug, clap::Args)]
 pub struct GlobalArgs {
-    /// Output format.
-    #[arg(long, value_enum, default_value = "pretty", global = true)]
-    pub format: OutputFormat,
+    /// Output JSON instead of pretty-printed output.
+    #[arg(long, global = true)]
+    pub json: bool,
 
     /// When to use colored output.
     #[arg(long, value_enum, default_value = "auto", global = true)]
     pub color: ColorChoice,
 
     /// Never prompt; fail with a structured error instead.
-    #[arg(long, global = true)]
+    #[arg(long, short = 'i', global = true)]
     pub no_interactive: bool,
+}
+
+impl GlobalArgs {
+    pub fn output_format(&self) -> OutputFormat {
+        if self.json {
+            OutputFormat::Json
+        } else {
+            OutputFormat::Pretty
+        }
+    }
 }
 
 /// How command output is rendered.
@@ -614,7 +624,27 @@ pub struct RenameArgs {
 mod tests {
     use clap::CommandFactory;
 
-    use super::Cli;
+    use super::{Cli, GlobalArgs, OutputFormat};
+
+    #[test]
+    fn output_format_json_true() {
+        let args = GlobalArgs {
+            json: true,
+            color: super::ColorChoice::Auto,
+            no_interactive: false,
+        };
+        assert_eq!(args.output_format(), OutputFormat::Json);
+    }
+
+    #[test]
+    fn output_format_json_false() {
+        let args = GlobalArgs {
+            json: false,
+            color: super::ColorChoice::Auto,
+            no_interactive: false,
+        };
+        assert_eq!(args.output_format(), OutputFormat::Pretty);
+    }
 
     #[test]
     fn help_lists_commands_alphabetically() {

@@ -56,7 +56,7 @@ fn checkout_switches_to_an_explicit_branch() {
     create(p, "a");
     run_git(p, &["checkout", "-q", "main"]);
 
-    let out = stacc(p, &["checkout", "a", "--format", "json"]);
+    let out = stacc(p, &["checkout", "a", "--json"]);
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -74,7 +74,7 @@ fn checkout_a_nonexistent_branch_errors_without_moving() {
     let tmp = init_repo();
     let p = tmp.path();
     create(p, "a"); // on a
-    let out = stacc(p, &["checkout", "ghost", "--format", "json"]);
+    let out = stacc(p, &["checkout", "ghost", "--json"]);
     assert!(!out.status.success());
     assert_eq!(current_branch(p), "a"); // unchanged
 }
@@ -87,7 +87,7 @@ fn checkout_rejects_a_dash_prefixed_arg() {
     let before = current_branch(p);
     // `--` ends clap parsing, so without the guard `--orphan=x` would reach
     // `git checkout` as an option and mutate the repo.
-    let out = stacc(p, &["checkout", "--format", "json", "--", "--orphan=x"]);
+    let out = stacc(p, &["checkout", "--json", "--", "--orphan=x"]);
     assert!(!out.status.success());
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("not a valid branch name"),
@@ -102,7 +102,7 @@ fn checkout_trunk_switches_to_the_trunk() {
     let tmp = init_repo();
     let p = tmp.path();
     create(p, "a"); // on a
-    let out = stacc(p, &["checkout", "--trunk", "--format", "json"]);
+    let out = stacc(p, &["checkout", "--trunk", "--json"]);
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -154,7 +154,7 @@ fn bare_checkout_with_scope_flags_still_errors_off_a_terminal() {
     let p = tmp.path();
     create(p, "a");
     for flag in ["--stack", "--all"] {
-        let out = stacc(p, &["checkout", flag, "--no-interactive", "--format", "json"]);
+        let out = stacc(p, &["checkout", flag, "--no-interactive", "--json"]);
         assert!(!out.status.success(), "{flag} should not bypass the gate");
         assert!(
             String::from_utf8_lossy(&out.stdout).contains("needs a branch name"),
@@ -169,7 +169,7 @@ fn bare_checkout_with_no_interactive_errors() {
     let tmp = init_repo();
     let p = tmp.path();
     create(p, "a");
-    let out = stacc(p, &["checkout", "--no-interactive", "--format", "json"]);
+    let out = stacc(p, &["checkout", "--no-interactive", "--json"]);
     assert!(!out.status.success());
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("needs a branch name"),
@@ -183,7 +183,7 @@ fn bare_checkout_with_json_errors() {
     let tmp = init_repo();
     let p = tmp.path();
     create(p, "a");
-    let out = stacc(p, &["checkout", "--format", "json"]);
+    let out = stacc(p, &["checkout", "--json"]);
     assert!(!out.status.success());
     assert!(
         String::from_utf8_lossy(&out.stdout).contains(r#""type":"usage""#),

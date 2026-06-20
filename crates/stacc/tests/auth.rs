@@ -6,7 +6,7 @@ use std::process::{Command, Output};
 /// mock server is needed.
 fn login(client_id: Option<&str>) -> Output {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_stacc"));
-    cmd.args(["auth", "login", "--format", "json"]);
+    cmd.args(["auth", "login", "--json"]);
     cmd.env_remove("STACC_OAUTH_CLIENT_ID");
     if let Some(id) = client_id {
         cmd.env("STACC_OAUTH_CLIENT_ID", id);

@@ -135,7 +135,7 @@ fn forge_less_sync_proposes_likely_merged_without_dropping() {
     write_commit(p, "a.txt", "a\n", "squash a");
     run_git(p, &["checkout", "-q", "a"]);
 
-    let out = stacc(p, &["sync", "--format", "json"]);
+    let out = stacc(p, &["sync", "--json"]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
 

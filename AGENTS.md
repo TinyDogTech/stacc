@@ -61,29 +61,29 @@ This project doubles as a way to learn Rust. When you make changes:
 
 ### 1. Invocation rule
 
-Every command: `stacc <cmd> --no-interactive --format json`. One command per Bash
+Every command: `stacc <cmd> --no-interactive --json`. One command per Bash
 call. Read stdout directly -- no Python, no `jq`, no pipeline post-processing.
 JSON output is one compact line. Nulls and empty arrays are stripped automatically;
 absent keys mean null/empty.
 
 ### 2. Error channel
 
-With `--format json`: success output and error JSON both go to stdout; stderr is
+With `--json`: success output and error JSON both go to stdout; stderr is
 silent. An empty stdout means the process exited before writing (panic or misuse).
-Never use `--format pretty` for programmatic consumption -- pretty errors go to
+Never omit `--json` for programmatic consumption -- without it, errors go to
 stderr and stdout is empty on failure.
 
 ### 3. stacc vs `gh` substitution table
 
 | Want to... | Use stacc, not gh |
 |---|---|
-| Create or update PRs (current branch + downstack) | `stacc submit --no-interactive --format json` |
-| List stack PR status | `stacc log --no-interactive --format json` |
-| Merge ready PRs (trunk-up, squash) | `stacc merge --no-interactive --format json` |
-| View current branch PR number and state | `stacc pr --no-interactive --format json` |
-| Per-branch detail (base, diffstat, PR URL) | `stacc info --no-interactive --format json` |
-| Navigate stack | `stacc up / down / top / bottom / checkout <branch> --no-interactive --format json` |
-| Sync local state with merged PRs on remote | `stacc sync --no-interactive --format json` |
+| Create or update PRs (current branch + downstack) | `stacc submit --no-interactive --json` |
+| List stack PR status | `stacc log --no-interactive --json` |
+| Merge ready PRs (trunk-up, squash) | `stacc merge --no-interactive --json` |
+| View current branch PR number and state | `stacc pr --no-interactive --json` |
+| Per-branch detail (base, diffstat, PR URL) | `stacc info --no-interactive --json` |
+| Navigate stack | `stacc up / down / top / bottom / checkout <branch> --no-interactive --json` |
+| Sync local state with merged PRs on remote | `stacc sync --no-interactive --json` |
 | PR check results for a single PR | No stacc equivalent; use `gh pr checks <number>` |
 
 `stacc submit` always pushes the current branch's full downstack (all ancestors
@@ -115,7 +115,7 @@ remote.
 ```
 `stack` is a recursive tree: each node may have a `children` array of the same
 shape. Leaf nodes have no `children` key (stripped by `print_compact`; do not
-expect `"children":[]`). `stacc log long --format json` returns only
+expect `"children":[]`). `stacc log long --json` returns only
 `{"trunk":"...","form":"long","schema_version":N}` -- it does not return tree
 data. Use `stacc log`, `stacc log short`, or bare `stacc log` for tree data.
 
@@ -153,10 +153,10 @@ Resolution steps:
 1. Read the context file for the conflicting branch and its base PR.
 2. Resolve conflicts in the listed files with your editor or git tooling.
 3. Stage resolved files and run `stacc continue`.
-4. Re-run `stacc merge --no-interactive --format json` to finish the remaining
+4. Re-run `stacc merge --no-interactive --json` to finish the remaining
    chain. Do not re-run merge before `stacc continue`.
 
-To abandon the in-progress restack: `stacc abort --no-interactive --format json`.
+To abandon the in-progress restack: `stacc abort --no-interactive --json`.
 
 ### 6. Three-way merge stop states
 
@@ -179,8 +179,8 @@ To abandon the in-progress restack: `stacc abort --no-interactive --format json`
   or `--trunk`.
 - `stacc top --no-interactive` on a stack fork returns
   `{"type":"ambiguous","choices":[...],...}`. Pick from `choices` and run
-  `stacc checkout <choice> --no-interactive --format json`.
-- `stacc log long --format json` returns only a stub; use `stacc log` or
+  `stacc checkout <choice> --no-interactive --json`.
+- `stacc log long --json` returns only a stub; use `stacc log` or
   `stacc log short` for tree data.
 - `moved: false` in navigation output means already at the destination. It is
   not an error.

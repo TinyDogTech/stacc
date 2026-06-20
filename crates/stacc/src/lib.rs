@@ -70,7 +70,7 @@ pub fn run() -> ExitCode {
     match dispatch(&cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
-            report(err, cli.global.format);
+            report(err, cli.global.output_format());
             ExitCode::FAILURE
         }
     }
@@ -78,44 +78,44 @@ pub fn run() -> ExitCode {
 
 fn dispatch(cli: &Cli) -> Result<(), Error> {
     match &cli.command {
-        Command::Init(args) => commands::init(args, cli.global.format),
-        Command::Track(args) => commands::track(args, cli.global.format),
-        Command::Untrack(args) => commands::untrack(args, cli.global.format),
-        Command::Create(args) => commands::create(args, cli.global.format),
-        Command::Modify(args) => commands::modify(args, cli.global.format),
-        Command::Log(args) => commands::log(args, cli.global.format, cli.global.color),
-        Command::Status => commands::status(cli.global.format),
-        Command::Info(args) => commands::info(args, cli.global.format),
-        Command::Pr => commands::pr(cli.global.format),
-        Command::Submit(args) => commands::submit(args, cli.global.format),
-        Command::Sync(args) => commands::sync(args, cli.global.format),
-        Command::Restack(args) => commands::restack(args, cli.global.format),
-        Command::Move(args) => commands::move_cmd(args, cli.global.format),
-        Command::Absorb(args) => commands::absorb(args, cli.global.format),
-        Command::Squash(args) => commands::squash(args, cli.global.format),
-        Command::Fold(args) => commands::fold(args, cli.global.format),
-        Command::Split(args) => commands::split(args, cli.global.format),
-        Command::Reorder(args) => commands::reorder(args, cli.global.format),
-        Command::Delete(args) => commands::delete(args, cli.global.format),
-        Command::Pop => commands::pop(cli.global.format),
-        Command::Rename(args) => commands::rename(args, cli.global.format),
-        Command::Merge(args) => commands::merge(args, cli.global.format),
-        Command::Merged(args) => commands::merged(args, cli.global.format),
-        Command::Continue => commands::continue_cmd(cli.global.format),
-        Command::Abort => commands::abort_cmd(cli.global.format),
-        Command::Undo(args) => commands::undo(args, cli.global.format),
-        Command::Up(args) => commands::up(args, cli.global.format),
-        Command::Down(args) => commands::down(args, cli.global.format),
-        Command::Top => commands::top(cli.global.format),
-        Command::Bottom => commands::bottom(cli.global.format),
+        Command::Init(args) => commands::init(args, cli.global.output_format()),
+        Command::Track(args) => commands::track(args, cli.global.output_format()),
+        Command::Untrack(args) => commands::untrack(args, cli.global.output_format()),
+        Command::Create(args) => commands::create(args, cli.global.output_format()),
+        Command::Modify(args) => commands::modify(args, cli.global.output_format()),
+        Command::Log(args) => commands::log(args, cli.global.output_format(), cli.global.color),
+        Command::Status => commands::status(cli.global.output_format()),
+        Command::Info(args) => commands::info(args, cli.global.output_format()),
+        Command::Pr => commands::pr(cli.global.output_format()),
+        Command::Submit(args) => commands::submit(args, cli.global.output_format()),
+        Command::Sync(args) => commands::sync(args, cli.global.output_format()),
+        Command::Restack(args) => commands::restack(args, cli.global.output_format()),
+        Command::Move(args) => commands::move_cmd(args, cli.global.output_format()),
+        Command::Absorb(args) => commands::absorb(args, cli.global.output_format()),
+        Command::Squash(args) => commands::squash(args, cli.global.output_format()),
+        Command::Fold(args) => commands::fold(args, cli.global.output_format()),
+        Command::Split(args) => commands::split(args, cli.global.output_format()),
+        Command::Reorder(args) => commands::reorder(args, cli.global.output_format()),
+        Command::Delete(args) => commands::delete(args, cli.global.output_format()),
+        Command::Pop => commands::pop(cli.global.output_format()),
+        Command::Rename(args) => commands::rename(args, cli.global.output_format()),
+        Command::Merge(args) => commands::merge(args, cli.global.output_format()),
+        Command::Merged(args) => commands::merged(args, cli.global.output_format()),
+        Command::Continue => commands::continue_cmd(cli.global.output_format()),
+        Command::Abort => commands::abort_cmd(cli.global.output_format()),
+        Command::Undo(args) => commands::undo(args, cli.global.output_format()),
+        Command::Up(args) => commands::up(args, cli.global.output_format()),
+        Command::Down(args) => commands::down(args, cli.global.output_format()),
+        Command::Top => commands::top(cli.global.output_format()),
+        Command::Bottom => commands::bottom(cli.global.output_format()),
         Command::Checkout(args) => {
-            commands::checkout(args, cli.global.format, cli.global.no_interactive)
+            commands::checkout(args, cli.global.output_format(), cli.global.no_interactive)
         }
-        Command::Parent => commands::parent(cli.global.format),
-        Command::Children => commands::children(cli.global.format),
-        Command::Auth(args) => commands::auth(args, cli.global.format),
-        Command::Config(args) => commands::config(args, cli.global.format),
-        // Pure script output; --format json is deliberately ignored here.
+        Command::Parent => commands::parent(cli.global.output_format()),
+        Command::Children => commands::children(cli.global.output_format()),
+        Command::Auth(args) => commands::auth(args, cli.global.output_format()),
+        Command::Config(args) => commands::config(args, cli.global.output_format()),
+        // Pure script output; --json is deliberately ignored here.
         Command::Completion(args) => {
             commands::completion(args);
             Ok(())
@@ -227,8 +227,8 @@ mod tests {
     #[test]
     fn simple_alias_expands() {
         let a = aliases(&[("st", "status")]);
-        let out = expand_aliases(argv(&["stacc", "st", "--format", "json"]), &a).unwrap();
-        assert_eq!(out, argv(&["stacc", "status", "--format", "json"]));
+        let out = expand_aliases(argv(&["stacc", "st", "--json"]), &a).unwrap();
+        assert_eq!(out, argv(&["stacc", "status", "--json"]));
     }
 
     #[test]

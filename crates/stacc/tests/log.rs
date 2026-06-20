@@ -93,7 +93,7 @@ fn log_renders_nested_stack_json() {
         .status
         .success());
 
-    let out = stacc(tmp.path(), &["log", "--format", "json"]);
+    let out = stacc(tmp.path(), &["log", "--json"]);
     assert!(out.status.success());
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains(r#""trunk":"main""#), "got: {s}");
@@ -120,7 +120,7 @@ fn log_pretty_lists_branches() {
 #[test]
 fn log_requires_init() {
     let tmp = repo();
-    let out = stacc(tmp.path(), &["log", "--format", "json"]);
+    let out = stacc(tmp.path(), &["log", "--json"]);
     assert!(!out.status.success());
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains("not initialized"), "got: {s}");
@@ -224,7 +224,7 @@ fn log_surfaces_unreachable_branches() {
     assert!(s.contains("b (base: a)"), "got: {s}");
 
     // R15: the JSON path still hides them (no `unreachable` leak).
-    let j = String::from_utf8_lossy(&stacc(p, &["log", "--format", "json"]).stdout).into_owned();
+    let j = String::from_utf8_lossy(&stacc(p, &["log", "--json"]).stdout).into_owned();
     assert!(!j.contains("unreachable"), "got: {j}");
 }
 
@@ -240,7 +240,7 @@ fn log_json_is_not_changed_by_drift() {
     run_git(p, &["checkout", "-q", "main"]);
     run_git(p, &["commit", "-q", "--allow-empty", "-m", "main moves"]); // a drifts
 
-    let s = String::from_utf8_lossy(&stacc(p, &["log", "--format", "json"]).stdout).into_owned();
+    let s = String::from_utf8_lossy(&stacc(p, &["log", "--json"]).stdout).into_owned();
     assert!(s.contains(r#""name":"a""#), "got: {s}");
     assert!(!s.contains("restack"), "JSON leaked a pretty marker: {s}");
     assert!(!s.contains("needs"), "JSON leaked a pretty marker: {s}");
@@ -305,7 +305,7 @@ fn log_json_includes_commit_object_and_null_pr() {
     run_git(p, &["commit", "-q", "--allow-empty", "-m", "a1"]);
     assert!(stacc(p, &["track"]).status.success());
 
-    let s = String::from_utf8_lossy(&stacc(p, &["log", "--format", "json"]).stdout).into_owned();
+    let s = String::from_utf8_lossy(&stacc(p, &["log", "--json"]).stdout).into_owned();
     assert!(s.contains(r#""name":"a""#), "got: {s}");
     assert!(s.contains(r#""subject":"a1""#), "commit object expected: {s}");
     // With no recorded PR, `change` is omitted entirely (compacted), not null.
@@ -406,7 +406,7 @@ fn log_marks_a_tracked_branch_whose_git_ref_is_gone() {
     assert!(short.contains("gone (deleted)"), "short marks deleted too: {short}");
 
     // JSON flags the gone branch only; live nodes never gain the key.
-    let j = String::from_utf8_lossy(&stacc(p, &["log", "--format", "json"]).stdout).into_owned();
+    let j = String::from_utf8_lossy(&stacc(p, &["log", "--json"]).stdout).into_owned();
     assert!(j.contains(r#""deleted":true"#), "JSON deleted flag expected: {j}");
     assert_eq!(j.matches(r#""deleted""#).count(), 1, "only the gone branch is flagged: {j}");
 }
@@ -433,7 +433,7 @@ fn log_keeps_a_live_child_connected_under_a_deleted_base() {
     assert!(s.contains("keep (deleted)"), "base marked deleted: {s}");
     assert!(s.contains("child"), "child still renders: {s}");
 
-    let j = String::from_utf8_lossy(&stacc(p, &["log", "--format", "json"]).stdout).into_owned();
+    let j = String::from_utf8_lossy(&stacc(p, &["log", "--json"]).stdout).into_owned();
     assert!(j.contains(r#""name":"child""#), "child present: {j}");
     assert_eq!(j.matches(r#""deleted""#).count(), 1, "only the base is flagged: {j}");
 }
@@ -495,7 +495,7 @@ fn log_full_shows_live_pr_status() {
     let s = String::from_utf8_lossy(&out.stdout).into_owned();
     assert!(s.contains("#7 Open"), "live PR status expected: {s}");
 
-    let j = String::from_utf8_lossy(&stacc_env(p, &["log", "--format", "json"], envs).stdout)
+    let j = String::from_utf8_lossy(&stacc_env(p, &["log", "--json"], envs).stdout)
         .into_owned();
     assert!(j.contains(r#""state":"open""#), "JSON status expected: {j}");
 }
@@ -731,7 +731,7 @@ fn log_full_shows_title_draft_and_mergeable_hint() {
         "draft + hint + title expected: {s}"
     );
 
-    let j = String::from_utf8_lossy(&stacc_env(p, &["log", "--format", "json"], envs).stdout)
+    let j = String::from_utf8_lossy(&stacc_env(p, &["log", "--json"], envs).stdout)
         .into_owned();
     assert!(j.contains(r#""state":"open""#), "draft stays open in JSON: {j}");
     assert!(j.contains(r#""title":"feat: add the foo widget""#), "got: {j}");
@@ -799,7 +799,7 @@ fn log_full_shows_review_and_ci_rollup_from_one_batched_call() {
     assert!(s.contains("changes requested, CI pending"), "rollup line for b: {s}");
     graphql.assert_hits(1);
 
-    let j = String::from_utf8_lossy(&stacc_env(p, &["log", "--format", "json"], envs).stdout)
+    let j = String::from_utf8_lossy(&stacc_env(p, &["log", "--json"], envs).stdout)
         .into_owned();
     assert!(j.contains(r#""review":"approved""#), "got: {j}");
     assert!(j.contains(r#""checks":"passed""#), "got: {j}");

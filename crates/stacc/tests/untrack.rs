@@ -45,7 +45,7 @@ fn untrack_removes_the_current_branch_but_keeps_the_git_branch() {
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
 
     // No longer tracked in stacc state...
-    let s = String::from_utf8_lossy(&stacc(p, &["status", "--format", "json"]).stdout).into_owned();
+    let s = String::from_utf8_lossy(&stacc(p, &["status", "--json"]).stdout).into_owned();
     assert!(s.contains(r#""tracked":false"#), "got: {s}");
     // ...but the git branch still exists (untrack never touches git).
     run_git(p, &["rev-parse", "--verify", "feature"]);
@@ -62,7 +62,7 @@ fn untrack_reparents_children_onto_the_base() {
     assert!(stacc(p, &["track", "--base", "a"]).status.success()); // b on a
 
     // Untrack the middle branch `a` (named, while sitting on `b`).
-    let out = stacc(p, &["untrack", "a", "--format", "json"]);
+    let out = stacc(p, &["untrack", "a", "--json"]);
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
     let s = String::from_utf8_lossy(&out.stdout).into_owned();
     assert!(s.contains(r#""status":"untracked""#), "got: {s}");
@@ -70,7 +70,7 @@ fn untrack_reparents_children_onto_the_base() {
     assert!(s.contains(r#""reparented":["b"]"#), "reparented child expected: {s}");
 
     // `b` is now stacked on `main`; `a` is gone from the stack.
-    let j = String::from_utf8_lossy(&stacc(p, &["log", "--format", "json"]).stdout).into_owned();
+    let j = String::from_utf8_lossy(&stacc(p, &["log", "--json"]).stdout).into_owned();
     assert!(j.contains(r#""name":"b""#) && j.contains(r#""base":"main""#), "got: {j}");
     assert!(!j.contains(r#""name":"a""#), "a should be gone: {j}");
 }
@@ -91,7 +91,7 @@ fn untrack_reparents_all_children_and_leaves_grandchildren_attached() {
     run_git(p, &["checkout", "-q", "-b", "c"]);
     assert!(stacc(p, &["track", "--base", "a"]).status.success());
 
-    let out = stacc(p, &["untrack", "a", "--format", "json"]);
+    let out = stacc(p, &["untrack", "a", "--json"]);
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
     let s = String::from_utf8_lossy(&out.stdout).into_owned();
     // Both direct children are reparented (assert membership, not array order).
@@ -100,7 +100,7 @@ fn untrack_reparents_all_children_and_leaves_grandchildren_attached() {
     // b and c now sit on main; the grandchild d stays attached to b; a is gone.
     // (JSON object keys serialize alphabetically, so assert on each field, not
     // on adjacency.)
-    let j = String::from_utf8_lossy(&stacc(p, &["log", "--format", "json"]).stdout).into_owned();
+    let j = String::from_utf8_lossy(&stacc(p, &["log", "--json"]).stdout).into_owned();
     assert!(!j.contains(r#""name":"a""#), "a should be gone: {j}");
     assert!(!j.contains(r#""base":"a""#), "nothing should still base on a: {j}");
     assert!(j.contains(r#""base":"b""#), "grandchild d stays on b: {j}");
@@ -135,7 +135,7 @@ fn untrack_pretty_output_reports_reparenting_only_when_there_is_a_child() {
 fn untrack_requires_init() {
     let tmp = repo();
     let p = tmp.path();
-    let out = stacc(p, &["untrack", "feature", "--format", "json"]);
+    let out = stacc(p, &["untrack", "feature", "--json"]);
     assert!(!out.status.success());
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains("is not initialized"), "got: {s}");
@@ -147,7 +147,7 @@ fn untrack_refuses_the_trunk() {
     let p = tmp.path();
     assert!(stacc(p, &["init"]).status.success());
 
-    let out = stacc(p, &["untrack", "main", "--format", "json"]);
+    let out = stacc(p, &["untrack", "main", "--json"]);
     assert!(!out.status.success());
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains("cannot untrack the trunk"), "got: {s}");
@@ -159,7 +159,7 @@ fn untrack_rejects_an_untracked_branch() {
     let p = tmp.path();
     assert!(stacc(p, &["init"]).status.success());
 
-    let out = stacc(p, &["untrack", "ghost", "--format", "json"]);
+    let out = stacc(p, &["untrack", "ghost", "--json"]);
     assert!(!out.status.success());
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains("is not tracked"), "got: {s}");

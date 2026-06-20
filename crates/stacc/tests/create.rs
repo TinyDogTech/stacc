@@ -66,7 +66,7 @@ fn create_with_staged_changes_commits_and_tracks() {
     std::fs::write(p.join("f.txt"), "hi\n").expect("write");
     run_git(p, &["add", "f.txt"]);
 
-    let out = stacc(p, &["create", "feat-x", "--format", "json"]);
+    let out = stacc(p, &["create", "feat-x", "--json"]);
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -87,7 +87,7 @@ fn create_with_staged_changes_commits_and_tracks() {
     assert!(s.contains(&format!(r#""sha":"{head}""#)), "got: {s}");
 
     // Tracked with base main.
-    let log = stacc(p, &["log", "--format", "json"]);
+    let log = stacc(p, &["log", "--json"]);
     let ls = String::from_utf8_lossy(&log.stdout);
     assert!(ls.contains(r#""name":"feat-x""#), "got: {ls}");
     assert!(ls.contains(r#""base":"main""#), "got: {ls}");
@@ -98,7 +98,7 @@ fn create_with_nothing_staged_makes_an_empty_tracked_branch() {
     let tmp = init_repo();
     let p = tmp.path();
 
-    let out = stacc(p, &["create", "feat-y", "--format", "json"]);
+    let out = stacc(p, &["create", "feat-y", "--json"]);
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -113,7 +113,7 @@ fn create_with_nothing_staged_makes_an_empty_tracked_branch() {
     // No new commit: feat-y is exactly main's tip.
     assert!(git_ok(p, &["merge-base", "--is-ancestor", "feat-y", "main"]));
     assert!(git_ok(p, &["merge-base", "--is-ancestor", "main", "feat-y"]));
-    let log = stacc(p, &["log", "--format", "json"]);
+    let log = stacc(p, &["log", "--json"]);
     assert!(String::from_utf8_lossy(&log.stdout).contains(r#""name":"feat-y""#));
 }
 
@@ -126,7 +126,7 @@ fn create_uninitialized_errors() {
     run_git(p, &["config", "user.email", "test@example.com"]);
     run_git(p, &["commit", "-q", "--allow-empty", "-m", "first"]);
 
-    let out = stacc(p, &["create", "feat-z", "--format", "json"]);
+    let out = stacc(p, &["create", "feat-z", "--json"]);
     assert!(!out.status.success());
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("not initialized"),
@@ -149,7 +149,7 @@ fn create_stacks_on_the_current_branch() {
     assert_eq!(current_branch(p), "b");
     assert_eq!(git_out(p, &["log", "-1", "--format=%s"]), "b work");
 
-    let log = stacc(p, &["log", "--format", "json"]);
+    let log = stacc(p, &["log", "--json"]);
     let s = String::from_utf8_lossy(&log.stdout);
     assert!(s.contains(r#""name":"b""#), "got: {s}");
     assert!(s.contains(r#""base":"a""#), "got: {s}");
@@ -162,7 +162,7 @@ fn create_from_detached_head_errors() {
     let head = git_out(p, &["rev-parse", "HEAD"]);
     run_git(p, &["checkout", "-q", &head]); // detach HEAD
 
-    let out = stacc(p, &["create", "feat-d", "--format", "json"]);
+    let out = stacc(p, &["create", "feat-d", "--json"]);
     assert!(!out.status.success());
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("detached HEAD"),
@@ -176,7 +176,7 @@ fn create_refuses_an_already_tracked_name() {
     let tmp = init_repo();
     let p = tmp.path();
     assert!(stacc(p, &["create", "dup"]).status.success());
-    let out = stacc(p, &["create", "dup", "--format", "json"]);
+    let out = stacc(p, &["create", "dup", "--json"]);
     assert!(!out.status.success());
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("already tracked"),
@@ -189,7 +189,7 @@ fn create_refuses_an_already_tracked_name() {
 fn create_refuses_the_trunk_name() {
     let tmp = init_repo();
     let p = tmp.path();
-    let out = stacc(p, &["create", "main", "--format", "json"]);
+    let out = stacc(p, &["create", "main", "--json"]);
     assert!(!out.status.success());
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("trunk"),
@@ -204,11 +204,11 @@ fn create_on_an_existing_git_branch_fails_without_partial_state() {
     let p = tmp.path();
     // A git branch stacc does not track.
     run_git(p, &["branch", "taken"]);
-    let out = stacc(p, &["create", "taken", "--format", "json"]);
+    let out = stacc(p, &["create", "taken", "--json"]);
     assert!(!out.status.success());
     // No checkout happened and nothing was tracked.
     assert_eq!(current_branch(p), "main");
-    let log = stacc(p, &["log", "--format", "json"]);
+    let log = stacc(p, &["log", "--json"]);
     assert!(!String::from_utf8_lossy(&log.stdout).contains(r#""name":"taken""#));
 }
 
@@ -223,7 +223,7 @@ fn create_all_stages_tracked_and_untracked_changes() {
     std::fs::write(p.join("tracked.txt"), "v2\n").expect("write");
     std::fs::write(p.join("new.txt"), "new\n").expect("write");
 
-    let out = stacc(p, &["create", "feat-all", "--all", "-m", "all work", "--format", "json"]);
+    let out = stacc(p, &["create", "feat-all", "--all", "-m", "all work", "--json"]);
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -257,7 +257,7 @@ fn create_all_drops_a_path_the_commit_adds_to_gitignore() {
     std::fs::write(p.join(".gitignore"), "cache/\n").expect("write");
     std::fs::write(p.join("cache/idx"), "v2\n").expect("write");
 
-    let out = stacc(p, &["create", "feat-ig", "-a", "-m", "ignore cache", "--format", "json"]);
+    let out = stacc(p, &["create", "feat-ig", "-a", "-m", "ignore cache", "--json"]);
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -293,7 +293,7 @@ fn create_all_keeps_a_force_added_file_when_gitignore_is_unchanged() {
     // A later -a commit that does not touch .gitignore must not un-track it.
     std::fs::write(p.join("important.log"), "v2\n").expect("write");
     std::fs::write(p.join("other.txt"), "x\n").expect("write");
-    let out = stacc(p, &["create", "feat-x", "-a", "-m", "more", "--format", "json"]);
+    let out = stacc(p, &["create", "feat-x", "-a", "-m", "more", "--json"]);
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -314,7 +314,7 @@ fn create_onto_bases_on_the_named_branch() {
     assert!(stacc(p, &["create", "a", "-m", "a1"]).status.success());
 
     // On `a`; create `b` based on main instead of the current branch.
-    let out = stacc(p, &["create", "b", "--onto", "main", "--format", "json"]);
+    let out = stacc(p, &["create", "b", "--onto", "main", "--json"]);
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -327,7 +327,7 @@ fn create_onto_bases_on_the_named_branch() {
     assert_eq!(git_out(p, &["rev-parse", "b"]), git_out(p, &["rev-parse", "main"]));
     assert!(!git_ok(p, &["merge-base", "--is-ancestor", "a", "b"]));
     // Recorded base: `stacc parent` on b names main.
-    let parent = stacc(p, &["parent", "--format", "json"]);
+    let parent = stacc(p, &["parent", "--json"]);
     assert!(
         String::from_utf8_lossy(&parent.stdout).contains(r#""parent":"main""#),
         "got: {}",
@@ -351,7 +351,7 @@ fn create_insert_reparents_children_onto_the_new_branch() {
     // Insert n between a and b.
     std::fs::write(p.join("n.txt"), "n\n").expect("write");
     run_git(p, &["add", "n.txt"]);
-    let out = stacc(p, &["create", "n", "--insert", "-m", "n1", "--format", "json"]);
+    let out = stacc(p, &["create", "n", "--insert", "-m", "n1", "--json"]);
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -365,7 +365,7 @@ fn create_insert_reparents_children_onto_the_new_branch() {
 
     // b's recorded base is now n, and b's history descends n's commit.
     run_git(p, &["checkout", "-q", "b"]);
-    let parent = stacc(p, &["parent", "--format", "json"]);
+    let parent = stacc(p, &["parent", "--json"]);
     assert!(
         String::from_utf8_lossy(&parent.stdout).contains(r#""parent":"n""#),
         "got: {}",
@@ -390,7 +390,7 @@ fn create_without_insert_leaves_children_on_the_old_parent() {
     assert!(stacc(p, &["create", "sib"]).status.success());
     // b still has a as its recorded base.
     run_git(p, &["checkout", "-q", "b"]);
-    let parent = stacc(p, &["parent", "--format", "json"]);
+    let parent = stacc(p, &["parent", "--json"]);
     assert!(
         String::from_utf8_lossy(&parent.stdout).contains(r#""parent":"a""#),
         "got: {}",
@@ -402,7 +402,7 @@ fn create_without_insert_leaves_children_on_the_old_parent() {
 fn create_insert_with_onto_errors() {
     let tmp = init_repo();
     let p = tmp.path();
-    let out = stacc(p, &["create", "x", "--insert", "--onto", "main", "--format", "json"]);
+    let out = stacc(p, &["create", "x", "--insert", "--onto", "main", "--json"]);
     assert!(!out.status.success());
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("mutually exclusive"),
@@ -417,7 +417,7 @@ fn create_handles_slashed_branch_names() {
     let p = tmp.path();
     std::fs::write(p.join("f.txt"), "hi\n").expect("write");
     run_git(p, &["add", "f.txt"]);
-    let out = stacc(p, &["create", "jillian/feat", "--format", "json"]);
+    let out = stacc(p, &["create", "jillian/feat", "--json"]);
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -429,7 +429,7 @@ fn create_handles_slashed_branch_names() {
         String::from_utf8_lossy(&out.stdout)
     );
     assert_eq!(current_branch(p), "jillian/feat");
-    let log = stacc(p, &["log", "--format", "json"]);
+    let log = stacc(p, &["log", "--json"]);
     assert!(
         String::from_utf8_lossy(&log.stdout).contains(r#""name":"jillian/feat""#),
         "got: {}",

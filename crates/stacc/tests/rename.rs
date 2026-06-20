@@ -95,7 +95,7 @@ fn rename_moves_the_state_key_and_repoints_children() {
     assert!(stacc(p, &["track", "--base", "a"]).status.success());
     run_git(p, &["checkout", "-q", "a"]);
 
-    let out = stacc(p, &["rename", "x", "--format", "json"]);
+    let out = stacc(p, &["rename", "x", "--json"]);
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -108,7 +108,7 @@ fn rename_moves_the_state_key_and_repoints_children() {
 
     // HEAD followed the rename; a is gone, x is tracked, and b re-parented onto x.
     assert_eq!(current_branch(p), "x");
-    let log = String::from_utf8_lossy(&stacc(p, &["log", "--format", "json"]).stdout).into_owned();
+    let log = String::from_utf8_lossy(&stacc(p, &["log", "--json"]).stdout).into_owned();
     assert!(log.contains(r#""name":"x""#), "got: {log}");
     assert!(!log.contains(r#""name":"a""#), "a still present: {log}");
     // Both children re-parented onto x (recorded base.name updated).
@@ -135,7 +135,7 @@ fn rename_to_an_existing_name_errors() {
     assert!(stacc(p, &["track"]).status.success());
     run_git(p, &["checkout", "-q", "a"]);
 
-    let out = stacc(p, &["rename", "b", "--format", "json"]);
+    let out = stacc(p, &["rename", "b", "--json"]);
     assert!(!out.status.success());
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("already tracked"),
@@ -148,7 +148,7 @@ fn rename_to_an_existing_name_errors() {
 fn rename_the_trunk_errors() {
     let (tmp, _bare) = setup();
     let p = tmp.path();
-    let out = stacc(p, &["rename", "x", "--format", "json"]); // on main
+    let out = stacc(p, &["rename", "x", "--json"]); // on main
     assert!(!out.status.success());
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("cannot rename the trunk"),
@@ -173,14 +173,14 @@ fn rename_with_an_open_pr_requires_force() {
     });
     assert!(stacc_env(
         p,
-        &["submit", "--format", "json"],
+        &["submit", "--json"],
         &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
     )
     .status
     .success());
 
     // a now has an open PR; renaming without --force is refused, naming the PR.
-    let out = stacc(p, &["rename", "x", "--format", "json"]);
+    let out = stacc(p, &["rename", "x", "--json"]);
     assert!(!out.status.success());
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("will close its open PR #7"),
@@ -205,7 +205,7 @@ fn rename_with_force_drops_the_pr_and_renames_the_remote() {
     });
     let base = server.base_url();
     let env = [("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", base.as_str())];
-    assert!(stacc_env(p, &["submit", "--format", "json"], &env).status.success());
+    assert!(stacc_env(p, &["submit", "--json"], &env).status.success());
 
     // The remote branch-rename API is called with the new name.
     let rename_mock = server.mock(|when, then| {
@@ -215,7 +215,7 @@ fn rename_with_force_drops_the_pr_and_renames_the_remote() {
         then.status(201).json_body(serde_json::json!({ "name": "x" }));
     });
 
-    let out = stacc_env(p, &["rename", "x", "--force", "--format", "json"], &env);
+    let out = stacc_env(p, &["rename", "x", "--force", "--json"], &env);
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -250,7 +250,7 @@ fn rename_keeps_the_pr_when_the_remote_rename_fails() {
     });
     let base = server.base_url();
     let env = [("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", base.as_str())];
-    assert!(stacc_env(p, &["submit", "--format", "json"], &env).status.success());
+    assert!(stacc_env(p, &["submit", "--json"], &env).status.success());
 
     // The remote rename fails (500): the local rename still persists, the PR is
     // KEPT (not dropped), and the user is warned.
@@ -259,7 +259,7 @@ fn rename_keeps_the_pr_when_the_remote_rename_fails() {
             .path("/repos/TinyDogTech/stacc/branches/a/rename");
         then.status(500);
     });
-    let out = stacc_env(p, &["rename", "x", "--force", "--format", "json"], &env);
+    let out = stacc_env(p, &["rename", "x", "--force", "--json"], &env);
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -287,7 +287,7 @@ fn rename_to_the_trunk_name_errors() {
     run_git(p, &["checkout", "-q", "-b", "a"]);
     run_git(p, &["commit", "-q", "--allow-empty", "-m", "a1"]);
     assert!(stacc(p, &["track"]).status.success());
-    let out = stacc(p, &["rename", "main", "--format", "json"]);
+    let out = stacc(p, &["rename", "main", "--json"]);
     assert!(!out.status.success());
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("is the trunk branch name"),
@@ -301,7 +301,7 @@ fn rename_a_detached_head_errors() {
     let (tmp, _bare) = setup();
     let p = tmp.path();
     run_git(p, &["checkout", "-q", "--detach"]);
-    let out = stacc(p, &["rename", "x", "--format", "json"]);
+    let out = stacc(p, &["rename", "x", "--json"]);
     assert!(!out.status.success());
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("detached"),
@@ -316,7 +316,7 @@ fn rename_an_untracked_branch_errors() {
     let p = tmp.path();
     run_git(p, &["checkout", "-q", "-b", "loose"]);
     run_git(p, &["commit", "-q", "--allow-empty", "-m", "x1"]);
-    let out = stacc(p, &["rename", "x", "--format", "json"]);
+    let out = stacc(p, &["rename", "x", "--json"]);
     assert!(!out.status.success());
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("not tracked"),
