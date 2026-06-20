@@ -114,23 +114,7 @@ pub fn track(args: &TrackArgs, format: OutputFormat, work_dir: &Path) -> Result<
     }
 
     let base = args.base.clone().unwrap_or(trunk);
-    let base_hash = git.rev_parse(&base)?;
-
-    store.update(|state| {
-        state.branches.insert(
-            branch.clone(),
-            BranchState {
-                base: Base {
-                    name: base.clone(),
-                    hash: base_hash.clone(),
-                },
-                pr: None,
-                pr_title: None,
-                pr_description: None,
-            },
-        );
-        Ok(())
-    })?;
+    track_branch_impl(&git, &store, &branch, &base)?;
 
     match format {
         OutputFormat::Json => println!(
@@ -139,6 +123,37 @@ pub fn track(args: &TrackArgs, format: OutputFormat, work_dir: &Path) -> Result<
         ),
         OutputFormat::Pretty => println!("Tracking {branch} (base: {base})"),
     }
+    Ok(())
+}
+
+/// Core tracking logic shared between `stacc track` and the sync untracked flow.
+/// Records `branch` with `base` in state and removes `branch` from
+/// `declined_tracking` atomically in one `store.update` call.
+pub(crate) fn track_branch_impl(
+    git: &Git,
+    store: &StateStore,
+    branch: &str,
+    base: &str,
+) -> Result<(), Error> {
+    let base_hash = git.rev_parse(base)?;
+    store.update(|state| {
+        state.branches.insert(
+            branch.to_owned(),
+            BranchState {
+                base: Base {
+                    name: base.to_owned(),
+                    hash: base_hash.clone(),
+                },
+                pr: None,
+                pr_title: None,
+                pr_description: None,
+            },
+        );
+        if let Some(repo) = &mut state.repo {
+            repo.declined_tracking.remove(branch);
+        }
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -1081,5 +1096,101 @@ fn report_rename(
                 println!("Closed PR #{} (re-submit to recreate it)", pr.number);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+    use std::process::Command;
+
+    use tempfile::TempDir;
+
+    use super::*;
+
+    fn init_git_repo() -> TempDir {
+        let tmp = TempDir::new().expect("temp dir");
+        let p = tmp.path();
+        for args in [
+            vec!["init", "-q", "-b", "main"],
+            vec!["config", "user.name", "Test"],
+            vec!["config", "user.email", "test@test.com"],
+            vec!["commit", "-q", "--allow-empty", "-m", "init"],
+        ] {
+            let ok = Command::new("git").arg("-C").arg(p).args(&args).status().unwrap().success();
+            assert!(ok, "git {args:?} failed");
+        }
+        tmp
+    }
+
+    fn seed_repo_config(store: &StateStore, trunk: &str, declined: impl IntoIterator<Item = String>) {
+        let trunk = trunk.to_owned();
+        let declined: BTreeSet<String> = declined.into_iter().collect();
+        store.update(|state| {
+            state.repo = Some(RepoConfig {
+                trunk: trunk.clone(),
+                remote: "origin".into(),
+                declined_tracking: declined.clone(),
+            });
+            Ok(())
+        }).expect("seed repo config");
+    }
+
+    #[test]
+    fn track_branch_impl_clears_declined_tracking() {
+        let tmp = init_git_repo();
+        let git = Git::open(tmp.path());
+        let store = StateStore::new(git.clone());
+
+        // Create and checkout a feature branch.
+        Command::new("git")
+            .arg("-C").arg(tmp.path())
+            .args(["checkout", "-q", "-b", "feature"])
+            .status().unwrap();
+
+        // Seed state: repo config with the feature branch in declined_tracking.
+        seed_repo_config(&store, "main", ["feature".to_owned()]);
+
+        // Verify it's in declined before tracking.
+        let state = store.load().unwrap();
+        assert!(
+            state.repo.as_ref().unwrap().declined_tracking.contains("feature"),
+            "precondition: feature must be in declined_tracking"
+        );
+
+        // Track the branch.
+        track_branch_impl(&git, &store, "feature", "main").expect("track_branch_impl failed");
+
+        // After tracking: branch is in state.branches, NOT in declined_tracking.
+        let state = store.load().unwrap();
+        assert!(
+            state.branches.contains_key("feature"),
+            "feature must be in branches after tracking"
+        );
+        assert!(
+            !state.repo.as_ref().unwrap().declined_tracking.contains("feature"),
+            "feature must be removed from declined_tracking after tracking"
+        );
+    }
+
+    #[test]
+    fn track_branch_impl_works_when_not_declined() {
+        let tmp = init_git_repo();
+        let git = Git::open(tmp.path());
+        let store = StateStore::new(git.clone());
+
+        Command::new("git")
+            .arg("-C").arg(tmp.path())
+            .args(["checkout", "-q", "-b", "feature"])
+            .status().unwrap();
+
+        seed_repo_config(&store, "main", []);
+
+        // Tracking a branch that was never declined must not error.
+        track_branch_impl(&git, &store, "feature", "main").expect("track_branch_impl must succeed");
+
+        let state = store.load().unwrap();
+        assert!(state.branches.contains_key("feature"));
+        assert!(state.repo.as_ref().unwrap().declined_tracking.is_empty());
     }
 }
