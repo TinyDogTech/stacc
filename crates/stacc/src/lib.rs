@@ -106,7 +106,7 @@ fn dispatch(cli: &Cli, work_dir: &Path) -> Result<(), Error> {
         Command::Info(args) => commands::info(args, cli.global.output_format(), work_dir),
         Command::Pr => commands::pr(cli.global.output_format(), work_dir),
         Command::Submit(args) => commands::submit(args, cli.global.output_format(), work_dir),
-        Command::Sync(args) => commands::sync(args, cli.global.output_format(), work_dir),
+        Command::Sync(args) => commands::sync(args, cli.global.output_format(), cli.global.no_interactive, work_dir),
         Command::Restack(args) => commands::restack(args, cli.global.output_format(), work_dir),
         Command::Move(args) => commands::move_cmd(args, cli.global.output_format(), work_dir),
         Command::Absorb(args) => commands::absorb(args, cli.global.output_format(), work_dir),

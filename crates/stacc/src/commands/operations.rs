@@ -2,6 +2,7 @@
 //! (continue/abort) lifecycle they share.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::IsTerminal;
 use std::path::Path;
 
 use serde_json::{json, Value};
@@ -1035,7 +1036,7 @@ fn report_move(
 /// Detects branches whose PR has merged (re-parenting their children and
 /// dropping them), pulls the trunk from upstream, then restacks the remaining
 /// branches bottom-up onto their bases.
-pub fn sync(args: &SyncArgs, format: OutputFormat, work_dir: &Path) -> Result<(), Error> {
+pub fn sync(args: &SyncArgs, format: OutputFormat, no_interactive: bool, work_dir: &Path) -> Result<(), Error> {
     let git = Git::open(work_dir);
     let store = StateStore::new(git.clone());
     let mut state = store.load()?;
@@ -1110,6 +1111,60 @@ pub fn sync(args: &SyncArgs, format: OutputFormat, work_dir: &Path) -> Result<()
     } else {
         cleanup_merged_refs(&git, &repo.trunk, &leases)
     };
+
+    // Surface local branches that stacc doesn't track yet (and the user hasn't
+    // previously declined). In interactive sessions, offer to track them now.
+    // In non-interactive / JSON mode, report them in the output so agents can act.
+    let local_branches = git.local_branches().unwrap_or_default();
+    let tracked_names: BTreeSet<&str> = state.branches.keys().map(String::as_str).collect();
+    let candidates: Vec<String> = local_branches
+        .into_iter()
+        .filter(|b| {
+            b != &repo.trunk
+                && !tracked_names.contains(b.as_str())
+                && !repo.declined_tracking.contains(b)
+        })
+        .collect();
+
+    let mut untracked_for_report: Vec<String> = Vec::new();
+    if !candidates.is_empty() {
+        if crate::interactive::allowed(std::io::stdin().is_terminal(), no_interactive, format) {
+            let inferred: Vec<(String, String)> = candidates
+                .iter()
+                .map(|b| {
+                    let base = infer_base(&git, &state.branches, &repo.trunk, b);
+                    (b.clone(), base)
+                })
+                .collect();
+            let items: Vec<String> = inferred
+                .iter()
+                .map(|(b, base)| format!("{b} (parent: {base})"))
+                .collect();
+            let selected =
+                crate::interactive::prompt_multi_select("Track local branches?", &items)?;
+            let mut to_decline: Vec<String> = Vec::new();
+            for (i, (branch, base)) in inferred.iter().enumerate() {
+                if selected.contains(&i) {
+                    super::track_branch_impl(&git, &store, branch, base)?;
+                } else {
+                    to_decline.push(branch.clone());
+                }
+            }
+            if !to_decline.is_empty() {
+                store.update(|s| {
+                    if let Some(r) = s.repo.as_mut() {
+                        for b in &to_decline {
+                            r.declined_tracking.insert(b.clone());
+                        }
+                    }
+                    Ok(())
+                })?;
+            }
+        } else {
+            untracked_for_report = candidates;
+        }
+    }
+
     report_sync(
         format,
         "sync",
@@ -1122,6 +1177,7 @@ pub fn sync(args: &SyncArgs, format: OutputFormat, work_dir: &Path) -> Result<()
         &cleanup_skipped,
         detection_skipped,
         &likely_merged,
+        &untracked_for_report,
     );
     Ok(())
 }
@@ -3082,6 +3138,7 @@ fn continue_op(
                 &[],
                 false,
                 &[],
+                &[],
             );
         }
         // A resumed modify carries its branch, so JSON gets the same
@@ -3436,6 +3493,7 @@ fn report_sync(
     cleanup_skipped: &[CleanupSkip],
     detection_skipped: bool,
     likely_merged: &[ops::LikelyMerged],
+    untracked: &[String],
 ) {
     match format {
         OutputFormat::Json => {
@@ -3466,6 +3524,7 @@ fn report_sync(
                     "cleanup_skipped": cleanup_skipped_json(cleanup_skipped),
                     "detection_skipped": detection_skipped,
                     "likely_merged": likely_list,
+                    "untracked": untracked,
                     "schema_version": SCHEMA_VERSION,
                 })
             );
@@ -3504,6 +3563,12 @@ fn report_sync(
                     );
                 }
             }
+            if !untracked.is_empty() {
+                println!(
+                    "hint: {} local branch(es) are not tracked by stacc; run `stacc track <branch>` to add or `stacc sync --no-interactive` to see them in JSON output.",
+                    untracked.len()
+                );
+            }
             report_cleanup_pretty(cleaned, cleanup_skipped);
         }
     }
@@ -3513,6 +3578,119 @@ pub(crate) fn clear_conflict_artifacts(git: &Git) {
     if let Ok(dir) = git.git_dir() {
         recovery::clear_continuation(&dir);
         let _ = std::fs::remove_file(dir.join("stacc-conflict-context.json"));
+    }
+}
+
+/// Infer the most appropriate base for an untracked branch by finding the
+/// "deepest" tracked branch that is a git ancestor of `branch`. Falls back to
+/// `trunk` when no tracked branch is an ancestor.
+fn infer_base(
+    git: &Git,
+    tracked: &BTreeMap<String, BranchState>,
+    trunk: &str,
+    branch: &str,
+) -> String {
+    let ancestors: Vec<&str> = tracked
+        .keys()
+        .filter(|b| git.is_ancestor(b.as_str(), branch).unwrap_or(false))
+        .map(String::as_str)
+        .collect();
+
+    if ancestors.is_empty() {
+        return trunk.to_owned();
+    }
+
+    // Deepest ancestor: the candidate that has all others as its own ancestors.
+    // (Uniquely exists when the ancestor set is a linear chain; in a fork any
+    // leaf qualifies and we take the first alphabetically via BTreeMap order.)
+    ancestors
+        .iter()
+        .find(|&&candidate| {
+            ancestors
+                .iter()
+                .all(|&other| other == candidate || git.is_ancestor(other, candidate).unwrap_or(false))
+        })
+        .copied()
+        .unwrap_or(trunk)
+        .to_owned()
+}
+
+#[cfg(test)]
+mod infer_base_tests {
+    use std::collections::BTreeMap;
+    use std::process::Command;
+
+    use tempfile::TempDir;
+
+    use super::*;
+
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let ok = Command::new("git").arg("-C").arg(dir).args(args).status().unwrap().success();
+        assert!(ok, "git {args:?} failed");
+    }
+
+    fn setup_repo() -> (TempDir, Git) {
+        let dir = TempDir::new().unwrap();
+        let p = dir.path();
+        git(p, &["init", "-b", "main"]);
+        git(p, &["config", "user.email", "test@test.com"]);
+        git(p, &["config", "user.name", "Test"]);
+        git(p, &["commit", "--allow-empty", "-m", "root"]);
+        let g = Git::open(p);
+        (dir, g)
+    }
+
+    fn make_branch_state(name: &str) -> BranchState {
+        BranchState {
+            base: Base { name: name.to_owned(), hash: String::new() },
+            pr: None,
+            pr_title: None,
+            pr_description: None,
+        }
+    }
+
+    #[test]
+    fn falls_back_to_trunk_when_no_tracked_branch_is_ancestor() {
+        let (dir, git_repo) = setup_repo();
+        let p = dir.path();
+        // Create a branch that diverges from main; "feature-a" does not exist as a ref.
+        git(p, &["checkout", "-b", "unrelated"]);
+        git(p, &["commit", "--allow-empty", "-m", "u1"]);
+
+        let mut tracked = BTreeMap::new();
+        tracked.insert("feature-a".to_owned(), make_branch_state("main"));
+
+        let result = infer_base(&git_repo, &tracked, "main", "unrelated");
+        assert_eq!(result, "main");
+    }
+
+    #[test]
+    fn picks_nearest_tracked_ancestor_in_a_linear_stack() {
+        let (dir, git_repo) = setup_repo();
+        let p = dir.path();
+        // main -> a -> b -> untracked
+        git(p, &["checkout", "-b", "a"]);
+        git(p, &["commit", "--allow-empty", "-m", "a1"]);
+        git(p, &["checkout", "-b", "b"]);
+        git(p, &["commit", "--allow-empty", "-m", "b1"]);
+        git(p, &["checkout", "-b", "untracked"]);
+        git(p, &["commit", "--allow-empty", "-m", "u1"]);
+        git(p, &["checkout", "main"]);
+
+        let mut tracked = BTreeMap::new();
+        tracked.insert("a".to_owned(), make_branch_state("main"));
+        tracked.insert("b".to_owned(), make_branch_state("a"));
+
+        let result = infer_base(&git_repo, &tracked, "main", "untracked");
+        assert_eq!(result, "b");
+    }
+
+    #[test]
+    fn returns_trunk_when_tracked_map_is_empty() {
+        let (_dir, git_repo) = setup_repo();
+        let tracked = BTreeMap::new();
+        let result = infer_base(&git_repo, &tracked, "main", "main");
+        assert_eq!(result, "main");
     }
 }
 
