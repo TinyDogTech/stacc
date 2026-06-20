@@ -200,10 +200,10 @@ design that this plan does not restructure.
 **Approach:**
 Mechanical replacement in each file: the two-element pattern `"--format", "json"`
 becomes `"--json"` (one element). Similarly `"--format", "pretty"` (if any) becomes
-nothing — remove the two elements since pretty is the default. Do not replace
+nothing (remove the two elements since pretty is the default). Do not replace
 `--no-interactive` with `-i` in tests; tests should remain legible, not compressed.
 
-In `proxy.rs`, also update the comment near the test that passes `"--format", "json"` —
+In `proxy.rs`, also update the comment near the test that passes `"--format", "json"` --
 it describes the test's discriminating intent vs. git's `--format=...`; after the
 rename the comment should reference `--json`.
 
