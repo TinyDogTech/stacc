@@ -37,6 +37,7 @@ shlex = "1"
 # linking the system `libdbus-1`, so the Linux release binaries build on plain
 # CI runners and on musl without a `libdbus-1-dev` system package.
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust", "vendored"] }
+inquire = "0.9"
 
 # Workspace-wide lints. Member crates opt in with `[lints] workspace = true`.
 #
