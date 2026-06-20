@@ -3,6 +3,8 @@
 
 use std::io::Write;
 
+use inquire::InquireError;
+
 use crate::cli::OutputFormat;
 use crate::error::Error;
 
@@ -33,6 +35,39 @@ pub fn prompt_select(prompt: &str, items: &[String]) -> Result<String, Error> {
         .filter(|n| (1..=items.len()).contains(n))
         .ok_or_else(|| Error::Usage(format!("invalid selection `{}`", line.trim())))?;
     Ok(items[choice - 1].clone())
+}
+
+/// Present a checkbox-style multi-select using `inquire`. Returns the indices of
+/// the items the user selected. Pressing Esc or selecting none returns an empty
+/// `Vec` rather than an error -- callers treat that as "decline all".
+///
+/// Panics if `items` is empty; callers must guard with a non-empty check first.
+pub fn prompt_multi_select(prompt: &str, items: &[String]) -> Result<Vec<usize>, Error> {
+    let result = inquire::MultiSelect::new(prompt, items.to_vec()).prompt();
+    match result {
+        Ok(selected) => {
+            let indices = selected
+                .iter()
+                .filter_map(|s| items.iter().position(|i| i == s))
+                .collect();
+            Ok(indices)
+        }
+        Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => Ok(vec![]),
+        Err(e) => Err(Error::Usage(e.to_string())),
+    }
+}
+
+/// Prompt the user to confirm or override a pre-filled value. Returns the
+/// accepted or overridden string. Pressing Esc keeps the default.
+pub fn prompt_confirm_or_change(prompt: &str, default: &str) -> Result<String, Error> {
+    let result = inquire::Text::new(prompt).with_default(default).prompt();
+    match result {
+        Ok(val) => Ok(val),
+        Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
+            Ok(default.to_owned())
+        }
+        Err(e) => Err(Error::Usage(e.to_string())),
+    }
 }
 
 #[cfg(test)]

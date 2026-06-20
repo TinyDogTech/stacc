@@ -388,6 +388,7 @@ mod tests {
             repo: Some(RepoConfig {
                 trunk: "main".into(),
                 remote: "origin".into(),
+                declined_tracking: Default::default(),
             }),
             branches,
             ..State::default()
@@ -449,6 +450,7 @@ mod tests {
             repo: Some(RepoConfig {
                 trunk: "main".into(),
                 remote: "origin".into(),
+                declined_tracking: Default::default(),
             }),
             ..State::default()
         };
@@ -492,6 +494,7 @@ mod tests {
                 s.repo = Some(RepoConfig {
                     trunk: "main".into(),
                     remote: "origin".into(),
+                    declined_tracking: Default::default(),
                 });
                 s.branches.insert("feature".into(), branch_on_main());
                 Ok(())
