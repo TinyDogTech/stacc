@@ -1,18 +1,18 @@
 //! `stacc absorb`: distribute the staged hunks into the downstack commits that
-//! introduced the lines each hunk edits (by blame), applied as in-memory tree
-//! rewrites, then restack the upstack. Ambiguous and unsupported hunks are left
-//! staged and reported, never prompted or silently dropped (KTD-2).
+//! introduced their lines (by blame), applied as in-memory tree rewrites, then
+//! restack the upstack. Ambiguous and unsupported hunks are left staged and
+//! reported, never prompted or silently dropped (KTD-2).
 //!
 //! The mapping is by *blame*, not apply-check: a hunk's context applies cleanly
 //! to many ancestor commits, so "first clean apply" silently rewrites the wrong
 //! commit. We blame the branch tip's content over the hunk's pre-image line
-//! range and only map when every edited line blames to one commit that is one of
-//! the branch's own commits.
+//! range and only map when every edited line blames to one commit that is in the
+//! downstack chain's absorbable set.
 //!
-//! The apply is an in-memory `commit-tree` rewrite of the branch's own commit
-//! chain, never a `git rebase`/autosquash: a non-stacc rebase strands the repo
-//! and `stacc abort` refuses to clean it up. After moving the branch ref to the
-//! rewritten tip, a `reset --mixed` leaves the absorbed hunks reading as
+//! The apply is an in-memory `commit-tree` rewrite of the commit chain, never a
+//! `git rebase`/autosquash: a non-stacc rebase strands the repo and `stacc
+//! abort` refuses to clean it up. After moving all affected branch refs to the
+//! rewritten tips, a `reset --mixed` leaves the absorbed hunks reading as
 //! committed and only the unabsorbed hunks as unstaged modifications.
 
 use std::collections::BTreeMap;
@@ -50,10 +50,11 @@ struct Mapping {
     unabsorbed: Vec<Unabsorbed>,
 }
 
-/// `stacc absorb`: see the module docs. Maps staged hunks to the branch's own
-/// commits by blame, rewrites those commits' trees in memory, moves the branch
-/// ref, `reset --mixed`es to leave only the unabsorbed hunks unstaged, and
-/// restacks the upstack. `--dry-run` emits the mapping and mutates nothing.
+/// `stacc absorb`: see the module docs. Maps staged hunks to commits in the
+/// downstack chain by blame, rewrites those commits' trees in memory, moves all
+/// affected branch refs, `reset --mixed`es to leave only the unabsorbed hunks
+/// unstaged, and restacks the upstack. `--dry-run` emits the mapping and
+/// mutates nothing.
 pub fn absorb(args: &AbsorbArgs, format: OutputFormat, work_dir: &Path) -> Result<(), Error> {
     let git = Git::open(work_dir);
     let store = StateStore::new(git.clone());
@@ -78,15 +79,12 @@ pub fn absorb(args: &AbsorbArgs, format: OutputFormat, work_dir: &Path) -> Resul
             repo.trunk
         )));
     }
-    let base = state
-        .branches
-        .get(&branch)
-        .map(|b| b.base.clone())
-        .ok_or_else(|| {
-            Error::Usage(format!(
-                "branch `{branch}` is not tracked; run `stacc track` first"
-            ))
-        })?;
+    // Verify the current branch is tracked before building the chain.
+    if !state.branches.contains_key(&branch) {
+        return Err(Error::Usage(format!(
+            "branch `{branch}` is not tracked; run `stacc track` first"
+        )));
+    }
 
     if !git.has_staged_changes()? {
         return Err(Error::Usage(
@@ -94,71 +92,133 @@ pub fn absorb(args: &AbsorbArgs, format: OutputFormat, work_dir: &Path) -> Resul
         ));
     }
 
-    let tip = git.rev_parse(&branch)?;
+    // Build the full downstack chain (bottom-up: [deepest, ..., current]).
+    // Errors with a Usage message if any intermediate branch is untracked.
+    let chain = ops::downstack_chain(&state, &branch, &repo.trunk)?;
 
-    // The branch's own commits, oldest-first: the only commits absorb may
-    // rewrite. Defined as `base..tip`, using the recorded base hash when it is
-    // still an ancestor of the tip (the common case), otherwise the live base
-    // tip, so a drifted recorded hash does not under- or over-count the set.
-    let exclude = if git.is_ancestor(&base.hash, &branch).unwrap_or(false) {
-        base.hash.clone()
-    } else {
-        git.rev_parse(&base.name)?
-    };
-    let own_commits = git.rev_list(&exclude, &tip)?;
-    if own_commits.is_empty() {
+    // For each branch in the chain, compute the tip SHA, the base-exclude SHA
+    // (with the same stale-hash guard as the old single-branch code), and the
+    // per-branch commit list. All SHAs are collected into commit_to_branch and
+    // chain_commits so the caller can look up which branch owns a blame SHA.
+    let mut commit_to_branch: BTreeMap<String, String> = BTreeMap::new();
+    let mut chain_tips: BTreeMap<String, String> = BTreeMap::new();
+    let mut chain_excludes: BTreeMap<String, String> = BTreeMap::new();
+    let mut chain_commits: Vec<String> = Vec::new();
+    for br in &chain {
+        let bs = state.branches.get(br).expect("chain members are tracked");
+        let br_tip = git.rev_parse(br)?;
+        chain_tips.insert(br.clone(), br_tip.clone());
+        let br_exclude = if git.is_ancestor(&bs.base.hash, br).unwrap_or(false) {
+            bs.base.hash.clone()
+        } else {
+            git.rev_parse(&bs.base.name)?
+        };
+        chain_excludes.insert(br.clone(), br_exclude.clone());
+        for sha in git.rev_list(&br_exclude, &br_tip)? {
+            commit_to_branch.insert(sha.clone(), br.clone());
+            chain_commits.push(sha);
+        }
+    }
+
+    if commit_to_branch.is_empty() {
         return Err(Error::Usage(format!(
-            "`{branch}` has no commits of its own above `{}` to absorb into",
-            base.name
+            "the stack containing `{branch}` has no commits above `{}` to absorb into",
+            repo.trunk
         )));
     }
-    let own_set: std::collections::BTreeSet<&str> =
-        own_commits.iter().map(String::as_str).collect();
 
-    // Map every staged hunk to a branch-own commit (or report why it can't be).
+    let tip = chain_tips[&branch].clone();
+
+    // absorbable_set: all commit SHAs across the full downstack chain.
+    let absorbable_set: std::collections::BTreeSet<&str> =
+        commit_to_branch.keys().map(String::as_str).collect();
+
+    // Map every staged hunk to a chain commit (or report why it can't be).
     let hunks = git.diff_hunks()?;
-    let mapping = map_hunks(&git, &branch, &hunks, &own_set)?;
+    let mapping = map_hunks(&git, &branch, &hunks, &absorbable_set)?;
 
     if args.dry_run {
-        report_dry_run(format, &branch, &own_commits, &git, &mapping);
+        report_dry_run(format, &branch, &chain_commits, &commit_to_branch, &git, &mapping);
         return Ok(());
     }
 
     if mapping.mapped.is_empty() {
         // Nothing absorbable: leave the staged changes exactly where they are
         // (no ref move, no reset) so the repo is untouched, never half-rewritten.
-        report_result(format, &branch, &tip, &git, &mapping, &[]);
+        report_result(format, &branch, &tip, &git, &mapping, &[], &commit_to_branch);
         return Ok(());
     }
 
-    // Fail fast if any branch we would restack is checked out elsewhere, BEFORE
-    // mutating anything (mirrors `modify`/`move`).
+    // Fail fast if any downstack branch (other than current HEAD) or upstack
+    // branch is checked out elsewhere, BEFORE mutating anything.
     let upstack = ops::upstack_order(&state.branches, &branch);
+    let downstack_others: Vec<String> =
+        chain.iter().filter(|br| br.as_str() != branch.as_str()).cloned().collect();
+    guard_worktree(&git, &downstack_others)?;
     guard_worktree(&git, &upstack)?;
 
-    // Rewrite the branch's own commit chain in memory, landing each commit's
-    // assigned hunks, and move the branch ref to the new tip under the old tip
-    // as a lease.
-    let new_by_old = rewrite_chain(&git, Some(&exclude), &own_commits, &mapping.mapped)?;
+    // Find the deepest branch in the chain that has at least one mapped commit.
+    let rewrite_start_idx = chain
+        .iter()
+        .position(|br| {
+            mapping
+                .mapped
+                .iter()
+                .any(|m| commit_to_branch.get(&m.commit).map(String::as_str) == Some(br.as_str()))
+        })
+        .expect("at least one mapped hunk implies at least one matching branch");
+    let affected_chain = &chain[rewrite_start_idx..];
+
+    // All commits from the deepest affected branch's base through the current
+    // branch tip -- the full range rewrite_chain must process.
+    let first_exclude = chain_excludes[&affected_chain[0]].clone();
+    let rewrite_commits = git.rev_list(&first_exclude, &tip)?;
+
+    // Rewrite the full range in memory. rewrite_chain propagates each mapped
+    // hunk from its introducing commit onward, so intermediate branch commits
+    // pick up the edit automatically without a separate per-branch rewrite.
+    let new_by_old =
+        rewrite_chain(&git, Some(&first_exclude), &rewrite_commits, &mapping.mapped)?;
     let new_tip = new_by_old
-        .get(own_commits.last().expect("own_commits is non-empty"))
+        .get(&tip)
         .cloned()
-        .expect("the tip is always rewritten");
-    git.update_ref(&format!("refs/heads/{branch}"), &new_tip, Some(&tip))
-        .map_err(|e| {
-            Error::Usage(format!(
-                "could not move `{branch}` to the absorbed tip ({e}); the branch tip moved under absorb, re-run it"
-            ))
-        })?;
+        .expect("current branch tip is always in the rewrite range");
+
+    // Move all affected branch refs bottom-up (affected_chain order: deepest
+    // first). Moving in this order means each ref's old-tip CAS lease is valid
+    // when we reach it; its parent's ref has already moved but did not change
+    // this branch's tip SHA.
+    for br in affected_chain {
+        let old_br_tip = &chain_tips[br];
+        if let Some(new_br_tip) = new_by_old.get(old_br_tip) {
+            git.update_ref(&format!("refs/heads/{br}"), new_br_tip, Some(old_br_tip))
+                .map_err(|e| Error::Usage(format!(
+                    "could not move `{br}` to absorbed tip ({e}); the ref moved under absorb, re-run"
+                )))?;
+        }
+    }
 
     // Move HEAD and the index to the new tip while leaving the working tree
     // untouched: the absorbed hunks now read as committed, and only the
     // unabsorbed hunks remain as unstaged modifications.
     git.reset_mixed(&new_tip)?;
 
-    // Restack the upstack onto the absorbed tip. Like `modify`, absorb changes
-    // only the branch tip, not any recorded base pointer, so the deltas closure
-    // is a no-op and the continuation is a plain `Restack`.
+    // Collect base.hash updates for each child branch in the rewrite range.
+    // These are written through restack_with_recovery's command_deltas so they
+    // land in the same transactional store.update() call as the restack result.
+    let base_updates: Vec<(String, String)> = affected_chain
+        .windows(2)
+        .filter_map(|pair| {
+            let parent_old_tip = &chain_tips[&pair[0]];
+            new_by_old
+                .get(parent_old_tip)
+                .map(|new_parent_tip| (pair[1].clone(), new_parent_tip.clone()))
+        })
+        .collect();
+
+    // Restack the upstack onto the absorbed tip. Absorb changes the branch
+    // tip(s) but not the recorded base pointers of upstack children, so the
+    // deltas closure only needs to write the intermediate base.hash updates.
     let restacked = restack_with_recovery(
         &git,
         &store,
@@ -166,26 +226,32 @@ pub fn absorb(args: &AbsorbArgs, format: OutputFormat, work_dir: &Path) -> Resul
         &repo,
         &upstack,
         |remaining| recovery::Operation::Restack { remaining },
-        &|_s| {},
+        &|s| {
+            for (br, hash) in &base_updates {
+                if let Some(b) = s.branches.get_mut(br) {
+                    hash.clone_into(&mut b.base.hash);
+                }
+            }
+        },
     )?;
     clear_conflict_artifacts(&git);
     if let Err(err) = git.checkout(&branch) {
         eprintln!("warning: could not switch back to `{branch}`: {err}");
     }
 
-    report_result(format, &branch, &new_tip, &git, &mapping, &restacked);
+    report_result(format, &branch, &new_tip, &git, &mapping, &restacked, &commit_to_branch);
     Ok(())
 }
 
-/// Map each staged hunk to the branch-own commit that introduced its edited
-/// lines, by blame. A `Modified` hunk whose pre-image lines all blame to one
-/// own commit maps to it; otherwise it is left unabsorbed with a reason. A
-/// non-`Modified` kind is unsupported and reported as such.
+/// Map each staged hunk to a commit in `absorbable_set` (the union of all
+/// commits in the downstack chain) that introduced its edited lines, by blame.
+/// A `Modified` hunk whose pre-image lines all blame to one absorbable commit
+/// maps to it; otherwise it is left unabsorbed with a reason.
 fn map_hunks(
     git: &Git,
     branch: &str,
     hunks: &[Hunk],
-    own_set: &std::collections::BTreeSet<&str>,
+    absorbable_set: &std::collections::BTreeSet<&str>,
 ) -> Result<Mapping, Error> {
     let mut mapped = Vec::new();
     let mut unabsorbed = Vec::new();
@@ -220,10 +286,7 @@ fn map_hunks(
             continue;
         }
 
-        let path = hunk
-            .old_path
-            .clone()
-            .unwrap_or_else(|| hunk.path.clone());
+        let path = hunk.old_path.clone().unwrap_or_else(|| hunk.path.clone());
         if !blames.contains_key(&path) {
             let b = git.blame(branch, &path)?;
             blames.insert(path.clone(), b);
@@ -250,12 +313,12 @@ fn map_hunks(
             continue;
         }
 
-        // Unanimous blame to a single commit, and that commit is one of the
-        // branch's own. Otherwise ambiguous (multi-commit) or outside-branch.
+        // Unanimous blame to a single commit, and that commit is in the
+        // absorbable set. Otherwise ambiguous (multi-commit) or outside the chain.
         let first = shas[0].clone();
         if shas.iter().any(|s| s != &first) {
             unabsorbed.push(Unabsorbed { hunk: hunk.clone(), reason: "ambiguous" });
-        } else if own_set.contains(first.as_str()) {
+        } else if absorbable_set.contains(first.as_str()) {
             mapped.push(Mapped { hunk: hunk.clone(), commit: first });
         } else {
             unabsorbed.push(Unabsorbed { hunk: hunk.clone(), reason: "outside_branch" });
@@ -269,8 +332,8 @@ fn map_hunks(
 /// first chain commit is a root), replaying each commit onto its rewritten
 /// parent with the assigned hunks spliced into its blobs. Returns the
 /// old-commit -> new-commit map (the last chain commit's entry is the new tip).
-/// Shared by `absorb` (chain = the branch's own commits) and `modify --into`
-/// (chain = the target's tip plus everything above it).
+/// Shared by `absorb` (chain = the full downstack range being rewritten) and
+/// `modify --into` (chain = the target's tip plus everything above it).
 ///
 /// Each commit keeps its own tree; the only change is that every file edited by
 /// an assigned hunk gets that hunk applied to **every** chain commit from the
@@ -438,25 +501,31 @@ fn find_block(
 }
 
 /// Emit the `--dry-run` JSON: the per-hunk mapping, a per-target summary
-/// (commit id + hunk count + short subject), and the unabsorbed set with a
-/// reason per hunk. Mutates nothing.
+/// (commit id + branch + hunk count + short subject), and the unabsorbed set
+/// with a reason per hunk. Mutates nothing.
 fn report_dry_run(
     format: OutputFormat,
     branch: &str,
-    own_commits: &[String],
+    chain_commits: &[String],
+    commit_to_branch: &BTreeMap<String, String>,
     git: &Git,
     mapping: &Mapping,
 ) {
-    // Per-target summary, grouped and ordered by the branch's own commit order.
+    // Per-target summary, ordered by chain position (oldest first).
     let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
     for m in &mapping.mapped {
         *counts.entry(m.commit.as_str()).or_default() += 1;
     }
     let mut targets = Vec::new();
-    for commit in own_commits {
+    let mut seen: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    for commit in chain_commits {
         if let Some(n) = counts.get(commit.as_str()) {
+            if !seen.insert(commit.as_str()) {
+                continue;
+            }
             let subject = git.commit_subject(commit).unwrap_or_default();
-            targets.push(json!({ "commit": commit, "hunks": n, "subject": subject }));
+            let br = commit_to_branch.get(commit).map_or("", String::as_str);
+            targets.push(json!({ "commit": commit, "branch": br, "hunks": n, "subject": subject }));
         }
     }
 
@@ -468,7 +537,7 @@ fn report_dry_run(
                     "op": "absorb",
                     "dry_run": true,
                     "branch": branch,
-                    "mapping": mapping_json(&mapping.mapped),
+                    "mapping": mapping_json(&mapping.mapped, commit_to_branch),
                     "targets": targets,
                     "unabsorbed": unabsorbed_json(&mapping.unabsorbed),
                 })
@@ -479,11 +548,16 @@ fn report_dry_run(
                 println!("Nothing to absorb.");
             } else {
                 println!("Would absorb {} hunk(s):", mapping.mapped.len());
-                for commit in own_commits {
+                let mut printed: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+                for commit in chain_commits {
                     if let Some(n) = counts.get(commit.as_str()) {
+                        if !printed.insert(commit.as_str()) {
+                            continue;
+                        }
                         let subject = git.commit_subject(commit).unwrap_or_default();
                         let short = &commit[..commit.len().min(8)];
-                        println!("  {short} {subject} ({n} hunk(s))");
+                        let br = commit_to_branch.get(commit).map_or("", String::as_str);
+                        println!("  {short} {subject} ({n} hunk(s)) [{br}]");
                     }
                 }
             }
@@ -501,6 +575,7 @@ fn report_result(
     git: &Git,
     mapping: &Mapping,
     restacked: &[String],
+    commit_to_branch: &BTreeMap<String, String>,
 ) {
     let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
     for m in &mapping.mapped {
@@ -516,7 +591,7 @@ fn report_result(
                     "branch": branch,
                     "sha": tip,
                     "absorbed": mapping.mapped.len(),
-                    "mapping": mapping_json(&mapping.mapped),
+                    "mapping": mapping_json(&mapping.mapped, commit_to_branch),
                     "unabsorbed": unabsorbed_json(&mapping.unabsorbed),
                     "restacked": restacked,
                 })
@@ -530,7 +605,8 @@ fn report_result(
                 for (commit, n) in &counts {
                     let subject = git.commit_subject(commit).unwrap_or_default();
                     let short = &commit[..commit.len().min(8)];
-                    println!("  {short} {subject} ({n} hunk(s))");
+                    let br = commit_to_branch.get(*commit).map_or("", String::as_str);
+                    println!("  {short} {subject} ({n} hunk(s)) [{br}]");
                 }
                 for name in restacked {
                     println!("Restacked {name}");
@@ -542,16 +618,18 @@ fn report_result(
 }
 
 /// The `{hunk -> commit}` mapping as JSON: each entry names the file, the
-/// pre-image line range, and the target commit.
-fn mapping_json(mapped: &[Mapped]) -> Vec<Value> {
+/// pre-image line range, the target commit, and the branch that owns it.
+fn mapping_json(mapped: &[Mapped], commit_to_branch: &BTreeMap<String, String>) -> Vec<Value> {
     mapped
         .iter()
         .map(|m| {
+            let br = commit_to_branch.get(&m.commit).map_or(String::new(), Clone::clone);
             json!({
                 "path": m.hunk.path,
                 "old_start": m.hunk.old_range.start,
                 "old_count": m.hunk.old_range.count,
                 "commit": m.commit,
+                "branch": br,
             })
         })
         .collect()
