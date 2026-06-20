@@ -23,12 +23,12 @@ use crate::error::Error;
 const REPO_FILE: &str = ".stacc.toml";
 
 /// `stacc config`: dispatch to get / set / unset / list.
-pub fn config(args: &ConfigArgs, format: OutputFormat) -> Result<(), Error> {
+pub fn config(args: &ConfigArgs, format: OutputFormat, work_dir: &Path) -> Result<(), Error> {
     match &args.action {
-        ConfigAction::Get { key } => get(key, format),
-        ConfigAction::Set { key, value, global } => set(key, value, *global, format),
-        ConfigAction::Unset { key, global } => unset(key, *global, format),
-        ConfigAction::List => list(format),
+        ConfigAction::Get { key } => get(key, format, work_dir),
+        ConfigAction::Set { key, value, global } => set(key, value, *global, format, work_dir),
+        ConfigAction::Unset { key, global } => unset(key, *global, format, work_dir),
+        ConfigAction::List => list(format, work_dir),
     }
 }
 
@@ -43,11 +43,13 @@ fn parse_key(key: &str) -> Result<Key, Error> {
 
 /// The file a write targets: the user-global config with `--global`, the
 /// repo-local `.stacc.toml` otherwise.
-fn target_file(global: bool) -> PathBuf {
+fn target_file(global: bool, work_dir: &Path) -> PathBuf {
     if global {
         user_config_path()
-    } else {
+    } else if work_dir == Path::new(".") {
         PathBuf::from(REPO_FILE)
+    } else {
+        work_dir.join(REPO_FILE)
     }
 }
 
@@ -89,13 +91,14 @@ struct Sources {
 impl Sources {
     /// Load both files (malformed TOML is a real error) and detect
     /// best-effort: outside a git repository detection just yields nothing.
-    fn load() -> Result<Sources, Error> {
+    fn load(work_dir: &Path) -> Result<Sources, Error> {
         let global_path = user_config_path();
+        let repo_file = work_dir.join(REPO_FILE);
         Ok(Sources {
-            repo: read_file(Path::new(REPO_FILE))?,
+            repo: read_file(&repo_file)?,
             global: read_file(&global_path)?,
-            detected: detect(&Git::open(".")).unwrap_or_default(),
-            repo_aliases: aliases_from_file(Path::new(REPO_FILE)),
+            detected: detect(&Git::open(work_dir)).unwrap_or_default(),
+            repo_aliases: aliases_from_file(&repo_file),
             global_aliases: aliases_from_file(&global_path),
             default_aliases: crate::DEFAULT_ALIASES
                 .iter()
@@ -174,9 +177,9 @@ impl Sources {
     }
 }
 
-fn get(key: &str, format: OutputFormat) -> Result<(), Error> {
+fn get(key: &str, format: OutputFormat, work_dir: &Path) -> Result<(), Error> {
     let key = parse_key(key)?;
-    let resolved = Sources::load()?.resolve(&key);
+    let resolved = Sources::load(work_dir)?.resolve(&key);
 
     match format {
         OutputFormat::Json => println!(
@@ -196,9 +199,9 @@ fn get(key: &str, format: OutputFormat) -> Result<(), Error> {
     Ok(())
 }
 
-fn set(key: &str, value: &str, global: bool, format: OutputFormat) -> Result<(), Error> {
+fn set(key: &str, value: &str, global: bool, format: OutputFormat, work_dir: &Path) -> Result<(), Error> {
     let key = parse_key(key)?;
-    let file = target_file(global);
+    let file = target_file(global, work_dir);
     set_in_file(&file, &key, value)?;
 
     match format {
@@ -217,9 +220,9 @@ fn set(key: &str, value: &str, global: bool, format: OutputFormat) -> Result<(),
     Ok(())
 }
 
-fn unset(key: &str, global: bool, format: OutputFormat) -> Result<(), Error> {
+fn unset(key: &str, global: bool, format: OutputFormat, work_dir: &Path) -> Result<(), Error> {
     let key = parse_key(key)?;
-    let file = target_file(global);
+    let file = target_file(global, work_dir);
     unset_in_file(&file, &key)?;
 
     match format {
@@ -237,8 +240,8 @@ fn unset(key: &str, global: bool, format: OutputFormat) -> Result<(), Error> {
     Ok(())
 }
 
-fn list(format: OutputFormat) -> Result<(), Error> {
-    let sources = Sources::load()?;
+fn list(format: OutputFormat, work_dir: &Path) -> Result<(), Error> {
+    let sources = Sources::load(work_dir)?;
 
     // (key, resolved) for every known key: trunk, remote, then each alias.
     let mut rows: Vec<(String, Resolved)> = vec![

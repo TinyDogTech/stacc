@@ -18,6 +18,7 @@
 //! ref surgery; folding it onto this core is a follow-up, not this unit.
 
 use std::collections::BTreeSet;
+use std::path::Path;
 
 use serde_json::json;
 use stacc_core::{ops, recovery};
@@ -35,8 +36,8 @@ use crate::error::Error;
 /// children onto its base and restacking them. Refuses an unsafe delete (see
 /// [`ensure_safe_to_delete`]) without `--force`. The branch's PR is left open
 /// by default; `--close` closes it best-effort.
-pub fn delete(args: &DeleteArgs, format: OutputFormat) -> Result<(), Error> {
-    let git = Git::open(".");
+pub fn delete(args: &DeleteArgs, format: OutputFormat, work_dir: &Path) -> Result<(), Error> {
+    let git = Git::open(work_dir);
     let store = StateStore::new(git.clone());
     let mut state = store.load()?;
     let repo = state
@@ -137,8 +138,8 @@ pub fn delete(args: &DeleteArgs, format: OutputFormat) -> Result<(), Error> {
 /// the branch (and HEAD) to the base's live tip so the diff surfaces as
 /// unstaged modifications, (4) check out the base (same commit, so the dirty
 /// tree carries over untouched), (5) delete the now fully-merged ref.
-pub fn pop(format: OutputFormat) -> Result<(), Error> {
-    let git = Git::open(".");
+pub fn pop(format: OutputFormat, work_dir: &Path) -> Result<(), Error> {
+    let git = Git::open(work_dir);
     let store = StateStore::new(git.clone());
     let mut state = store.load()?;
     let repo = state

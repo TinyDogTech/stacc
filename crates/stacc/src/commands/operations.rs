@@ -31,8 +31,8 @@ use crate::error::Error;
 // A cohesive validate -> stage/narrow -> amend -> restack -> report sequence;
 // splitting it would only trade this lint for too_many_arguments on a helper.
 #[allow(clippy::too_many_lines)]
-pub fn modify(args: &ModifyArgs, format: OutputFormat) -> Result<(), Error> {
-    let git = Git::open(".");
+pub fn modify(args: &ModifyArgs, format: OutputFormat, work_dir: &Path) -> Result<(), Error> {
+    let git = Git::open(work_dir);
     let store = StateStore::new(git.clone());
     let mut state = store.load()?;
     let repo = state
@@ -458,8 +458,8 @@ fn modify_into(
 /// content, so it is committed directly onto the base tip (`commit-tree`), with
 /// no rebase, no working-tree side effects, and no possible conflict. Only the
 /// upstack restack can conflict, and that is a plain resumable `Restack`.
-pub fn squash(args: &SquashArgs, format: OutputFormat) -> Result<(), Error> {
-    let git = Git::open(".");
+pub fn squash(args: &SquashArgs, format: OutputFormat, work_dir: &Path) -> Result<(), Error> {
+    let git = Git::open(work_dir);
     let store = StateStore::new(git.clone());
     let mut state = store.load()?;
     let repo = state
@@ -631,8 +631,8 @@ fn report_squash(
 /// `continue`/`abort` through `Operation::Fold`.
 // A cohesive validate -> ff -> reparent/restack -> finish sequence, like `merge`.
 #[allow(clippy::too_many_lines)]
-pub fn fold(args: &FoldArgs, format: OutputFormat) -> Result<(), Error> {
-    let git = Git::open(".");
+pub fn fold(args: &FoldArgs, format: OutputFormat, work_dir: &Path) -> Result<(), Error> {
+    let git = Git::open(work_dir);
     let store = StateStore::new(git.clone());
     let mut state = store.load()?;
     let repo = state
@@ -870,8 +870,8 @@ fn report_fold(
 /// stay put instead of following the move. Rejects a move onto the branch's own
 /// upstack (a cycle). On conflict records an `Operation::Move` whose `pre_base`
 /// lets `abort` roll the recorded base back. Local-only: no push.
-pub fn move_cmd(args: &MoveArgs, format: OutputFormat) -> Result<(), Error> {
-    let git = Git::open(".");
+pub fn move_cmd(args: &MoveArgs, format: OutputFormat, work_dir: &Path) -> Result<(), Error> {
+    let git = Git::open(work_dir);
     let store = StateStore::new(git.clone());
     let mut state = store.load()?;
     let repo = state
@@ -1035,8 +1035,8 @@ fn report_move(
 /// Detects branches whose PR has merged (re-parenting their children and
 /// dropping them), pulls the trunk from upstream, then restacks the remaining
 /// branches bottom-up onto their bases.
-pub fn sync(args: &SyncArgs, format: OutputFormat) -> Result<(), Error> {
-    let git = Git::open(".");
+pub fn sync(args: &SyncArgs, format: OutputFormat, work_dir: &Path) -> Result<(), Error> {
+    let git = Git::open(work_dir);
     let store = StateStore::new(git.clone());
     let mut state = store.load()?;
     let repo = state
@@ -1055,7 +1055,7 @@ pub fn sync(args: &SyncArgs, format: OutputFormat) -> Result<(), Error> {
     // (STA-90). The `--continue` resume above returns before here, so it never
     // needs a token.
     let has_tracked = !state.branches.is_empty();
-    let local_mode = stacc_config::local_mode(Path::new(".stacc.toml"));
+    let local_mode = stacc_config::local_mode(&work_dir.join(".stacc.toml"));
     // `--offline` skips the fetch and detection both. Otherwise classify the
     // merge-detection path: reachable GitHub uses the authoritative API; a
     // forge-less repo (local-mode key, a non-GitHub remote, a missing token, or
@@ -1178,8 +1178,9 @@ pub(super) fn require_github_forge(
     git: &Git,
     repo: &RepoConfig,
     op: &str,
+    work_dir: &Path,
 ) -> Result<(GitHub, String, String), Error> {
-    if stacc_config::local_mode(Path::new(".stacc.toml")) {
+    if stacc_config::local_mode(&work_dir.join(".stacc.toml")) {
         return Err(Error::Usage(format!(
             "local mode is on, so `stacc {op}` is unavailable; stacc v1 opens pull requests on GitHub only. Push your branch and open a change through your forge directly."
         )));
@@ -1518,8 +1519,8 @@ fn reconcile_with(
 /// patch-id match refuses unless `--assume-merged` overrides it (KTD-4).
 /// State-first: the drop and the record land in one compare-and-swap, then the
 /// keep-alive ref transaction (KTD-5). Local-only: no forge call.
-pub fn merged(args: &MergedArgs, format: OutputFormat) -> Result<(), Error> {
-    let git = Git::open(".");
+pub fn merged(args: &MergedArgs, format: OutputFormat, work_dir: &Path) -> Result<(), Error> {
+    let git = Git::open(work_dir);
     let store = StateStore::new(git.clone());
     let mut state = store.load()?;
     let repo = state
@@ -1692,8 +1693,8 @@ struct MergeWalk {
 // restore sequence; splitting it would only trade this lint for
 // too_many_arguments on a helper (same as modify).
 #[allow(clippy::too_many_lines)]
-pub fn merge(args: &MergeArgs, format: OutputFormat) -> Result<(), Error> {
-    let git = Git::open(".");
+pub fn merge(args: &MergeArgs, format: OutputFormat, work_dir: &Path) -> Result<(), Error> {
+    let git = Git::open(work_dir);
     let store = StateStore::new(git.clone());
     let mut state = store.load()?;
     let repo = state
@@ -1716,7 +1717,7 @@ pub fn merge(args: &MergeArgs, format: OutputFormat) -> Result<(), Error> {
         ));
     }
 
-    let (github, owner, repo_name) = require_github_forge(&git, &repo, "merge")?;
+    let (github, owner, repo_name) = require_github_forge(&git, &repo, "merge", work_dir)?;
 
     // Build the downstack chain ONCE: merged branches leave state, which would
     // make a re-derived `downstack_chain` error mid-loop.
@@ -2503,8 +2504,8 @@ fn report_cleanup_pretty(cleaned: &[String], skipped: &[CleanupSkip]) {
 /// makes that explicit); `--only` narrows to the current branch, `--downstack`
 /// to the current branch and its ancestors, and `--stack` widens to the whole
 /// stack. Unlike `sync`, this is purely local: no fetch, no merge detection.
-pub fn restack(args: &RestackArgs, format: OutputFormat) -> Result<(), Error> {
-    let git = Git::open(".");
+pub fn restack(args: &RestackArgs, format: OutputFormat, work_dir: &Path) -> Result<(), Error> {
+    let git = Git::open(work_dir);
     let store = StateStore::new(git.clone());
     let mut state = store.load()?;
     let repo = state
@@ -2559,8 +2560,8 @@ pub fn restack(args: &RestackArgs, format: OutputFormat) -> Result<(), Error> {
 }
 
 /// `stacc continue`: resume the operation interrupted by a conflict.
-pub fn continue_cmd(format: OutputFormat) -> Result<(), Error> {
-    let git = Git::open(".");
+pub fn continue_cmd(format: OutputFormat, work_dir: &Path) -> Result<(), Error> {
+    let git = Git::open(work_dir);
     let store = StateStore::new(git.clone());
     let mut state = store.load()?;
     let repo = state
@@ -2573,8 +2574,8 @@ pub fn continue_cmd(format: OutputFormat) -> Result<(), Error> {
 /// `stacc abort`: abort the operation interrupted by a conflict, undoing the
 /// in-progress rebase and clearing recovery artifacts so the working tree
 /// returns to before the operation. Escapes even a corrupt continuation.
-pub fn abort_cmd(format: OutputFormat) -> Result<(), Error> {
-    let git = Git::open(".");
+pub fn abort_cmd(format: OutputFormat, work_dir: &Path) -> Result<(), Error> {
+    let git = Git::open(work_dir);
     let git_dir = git.git_dir()?;
     // Read the record once: present unless NotInProgress (a Corrupt/Read error
     // still means a file is there, just unreadable).
@@ -2815,8 +2816,8 @@ fn rollback_reorder(git: &Git, op: &recovery::Operation) {
 /// version of the stack state and the affected branch tips. `--steps N` walks N
 /// versions back (default 1). The restore is appended as a new version, so undo
 /// is itself undoable. Non-interactive and JSON-complete.
-pub fn undo(args: &UndoArgs, format: OutputFormat) -> Result<(), Error> {
-    let git = Git::open(".");
+pub fn undo(args: &UndoArgs, format: OutputFormat, work_dir: &Path) -> Result<(), Error> {
+    let git = Git::open(work_dir);
     let store = StateStore::new(git.clone());
 
     // Resolve the target version up front (by hash), so a concurrent write cannot

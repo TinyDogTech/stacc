@@ -3,6 +3,7 @@
 //! report the current branch's neighbors without moving.
 
 use std::io::IsTerminal;
+use std::path::Path;
 
 use serde_json::json;
 use stacc_core::ops;
@@ -15,8 +16,8 @@ use crate::error::Error;
 
 /// Load state, the trunk, and the current branch, refusing on an uninitialized
 /// repo or a detached HEAD.
-fn context() -> Result<(Git, String, State, String), Error> {
-    let git = Git::open(".");
+fn context(work_dir: &Path) -> Result<(Git, String, State, String), Error> {
+    let git = Git::open(work_dir);
     let store = StateStore::new(git.clone());
     let state = store.load()?;
     let trunk = state
@@ -53,8 +54,8 @@ fn go(git: &Git, format: OutputFormat, op: &str, from: &str, to: &str) -> Result
 
 /// `stacc up`: move toward the tip, `args.steps` levels (default 1). Errors with
 /// the choices when a level forks into multiple children.
-pub fn up(args: &StepsArgs, format: OutputFormat) -> Result<(), Error> {
-    let (git, current, state, _trunk) = context()?;
+pub fn up(args: &StepsArgs, format: OutputFormat, work_dir: &Path) -> Result<(), Error> {
+    let (git, current, state, _trunk) = context(work_dir)?;
     let mut target = current.clone();
     for _ in 0..args.steps {
         let kids = ops::children(&state.branches, &target);
@@ -69,8 +70,8 @@ pub fn up(args: &StepsArgs, format: OutputFormat) -> Result<(), Error> {
 
 /// `stacc down`: move toward the trunk, `args.steps` levels (default 1). Clamps
 /// at the trunk.
-pub fn down(args: &StepsArgs, format: OutputFormat) -> Result<(), Error> {
-    let (git, current, state, trunk) = context()?;
+pub fn down(args: &StepsArgs, format: OutputFormat, work_dir: &Path) -> Result<(), Error> {
+    let (git, current, state, trunk) = context(work_dir)?;
     let mut target = current.clone();
     for _ in 0..args.steps {
         match ops::parent(&state.branches, &target) {
@@ -85,16 +86,16 @@ pub fn down(args: &StepsArgs, format: OutputFormat) -> Result<(), Error> {
 }
 
 /// `stacc top`: jump to the tip of the current stack (errors at a fork).
-pub fn top(format: OutputFormat) -> Result<(), Error> {
-    let (git, current, state, _trunk) = context()?;
+pub fn top(format: OutputFormat, work_dir: &Path) -> Result<(), Error> {
+    let (git, current, state, _trunk) = context(work_dir)?;
     let target =
         ops::top(&state.branches, &current).map_err(|choices| Error::Ambiguous { choices })?;
     go(&git, format, "top", &current, &target)
 }
 
 /// `stacc bottom`: jump to the bottom of the current stack (the trunk's child).
-pub fn bottom(format: OutputFormat) -> Result<(), Error> {
-    let (git, current, state, trunk) = context()?;
+pub fn bottom(format: OutputFormat, work_dir: &Path) -> Result<(), Error> {
+    let (git, current, state, trunk) = context(work_dir)?;
     let target = ops::bottom(&state.branches, &current, &trunk);
     go(&git, format, "bottom", &current, &target)
 }
@@ -102,8 +103,8 @@ pub fn bottom(format: OutputFormat) -> Result<(), Error> {
 /// `stacc parent`: print the current branch's recorded base. Read-only. On the
 /// trunk or an untracked branch the parent is null and the exit code is 0, so
 /// scripts walking down a stack do not break at the root.
-pub fn parent(format: OutputFormat) -> Result<(), Error> {
-    let (_git, current, state, _trunk) = context()?;
+pub fn parent(format: OutputFormat, work_dir: &Path) -> Result<(), Error> {
+    let (_git, current, state, _trunk) = context(work_dir)?;
     let parent = ops::parent(&state.branches, &current);
     match format {
         OutputFormat::Json => {
@@ -121,8 +122,8 @@ pub fn parent(format: OutputFormat) -> Result<(), Error> {
 /// `stacc children`: print the branches stacked directly on the current branch
 /// (recorded base == current), in name order. Read-only. On the trunk this
 /// lists the trunk-based branches; a leaf prints an empty list, exit 0.
-pub fn children(format: OutputFormat) -> Result<(), Error> {
-    let (_git, current, state, _trunk) = context()?;
+pub fn children(format: OutputFormat, work_dir: &Path) -> Result<(), Error> {
+    let (_git, current, state, _trunk) = context(work_dir)?;
     let kids = ops::children(&state.branches, &current);
     match format {
         OutputFormat::Json => {
@@ -146,8 +147,9 @@ pub fn checkout(
     args: &CheckoutArgs,
     format: OutputFormat,
     no_interactive: bool,
+    work_dir: &Path,
 ) -> Result<(), Error> {
-    let git = Git::open(".");
+    let git = Git::open(work_dir);
     let current = git.current_branch().unwrap_or_default();
     if let Some(branch) = &args.branch {
         // A leading dash would be parsed by `git checkout` as an option.

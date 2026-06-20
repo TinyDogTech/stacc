@@ -7,6 +7,8 @@
 //! title/state/body from GitHub best-effort. No state writes, no ref
 //! mutations, and no network on the default path.
 
+use std::path::Path;
+
 use serde_json::json;
 use stacc_core::ops;
 use stacc_forge::SCHEMA_VERSION;
@@ -44,8 +46,8 @@ struct Details {
 }
 
 /// `stacc info`: show a branch's stack detail. Read-only.
-pub fn info(args: &InfoArgs, format: OutputFormat) -> Result<(), Error> {
-    let git = Git::open(".");
+pub fn info(args: &InfoArgs, format: OutputFormat, work_dir: &Path) -> Result<(), Error> {
+    let git = Git::open(work_dir);
     let store = StateStore::new(git.clone());
     let state = store.load()?;
     let repo = state

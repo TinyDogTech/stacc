@@ -41,8 +41,8 @@ pub use reorder::reorder;
 pub use split::split;
 
 /// `stacc init`: detect trunk/remote, then record them in the state ref.
-pub fn init(args: &InitArgs, format: OutputFormat) -> Result<(), Error> {
-    let git = Git::open(".");
+pub fn init(args: &InitArgs, format: OutputFormat, work_dir: &Path) -> Result<(), Error> {
+    let git = Git::open(work_dir);
     let store = StateStore::new(git.clone());
 
     if let Some(repo) = store.load()?.repo {
@@ -51,7 +51,7 @@ pub fn init(args: &InitArgs, format: OutputFormat) -> Result<(), Error> {
     }
 
     let detected = detect(&git)?;
-    let file = read_file(Path::new(".stacc.toml"))?;
+    let file = read_file(&work_dir.join(".stacc.toml"))?;
     let flags = Overrides {
         trunk: args.trunk.clone(),
         remote: args.remote.clone(),
@@ -94,8 +94,8 @@ fn report(format: OutputFormat, status: &str, repo: &RepoConfig) {
 }
 
 /// `stacc track`: record the current branch and its base in the state ref.
-pub fn track(args: &TrackArgs, format: OutputFormat) -> Result<(), Error> {
-    let git = Git::open(".");
+pub fn track(args: &TrackArgs, format: OutputFormat, work_dir: &Path) -> Result<(), Error> {
+    let git = Git::open(work_dir);
     let store = StateStore::new(git.clone());
 
     let trunk = match store.load()?.repo {
@@ -144,8 +144,8 @@ pub fn track(args: &TrackArgs, format: OutputFormat) -> Result<(), Error> {
 /// `stacc untrack`: drop a branch from the stack, reparenting its children onto
 /// the branch's own base so the rest of the stack stays connected. Edits only
 /// stacc state, never the git branch or the remote.
-pub fn untrack(args: &UntrackArgs, format: OutputFormat) -> Result<(), Error> {
-    let git = Git::open(".");
+pub fn untrack(args: &UntrackArgs, format: OutputFormat, work_dir: &Path) -> Result<(), Error> {
+    let git = Git::open(work_dir);
     let store = StateStore::new(git.clone());
     let state = store.load()?;
     let repo = state
@@ -222,8 +222,8 @@ pub fn untrack(args: &UntrackArgs, format: OutputFormat) -> Result<(), Error> {
 // A cohesive validate -> branch -> track -> commit -> (insert-restack) -> report
 // sequence; splitting it would only trade this lint for too_many_arguments.
 #[allow(clippy::too_many_lines)]
-pub fn create(args: &CreateArgs, format: OutputFormat) -> Result<(), Error> {
-    let git = Git::open(".");
+pub fn create(args: &CreateArgs, format: OutputFormat, work_dir: &Path) -> Result<(), Error> {
+    let git = Git::open(work_dir);
     let store = StateStore::new(git.clone());
     let mut state = store.load()?;
     let repo = state
@@ -403,8 +403,8 @@ pub fn create(args: &CreateArgs, format: OutputFormat) -> Result<(), Error> {
 }
 
 /// `stacc status`: the current branch's position in the stack and its PR state.
-pub fn status(format: OutputFormat) -> Result<(), Error> {
-    let git = Git::open(".");
+pub fn status(format: OutputFormat, work_dir: &Path) -> Result<(), Error> {
+    let git = Git::open(work_dir);
     let store = StateStore::new(git.clone());
     let state = store.load()?;
     let repo = state
@@ -549,8 +549,8 @@ pub(crate) fn print_compact(mut value: Value) {
 
 /// `stacc pr`: print the current branch's recorded PR URL, and open it in a
 /// browser when run on a terminal. Errors when the branch has no recorded PR.
-pub fn pr(format: OutputFormat) -> Result<(), Error> {
-    let git = Git::open(".");
+pub fn pr(format: OutputFormat, work_dir: &Path) -> Result<(), Error> {
+    let git = Git::open(work_dir);
     let store = StateStore::new(git.clone());
     let state = store.load()?;
     let repo = state
@@ -627,8 +627,8 @@ fn open_in_browser(url: &str) {
 // A cohesive validate -> push/PR loop -> persist -> report sequence; splitting it
 // would only trade this lint for `too_many_arguments` on a helper.
 #[allow(clippy::too_many_lines)]
-pub fn submit(args: &SubmitArgs, format: OutputFormat) -> Result<(), Error> {
-    let git = Git::open(".");
+pub fn submit(args: &SubmitArgs, format: OutputFormat, work_dir: &Path) -> Result<(), Error> {
+    let git = Git::open(work_dir);
     let store = StateStore::new(git.clone());
     let state = store.load()?;
     let repo = state
@@ -654,7 +654,7 @@ pub fn submit(args: &SubmitArgs, format: OutputFormat) -> Result<(), Error> {
         );
     }
 
-    let (github, owner, repo_name) = operations::require_github_forge(&git, &repo, "submit")?;
+    let (github, owner, repo_name) = operations::require_github_forge(&git, &repo, "submit", work_dir)?;
 
     // (branch, action, number, url) for each branch we acted on.
     let mut results: Vec<(String, PrAction, u64, String)> = Vec::new();
@@ -938,8 +938,8 @@ mod reflow_tests {
 /// Renaming a branch with its own open PR closes that PR on GitHub, so it
 /// requires `--force` and drops the recorded PR so the next `submit` recreates
 /// it.
-pub fn rename(args: &RenameArgs, format: OutputFormat) -> Result<(), Error> {
-    let git = Git::open(".");
+pub fn rename(args: &RenameArgs, format: OutputFormat, work_dir: &Path) -> Result<(), Error> {
+    let git = Git::open(work_dir);
     let store = StateStore::new(git.clone());
     let state = store.load()?;
     let repo = state

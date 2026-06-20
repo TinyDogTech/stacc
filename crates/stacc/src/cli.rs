@@ -4,6 +4,8 @@
 //! annotated with attributes, and clap generates the parser, `--help`, and
 //! validation from them.
 
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand, ValueEnum};
 
 /// A stacked-diff CLI.
@@ -32,6 +34,10 @@ pub struct GlobalArgs {
     /// Never prompt; fail with a structured error instead.
     #[arg(long, short = 'i', global = true)]
     pub no_interactive: bool,
+
+    /// Run as if stacc was started in DIR, analogous to `git -C`.
+    #[arg(long, short = 'C', value_name = "DIR", global = true)]
+    pub cwd: Option<PathBuf>,
 }
 
 impl GlobalArgs {
@@ -41,6 +47,10 @@ impl GlobalArgs {
         } else {
             OutputFormat::Pretty
         }
+    }
+
+    pub fn work_dir(&self) -> PathBuf {
+        self.cwd.clone().unwrap_or_else(|| PathBuf::from("."))
     }
 }
 
@@ -632,6 +642,7 @@ mod tests {
             json: true,
             color: super::ColorChoice::Auto,
             no_interactive: false,
+            cwd: None,
         };
         assert_eq!(args.output_format(), OutputFormat::Json);
     }
@@ -642,8 +653,31 @@ mod tests {
             json: false,
             color: super::ColorChoice::Auto,
             no_interactive: false,
+            cwd: None,
         };
         assert_eq!(args.output_format(), OutputFormat::Pretty);
+    }
+
+    #[test]
+    fn work_dir_defaults_to_dot() {
+        let args = GlobalArgs {
+            json: false,
+            color: super::ColorChoice::Auto,
+            no_interactive: false,
+            cwd: None,
+        };
+        assert_eq!(args.work_dir(), std::path::PathBuf::from("."));
+    }
+
+    #[test]
+    fn work_dir_returns_cwd_when_set() {
+        let args = GlobalArgs {
+            json: false,
+            color: super::ColorChoice::Auto,
+            no_interactive: false,
+            cwd: Some(std::path::PathBuf::from("/tmp/repo")),
+        };
+        assert_eq!(args.work_dir(), std::path::PathBuf::from("/tmp/repo"));
     }
 
     #[test]

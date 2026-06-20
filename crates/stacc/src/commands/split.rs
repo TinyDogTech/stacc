@@ -26,6 +26,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use std::path::Path;
+
 use serde_json::{json, Value};
 use stacc_core::{ops, recovery};
 use stacc_git::{Git, TreeEntry};
@@ -37,7 +39,7 @@ use crate::error::Error;
 
 /// `stacc split`: see the module docs. Shared preconditions (tracked, not the
 /// trunk, restacked onto its base), then mode dispatch.
-pub fn split(args: &SplitArgs, format: OutputFormat) -> Result<(), Error> {
+pub fn split(args: &SplitArgs, format: OutputFormat, work_dir: &Path) -> Result<(), Error> {
     if !args.names.is_empty() && !args.by_file.is_empty() {
         return Err(Error::Usage(
             "pass positional names (split by commit) or --by-file groups (split by file), not both"
@@ -45,7 +47,7 @@ pub fn split(args: &SplitArgs, format: OutputFormat) -> Result<(), Error> {
         ));
     }
 
-    let git = Git::open(".");
+    let git = Git::open(work_dir);
     let store = StateStore::new(git.clone());
     let mut state = store.load()?;
     let repo = state
