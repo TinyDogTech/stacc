@@ -61,6 +61,7 @@ pub fn init(args: &InitArgs, format: OutputFormat, work_dir: &Path) -> Result<()
     let repo = RepoConfig {
         trunk: config.trunk,
         remote: config.remote,
+        declined_tracking: Default::default(),
     };
 
     // A concurrent init may have won between the check above and here; only set

@@ -1,5 +1,7 @@
 //! The serializable shapes that make up stacc's stored state.
 
+use std::collections::BTreeSet;
+
 use serde::{Deserialize, Serialize};
 
 /// Repository-level configuration, stored at the `repo` key.
@@ -7,6 +9,10 @@ use serde::{Deserialize, Serialize};
 pub struct RepoConfig {
     pub trunk: String,
     pub remote: String,
+    /// Branches the user has declined to track via `stacc sync`. Excluded from
+    /// the untracked set on subsequent syncs until `stacc track` clears the entry.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub declined_tracking: BTreeSet<String>,
 }
 
 /// The branch (and the commit on it) that a tracked branch is stacked on.
@@ -152,8 +158,44 @@ mod tests {
         let cfg = RepoConfig {
             trunk: "main".into(),
             remote: "origin".into(),
+            declined_tracking: BTreeSet::new(),
         };
         let json = serde_json::to_string(&cfg).unwrap();
         assert_eq!(serde_json::from_str::<RepoConfig>(&json).unwrap(), cfg);
+    }
+
+    #[test]
+    fn repo_config_backward_compat_no_declined_key() {
+        // Blobs written before STA-88 have no declined_tracking key.
+        let json = r#"{"trunk":"main","remote":"origin"}"#;
+        let cfg: RepoConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.trunk, "main");
+        assert_eq!(cfg.remote, "origin");
+        assert!(cfg.declined_tracking.is_empty());
+    }
+
+    #[test]
+    fn repo_config_declined_tracking_roundtrips() {
+        let mut cfg = RepoConfig {
+            trunk: "main".into(),
+            remote: "origin".into(),
+            declined_tracking: BTreeSet::new(),
+        };
+        cfg.declined_tracking.insert("jillian/wip".into());
+        cfg.declined_tracking.insert("jillian/old-exp".into());
+        let json = serde_json::to_string(&cfg).unwrap();
+        let back: RepoConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.declined_tracking, cfg.declined_tracking);
+    }
+
+    #[test]
+    fn repo_config_empty_declined_omitted_from_json() {
+        let cfg = RepoConfig {
+            trunk: "main".into(),
+            remote: "origin".into(),
+            declined_tracking: BTreeSet::new(),
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert!(!json.contains("declined_tracking"), "empty set must be omitted: {json}");
     }
 }
