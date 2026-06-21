@@ -13,7 +13,7 @@ fn version_reports_the_bumped_crate_version() {
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.starts_with("stacc 0.2.1"),
-        "expected the 0.2.1 version line, got: {stdout}"
+        stdout.starts_with("stacc 0.3.0"),
+        "expected the 0.3.0 version line, got: {stdout}"
     );
 }
