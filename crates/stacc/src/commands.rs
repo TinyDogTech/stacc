@@ -15,6 +15,7 @@ use crate::cli::{CreateArgs, InitArgs, OutputFormat, RenameArgs, SubmitArgs, Tra
 use crate::error::Error;
 
 mod absorb;
+mod agent;
 mod auth;
 mod completion;
 mod config;
@@ -27,6 +28,7 @@ mod reorder;
 mod split;
 
 pub use absorb::absorb;
+pub use agent::agent;
 pub use auth::auth;
 pub use completion::completion;
 pub use config::config;
@@ -41,7 +43,7 @@ pub use reorder::reorder;
 pub use split::split;
 
 /// `stacc init`: detect trunk/remote, then record them in the state ref.
-pub fn init(args: &InitArgs, format: OutputFormat, work_dir: &Path) -> Result<(), Error> {
+pub fn init(args: &InitArgs, format: OutputFormat, no_interactive: bool, work_dir: &Path) -> Result<(), Error> {
     let git = Git::open(work_dir);
     let store = StateStore::new(git.clone());
 
@@ -74,6 +76,13 @@ pub fn init(args: &InitArgs, format: OutputFormat, work_dir: &Path) -> Result<()
     })?;
 
     report(format, "initialized", &repo);
+
+    if crate::interactive::allowed(std::io::stdout().is_terminal(), no_interactive, format) {
+        if let Err(e) = agent::agent_install_interactive(format) {
+            eprintln!("warning: agent context install skipped: {e}");
+        }
+    }
+
     Ok(())
 }
 
