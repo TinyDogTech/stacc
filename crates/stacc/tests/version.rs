@@ -12,8 +12,9 @@ fn version_reports_the_bumped_crate_version() {
         .expect("run stacc --version");
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
     let stdout = String::from_utf8_lossy(&out.stdout);
+    let expected = env!("CARGO_PKG_VERSION");
     assert!(
-        stdout.starts_with("stacc 0.3.0"),
-        "expected the 0.3.0 version line, got: {stdout}"
+        stdout.starts_with(&format!("stacc {expected}")),
+        "expected the {expected} version line, got: {stdout}"
     );
 }
