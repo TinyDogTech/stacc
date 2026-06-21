@@ -23,7 +23,7 @@ const BUILTINS: &[&str] = &[
     "init", "track", "untrack", "create", "modify", "log", "status", "submit", "sync", "restack",
     "move", "absorb", "squash", "fold", "split", "reorder", "delete", "pop", "rename", "merge",
     "merged", "continue", "abort", "undo", "up", "down", "top", "bottom", "checkout", "parent",
-    "children", "pr", "auth", "info", "completion", "config",
+    "children", "pr", "agent", "auth", "info", "completion", "config",
 ];
 
 /// Short aliases stacc ships with, seeded at the lowest precedence so a user or
@@ -96,7 +96,7 @@ pub fn run() -> ExitCode {
 
 fn dispatch(cli: &Cli, work_dir: &Path) -> Result<(), Error> {
     match &cli.command {
-        Command::Init(args) => commands::init(args, cli.global.output_format(), work_dir),
+        Command::Init(args) => commands::init(args, cli.global.output_format(), cli.global.no_interactive, work_dir),
         Command::Track(args) => commands::track(args, cli.global.output_format(), work_dir),
         Command::Untrack(args) => commands::untrack(args, cli.global.output_format(), work_dir),
         Command::Create(args) => commands::create(args, cli.global.output_format(), work_dir),
@@ -131,6 +131,7 @@ fn dispatch(cli: &Cli, work_dir: &Path) -> Result<(), Error> {
         }
         Command::Parent => commands::parent(cli.global.output_format(), work_dir),
         Command::Children => commands::children(cli.global.output_format(), work_dir),
+        Command::Agent(args) => commands::agent(args, cli.global.output_format(), cli.global.no_interactive),
         Command::Auth(args) => commands::auth(args, cli.global.output_format()),
         Command::Config(args) => commands::config(args, cli.global.output_format(), work_dir),
         // Pure script output; --json is deliberately ignored here.

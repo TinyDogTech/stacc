@@ -82,6 +82,8 @@ pub enum Command {
     Abort,
     /// Distribute staged hunks into the downstack commits that introduced their lines.
     Absorb(AbsorbArgs),
+    /// Manage agent context files (install skill files for coding agents).
+    Agent(AgentArgs),
     /// Manage the GitHub access token.
     Auth(AuthArgs),
     /// Jump to the bottom of the current stack (the trunk's child).
@@ -158,6 +160,40 @@ pub enum Command {
     /// Any other subcommand is proxied to `git` (e.g. `commit`, `rebase`, `push`).
     #[command(external_subcommand)]
     External(Vec<String>),
+}
+
+/// Arguments for `stacc agent`.
+#[derive(Debug, clap::Args)]
+pub struct AgentArgs {
+    #[command(subcommand)]
+    pub action: AgentAction,
+}
+
+/// Sub-actions under `stacc agent`.
+#[derive(Debug, Subcommand)]
+pub enum AgentAction {
+    /// Install agent context files for one or more harnesses.
+    Install(AgentInstallArgs),
+}
+
+/// Arguments for `stacc agent install`.
+#[derive(Debug, clap::Args)]
+pub struct AgentInstallArgs {
+    /// Harness(es) to install context for. Repeat to combine. Omit for interactive checklist.
+    #[arg(long, value_enum)]
+    pub harness: Vec<AgentHarness>,
+}
+
+/// Agent harness targets for `stacc agent install`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ValueEnum)]
+pub enum AgentHarness {
+    /// Universal skill (~/.agents/skills/stacc/SKILL.md, covers all agentskills.io clients).
+    Universal,
+    /// Claude Code slash command (~/.claude/commands/stacc.md).
+    #[value(name = "claude-command")]
+    ClaudeCommand,
+    /// All of the above.
+    All,
 }
 
 /// Arguments for `stacc auth`.
