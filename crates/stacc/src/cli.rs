@@ -189,9 +189,9 @@ pub struct AgentInstallArgs {
 pub enum AgentHarness {
     /// Universal skill (~/.agents/skills/stacc/SKILL.md, covers all agentskills.io clients).
     Universal,
-    /// Claude Code slash command (~/.claude/commands/stacc.md).
-    #[value(name = "claude-command")]
-    ClaudeCommand,
+    /// Claude Code skill (~/.claude/skills/stacc/SKILL.md).
+    #[value(name = "claude-skill")]
+    ClaudeSkill,
     /// All of the above.
     All,
 }
