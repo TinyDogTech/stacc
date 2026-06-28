@@ -61,6 +61,18 @@ fn agent_install(
         installed.push((*target, path));
     }
 
+    // Installing the Claude Code skill supersedes the legacy slash command
+    // (`~/.claude/commands/stacc.md`) shipped before STA-129. Remove it so the
+    // migration is real on machines that ran the old installer; best-effort,
+    // a missing or unremovable file is not an error.
+    let mut removed = Vec::new();
+    if targets.contains(&AgentHarness::ClaudeSkill) {
+        let legacy = home.join(".claude").join("commands").join("stacc.md");
+        if legacy.is_file() && std::fs::remove_file(&legacy).is_ok() {
+            removed.push(legacy);
+        }
+    }
+
     match format {
         OutputFormat::Json => {
             let list: Vec<_> = installed
@@ -72,14 +84,18 @@ fn agent_install(
                     })
                 })
                 .collect();
+            let removed_list: Vec<_> = removed.iter().map(|p| p.display().to_string()).collect();
             println!(
                 "{}",
-                json!({"op":"agent-install","installed":list,"skipped":[],"schema_version":SCHEMA_VERSION})
+                json!({"op":"agent-install","installed":list,"removed":removed_list,"skipped":[],"schema_version":SCHEMA_VERSION})
             );
         }
         OutputFormat::Pretty => {
             for (_, path) in &installed {
                 println!("Installed {}", path.display());
+            }
+            for path in &removed {
+                println!("Removed legacy {}", path.display());
             }
         }
     }
@@ -96,7 +112,7 @@ fn resolve_targets(
         .harness
         .iter()
         .flat_map(|h| match h {
-            AgentHarness::All => vec![AgentHarness::Universal, AgentHarness::ClaudeCommand],
+            AgentHarness::All => vec![AgentHarness::Universal, AgentHarness::ClaudeSkill],
             other => vec![*other],
         })
         .collect::<std::collections::HashSet<_>>()
@@ -119,21 +135,21 @@ fn resolve_targets(
             target_path_display(AgentHarness::Universal)
         ),
         format!(
-            "Claude Code slash command ({})",
-            target_path_display(AgentHarness::ClaudeCommand)
+            "Claude Code skill ({})",
+            target_path_display(AgentHarness::ClaudeSkill)
         ),
     ];
 
     let indices = interactive::prompt_multi_select("Install agent context files:", &items)?;
 
-    let map = [AgentHarness::Universal, AgentHarness::ClaudeCommand];
+    let map = [AgentHarness::Universal, AgentHarness::ClaudeSkill];
     Ok(indices.into_iter().map(|i| map[i]).collect())
 }
 
 fn target_path(home: &std::path::Path, target: AgentHarness) -> PathBuf {
     match target {
         AgentHarness::Universal => home.join(".agents").join("skills").join("stacc").join("SKILL.md"),
-        AgentHarness::ClaudeCommand => home.join(".claude").join("commands").join("stacc.md"),
+        AgentHarness::ClaudeSkill => home.join(".claude").join("skills").join("stacc").join("SKILL.md"),
         AgentHarness::All => unreachable!("All is expanded before target_path is called"),
     }
 }
@@ -141,7 +157,7 @@ fn target_path(home: &std::path::Path, target: AgentHarness) -> PathBuf {
 fn target_path_display(target: AgentHarness) -> &'static str {
     match target {
         AgentHarness::Universal => "~/.agents/skills/stacc/SKILL.md",
-        AgentHarness::ClaudeCommand => "~/.claude/commands/stacc.md",
+        AgentHarness::ClaudeSkill => "~/.claude/skills/stacc/SKILL.md",
         AgentHarness::All => unreachable!(),
     }
 }
@@ -149,17 +165,18 @@ fn target_path_display(target: AgentHarness) -> &'static str {
 fn target_key(target: AgentHarness) -> &'static str {
     match target {
         AgentHarness::Universal => "universal",
-        AgentHarness::ClaudeCommand => "claude-command",
+        AgentHarness::ClaudeSkill => "claude-skill",
         AgentHarness::All => unreachable!(),
     }
 }
 
+/// Both targets are agentskills.io SKILL.md files (frontmatter + canonical body);
+/// they differ only by install root, so the content is identical.
 fn target_content(target: AgentHarness) -> String {
     match target {
-        AgentHarness::Universal => format!(
+        AgentHarness::Universal | AgentHarness::ClaudeSkill => format!(
             "---\nname: stacc\ndescription: Stacked-diff CLI for AI coding agents -- usage reference\nversion: \"{SKILL_VERSION}\"\n---\n\n{SKILL_CONTENT}"
         ),
-        AgentHarness::ClaudeCommand => format!("# stacc\n\n{SKILL_CONTENT}"),
         AgentHarness::All => unreachable!(),
     }
 }
@@ -194,10 +211,25 @@ mod tests {
     }
 
     #[test]
-    fn claude_command_content_has_heading() {
-        let content = target_content(AgentHarness::ClaudeCommand);
-        assert!(content.starts_with("# stacc\n"), "claude command must start with heading");
-        assert!(!content.starts_with("---"), "claude command must not start with YAML frontmatter");
+    fn claude_skill_content_has_frontmatter() {
+        let content = target_content(AgentHarness::ClaudeSkill);
+        assert!(content.starts_with("---\n"), "claude skill must start with YAML frontmatter");
+        assert!(content.contains("name: stacc"), "claude skill must declare name");
+    }
+
+    #[test]
+    fn claude_skill_matches_universal_content() {
+        // Both targets are the same SKILL.md, only the install root differs.
+        assert_eq!(
+            target_content(AgentHarness::ClaudeSkill),
+            target_content(AgentHarness::Universal),
+        );
+    }
+
+    #[test]
+    fn claude_skill_installs_under_claude_skills_dir() {
+        let path = target_path(std::path::Path::new("/home/u"), AgentHarness::ClaudeSkill);
+        assert_eq!(path, PathBuf::from("/home/u/.claude/skills/stacc/SKILL.md"));
     }
 
     #[test]
@@ -208,7 +240,7 @@ mod tests {
         let targets =
             resolve_targets(&args, OutputFormat::Pretty, true).expect("should not need tty");
         assert!(targets.contains(&AgentHarness::Universal));
-        assert!(targets.contains(&AgentHarness::ClaudeCommand));
+        assert!(targets.contains(&AgentHarness::ClaudeSkill));
         assert_eq!(targets.len(), 2);
     }
 
