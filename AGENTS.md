@@ -1,7 +1,9 @@
 # stacc (AGENTS.md)
 
 Project conventions for coding agents. Inherits global defaults from
-`~/.pi/agent/AGENTS.md` (plain `git` + `gh`).
+`~/.pi/agent/AGENTS.md` (plain `git` + `gh`), but overrides the git workflow:
+this repo dogfoods **stacc itself** for branching, committing, submitting, and
+merging (see Workflow).
 
 stacc is a stacked-diff CLI for AI coding agents, Rust, Astral/uv aesthetic
 (single binary, miette errors, JSON output, zero-config). Model: branch-per-PR;
@@ -41,15 +43,31 @@ This project doubles as a way to learn Rust. When you make changes:
 
 ## Workflow
 
-> Use plain `git` + `gh` for all branch, push, and PR operations (matches the
-> global default; do **not** use `gt`). This repo is itself the future
-> replacement for Graphite, see `plans/stacc.md`.
+> Drive the stacked-diff workflow with **stacc itself** (the binary this repo
+> builds): the repo dogfoods its own tool. Reach for plain `git` + `gh` only
+> for the primitives stacc has no command for. Never use `gt` (Graphite is
+> retired; stacc is its replacement, see `plans/stacc.md`).
 
-- Use plain `git` + `gh` (NOT `gt`).
-- One branch per Linear ticket, named `jillian/sta-<n>-<slug>` to match the
-  Linear branch name so PRs auto-link to the issue.
-- Conventional-commit format for commit messages and PR titles (still applies).
-- Squash-merge only (the repo enforces it).
+- **Branch + commit:** stage with `git add`, then `stacc create
+  jillian/sta-<n>-<slug> -m "<type>(<scope>): [STA-N] <desc>"` to create the
+  branch, commit the staged changes, and track it in one step. Fold follow-up
+  edits in with `stacc modify` (amends the tip) or `stacc modify --commit` (adds
+  a commit). The branch name must match the Linear branch so the PR auto-links.
+- **Submit:** `stacc submit --no-interactive --json` pushes the current branch's
+  full downstack and creates or updates its PRs. Idempotent: re-submitting an
+  unchanged branch is a no-op on the remote.
+- **Merge:** `stacc merge --no-interactive --json` squash-merges the ready PRs
+  from the trunk up, retargets children, and syncs. Squash is enforced.
+- **Sync:** `stacc sync --no-interactive --json` after merges (pulls trunk,
+  detects merged branches, restacks). Replaces `git fetch && git rebase
+  origin/main`.
+- **Navigate / inspect:** `stacc checkout <branch>`, `stacc up`/`down`/`top`/
+  `bottom`, `stacc log`, `stacc info`, `stacc pr`, `stacc status`.
+- **Still plain `git` + `gh`:** `git add` (staging), editing files during a
+  restack conflict then `stacc continue` (or `stacc abort` to bail), `gh pr
+  checks <N>` (no stacc equivalent), and `gh auth`.
+- One branch per Linear ticket; never commit to `main`. Conventional-commit
+  format for commit messages and PR titles.
 
 ## Project
 
