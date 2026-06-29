@@ -151,10 +151,10 @@ pub fn log(args: &LogArgs, format: OutputFormat, color: ColorChoice, work_dir: &
     // --no-status); the short form is offline by contract.
     let want_status =
         !args.no_status && (format == OutputFormat::Json || args.form().is_none());
-    let (pr_status, adopted) = if want_status {
-        fetch_pr_status(&git, &repo, &state.branches, &visible, &deleted)
+    let (pr_status, adopted, untracked) = if want_status {
+        fetch_pr_status(&git, &repo, &state.branches, &visible, &deleted, &trunk)
     } else {
-        (BTreeMap::new(), Vec::new())
+        (BTreeMap::new(), Vec::new(), Vec::new())
     };
 
     // Self-heal: PRs discovered by head branch are recorded so the next log can
@@ -182,10 +182,11 @@ pub fn log(args: &LogArgs, format: OutputFormat, color: ColorChoice, work_dir: &
 
     match format {
         OutputFormat::Json => {
-            let stack = stack_json(&trunk, &children, branches, &git, &pr_status, &deleted);
+            let stack = stack_json(&trunk, &children, branches, &git, &pr_status, &deleted, &current);
             super::print_compact(json!({
                 "trunk": trunk,
                 "stack": stack,
+                "untracked": untracked_json(&untracked),
                 "schema_version": SCHEMA_VERSION,
             }));
         }
@@ -210,8 +211,14 @@ pub fn log(args: &LogArgs, format: OutputFormat, color: ColorChoice, work_dir: &
                 println!("{}", line.trim_end());
             }
             print_orphans(branches, &reachable_set, &current);
+            for line in untracked_pr_lines(&untracked) {
+                println!("{line}");
+            }
             if args.show_untracked {
-                print_untracked(&git, branches, &trunk);
+                // The open-PR untracked branches already showed above; list only
+                // the remainder so nothing is printed twice.
+                let shown: BTreeSet<&str> = untracked.iter().map(|(n, _)| n.as_str()).collect();
+                print_untracked(&git, branches, &trunk, &shown);
             }
         }
     }
@@ -811,6 +818,9 @@ impl PrLive {
 type PrStatusMap = BTreeMap<String, Option<PrLive>>;
 /// PRs discovered by head branch this run, for the caller to record in state.
 type Adoptions = Vec<(String, PullRequest)>;
+/// Untracked local branches (not in stacc state) that have an open PR, surfaced
+/// read-only so in-flight PRs stacc is not tracking are never invisible.
+type UntrackedPrs = Vec<(String, PrLive)>;
 
 /// Fetch each visible branch's live PR detail, never fatally. Branches with a
 /// recorded PR map to `Some(PrLive)` (the full REST response) on success and
@@ -822,13 +832,19 @@ type Adoptions = Vec<(String, PullRequest)>;
 /// tool) are looked up by head branch under the same budget and tolerance; a
 /// hit yields a live status now plus an adoption record `(branch, pr)` the
 /// caller persists, so the next log fetches by number directly.
+///
+/// Untracked local branches that have an open PR are looked up by head too, on
+/// the same budget, and returned separately. They are display-only: stacc never
+/// adopts or tracks them, it just surfaces the PR so nobody falls back to
+/// `gh pr list`. Like adoptions, the by-head lookup is offline-free and bounded.
 fn fetch_pr_status(
     git: &Git,
     repo: &RepoConfig,
     branches: &BTreeMap<String, BranchState>,
     visible: &BTreeSet<String>,
     deleted: &BTreeSet<String>,
-) -> (PrStatusMap, Adoptions) {
+    trunk: &str,
+) -> (PrStatusMap, Adoptions, UntrackedPrs) {
     let mut map: PrStatusMap = BTreeMap::new();
     let mut adopted = Vec::new();
     let recorded: Vec<(String, u64)> = visible
@@ -847,13 +863,21 @@ fn fetch_pr_status(
         .filter(|name| branches.get(*name).is_some_and(|b| b.pr.is_none()))
         .cloned()
         .collect();
-    if recorded.is_empty() && unrecorded.is_empty() {
-        return (map, adopted);
+    // Local branches stacc is not tracking at all (the same filter the pretty
+    // `--show-untracked` list uses), candidates for an open-PR lookup below.
+    let untracked_candidates: Vec<String> = git
+        .local_branches()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|name| name != trunk && !branches.contains_key(name))
+        .collect();
+    if recorded.is_empty() && unrecorded.is_empty() && untracked_candidates.is_empty() {
+        return (map, adopted, Vec::new());
     }
 
     let Some((github, owner, repo_name)) = build_client(git, repo) else {
         map.extend(recorded.into_iter().map(|(name, _)| (name, None)));
-        return (map, adopted);
+        return (map, adopted, Vec::new());
     };
 
     // Bound the TOTAL fetch time, not just when we stop starting calls: each
@@ -897,13 +921,30 @@ fn fetch_pr_status(
         }
     }
 
-    // Review decision + CI rollup for every open PR found above, in ONE
-    // batched GraphQL call spending only leftover budget. Closed/merged PRs
-    // have no actionable rollup and are skipped; any failure (or an exhausted
-    // budget) just leaves every rollup empty, silently.
+    // Untracked local branches with an open PR, looked up by head under the
+    // same leftover budget. The by-head query is open-only, so a hit is always
+    // an open PR; misses and failures are silent, exactly like adoption.
+    let mut untracked: UntrackedPrs = Vec::new();
+    for name in untracked_candidates {
+        let remaining = budget_left();
+        if remaining <= MIN_CALL_BUDGET {
+            break;
+        }
+        if let Ok(Some(pr)) =
+            github.pull_request_for_branch_within(&owner, &repo_name, &name, remaining)
+        {
+            untracked.push((name, PrLive::new(pr)));
+        }
+    }
+
+    // Review decision + CI rollup for every open PR found above (tracked and
+    // untracked alike), in ONE batched GraphQL call spending only leftover
+    // budget. Closed/merged PRs have no actionable rollup and are skipped; any
+    // failure (or an exhausted budget) just leaves every rollup empty, silently.
     let open: BTreeSet<u64> = map
         .values()
         .flatten()
+        .chain(untracked.iter().map(|(_, live)| live))
         .filter(|detail| detail.pr.state == PrState::Open)
         .map(|detail| detail.pr.number)
         .collect();
@@ -919,7 +960,10 @@ fn fetch_pr_status(
     for detail in map.values_mut().flatten() {
         detail.checks = rollups.get(&detail.pr.number).copied().unwrap_or_default();
     }
-    (map, adopted)
+    for (_, detail) in &mut untracked {
+        detail.checks = rollups.get(&detail.pr.number).copied().unwrap_or_default();
+    }
+    (map, adopted, untracked)
 }
 
 /// Best-effort GitHub client + (owner, repo) from the configured remote. `None`
@@ -948,6 +992,7 @@ fn stack_json(
     git: &Git,
     pr_status: &PrStatusMap,
     deleted: &BTreeSet<String>,
+    current: &str,
 ) -> Vec<Value> {
     let Some(kids) = children.get(node) else {
         return Vec::new();
@@ -968,29 +1013,69 @@ fn stack_json(
                     "checks": live.map(|l| checks_state_str(l.checks.checks)),
                 })
             });
-            let commit = if is_deleted { None } else { commit_json(git, kid, node) };
+            // One ahead/behind probe drives both the commit object (ahead > 0,
+            // i.e. the branch has commits of its own) and the needs_restack flag
+            // (behind > 0, i.e. the base drifted ahead). A deleted ref has no
+            // resolvable commits, so it stays at (0, 0).
+            let (ahead, behind) = if is_deleted {
+                (0, 0)
+            } else {
+                git.ahead_behind(node, kid).unwrap_or((0, 0))
+            };
+            let commit = commit_json(git, kid, ahead);
             let mut value = json!({
                 "name": kid,
                 "base": node,
                 "change": change,
                 "commit": commit,
-                "children": stack_json(kid, children, branches, git, pr_status, deleted),
+                "children": stack_json(kid, children, branches, git, pr_status, deleted, current),
             });
             if is_deleted {
                 value["deleted"] = Value::Bool(true);
+            }
+            if kid == current {
+                value["current"] = Value::Bool(true);
+            }
+            if behind > 0 {
+                value["needs_restack"] = Value::Bool(true);
             }
             value
         })
         .collect()
 }
 
-fn commit_json(git: &Git, branch: &str, base: &str) -> Option<Value> {
-    if git.ahead_behind(base, branch).unwrap_or((0, 0)).0 == 0 {
+fn commit_json(git: &Git, branch: &str, ahead: usize) -> Option<Value> {
+    if ahead == 0 {
         return None;
     }
     git.commit_info(branch).ok().map(|info| {
         json!({ "sha": info.sha, "subject": info.subject, "age": info.age })
     })
+}
+
+/// JSON for the top-level `untracked` array: local branches stacc is not
+/// tracking that have an open PR. `change` mirrors the tracked nodes' object so
+/// a consumer parses one shape. Empty input yields an empty array, which
+/// `print_compact` strips, so the key is absent when there is nothing to show.
+fn untracked_json(untracked: &UntrackedPrs) -> Vec<Value> {
+    untracked
+        .iter()
+        .map(|(name, live)| {
+            json!({
+                "name": name,
+                "change": {
+                    "number": live.pr.number,
+                    "url": live.pr.url,
+                    "state": super::pr_state_str(live.pr.state),
+                    "title": live.pr.title,
+                    "draft": live.pr.draft,
+                    "readiness": super::readiness_str(live.pr.mergeable_state.as_deref()),
+                    "review": review_state_str(live.checks.review),
+                    "checks": checks_state_str(live.checks.checks),
+                },
+            })
+        })
+        .collect()
 }
 
 // --- Trailing sections -----------------------------------------------------
@@ -1013,13 +1098,36 @@ fn print_orphans(branches: &BTreeMap<String, BranchState>, reachable: &BTreeSet<
     }
 }
 
+/// Pretty rows for untracked branches that have an open PR, shown by default in
+/// the full form so in-flight PRs stacc is not tracking are never invisible.
+/// Empty input yields no rows (and so no header).
+fn untracked_pr_lines(untracked: &UntrackedPrs) -> Vec<String> {
+    if untracked.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = vec!["untracked (open PR):".to_string()];
+    for (name, live) in untracked {
+        lines.push(format!("  ◌ {name}  {}", pr_line(live)));
+    }
+    lines
+}
+
 /// Local git branches stacc is not tracking, listed under `--show-untracked`.
-fn print_untracked(git: &Git, branches: &BTreeMap<String, BranchState>, trunk: &str) {
+/// `shown` names already surfaced (e.g. by [`untracked_pr_lines`]) are skipped
+/// so a branch is never listed twice.
+fn print_untracked(
+    git: &Git,
+    branches: &BTreeMap<String, BranchState>,
+    trunk: &str,
+    shown: &BTreeSet<&str>,
+) {
     let untracked: Vec<String> = git
         .local_branches()
         .unwrap_or_default()
         .into_iter()
-        .filter(|name| name.as_str() != trunk && !branches.contains_key(name))
+        .filter(|name| {
+            name.as_str() != trunk && !branches.contains_key(name) && !shown.contains(name.as_str())
+        })
         .collect();
     if untracked.is_empty() {
         return;
@@ -1216,6 +1324,34 @@ mod tests {
             },
             checks: PrChecks::default(),
         }
+    }
+
+    #[test]
+    fn untracked_pr_lines_empty_yields_no_rows() {
+        assert!(untracked_pr_lines(&Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn untracked_pr_lines_render_name_and_pr() {
+        let untracked = vec![("feat-x".to_string(), pr_live(PrState::Open, false, None, "Add foo"))];
+        assert_eq!(
+            untracked_pr_lines(&untracked),
+            vec![
+                "untracked (open PR):".to_string(),
+                "  ◌ feat-x  #7 Open - Add foo".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn untracked_json_shapes_an_open_pr_change() {
+        let untracked = vec![("feat-x".to_string(), pr_live(PrState::Open, false, None, "Add foo"))];
+        let v = untracked_json(&untracked);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0]["name"], "feat-x");
+        assert_eq!(v[0]["change"]["number"], 7);
+        assert_eq!(v[0]["change"]["state"], "open");
+        assert_eq!(v[0]["change"]["title"], "Add foo");
     }
 
     #[test]

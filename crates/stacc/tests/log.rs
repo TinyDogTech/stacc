@@ -229,8 +229,10 @@ fn log_surfaces_unreachable_branches() {
 }
 
 #[test]
-fn log_json_is_not_changed_by_drift() {
-    // R15: the JSON contract must never gain pretty-only fields like needs-restack.
+fn log_json_carries_needs_restack_but_not_pretty_markers() {
+    // R15 retargeted (STA-132): JSON may carry intentional data fields like
+    // needs_restack, but must never leak pretty-only rendering (rail glyphs,
+    // ANSI escapes, or trailing-section headers).
     let tmp = repo();
     let p = tmp.path();
     assert!(stacc(p, &["init"]).status.success());
@@ -242,8 +244,28 @@ fn log_json_is_not_changed_by_drift() {
 
     let s = String::from_utf8_lossy(&stacc(p, &["log", "--json"]).stdout).into_owned();
     assert!(s.contains(r#""name":"a""#), "got: {s}");
-    assert!(!s.contains("restack"), "JSON leaked a pretty marker: {s}");
-    assert!(!s.contains("needs"), "JSON leaked a pretty marker: {s}");
+    // needs_restack is now an intentional JSON field: `a`'s base drifted ahead.
+    assert!(s.contains(r#""needs_restack":true"#), "needs_restack expected: {s}");
+    // Pretty-only rendering must never leak into JSON.
+    for glyph in ['◉', '○', '│', '├', '┘', '┐', '┼', '◌'] {
+        assert!(!s.contains(glyph), "JSON leaked a pretty glyph {glyph:?}: {s}");
+    }
+    assert!(!s.contains('\u{1b}'), "JSON leaked an ANSI escape: {s}");
+    assert!(!s.contains("unreachable:"), "JSON leaked a section header: {s}");
+}
+
+#[test]
+fn log_json_marks_the_current_branch() {
+    let tmp = repo();
+    let p = tmp.path();
+    assert!(stacc(p, &["init"]).status.success());
+    run_git(p, &["checkout", "-q", "-b", "a"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "a1"]);
+    assert!(stacc(p, &["track"]).status.success()); // leaves HEAD on `a`
+
+    let s = String::from_utf8_lossy(&stacc(p, &["log", "--json"]).stdout).into_owned();
+    assert!(s.contains(r#""name":"a""#), "got: {s}");
+    assert!(s.contains(r#""current":true"#), "current branch marked: {s}");
 }
 
 #[test]
@@ -310,7 +332,7 @@ fn log_json_includes_commit_object_and_null_pr() {
     assert!(s.contains(r#""subject":"a1""#), "commit object expected: {s}");
     // With no recorded PR, `change` is omitted entirely (compacted), not null.
     assert!(!s.contains(r#""change""#), "change omitted without a PR: {s}");
-    assert!(s.contains(r#""schema_version":2"#), "v2 schema stamp: {s}");
+    assert!(s.contains(r#""schema_version":3"#), "v3 schema stamp: {s}");
 }
 
 #[test]
@@ -346,6 +368,71 @@ fn log_show_untracked_lists_untracked_branches() {
     let s = String::from_utf8_lossy(&stacc(p, &["log", "--show-untracked"]).stdout).into_owned();
     assert!(s.contains("untracked:"), "got: {s}");
     assert!(s.contains("loose"), "got: {s}");
+}
+
+#[test]
+fn log_offline_does_not_surface_untracked_prs() {
+    // R5: with no remote/token, the by-head lookup never runs, so an untracked
+    // branch produces no open-PR section and the JSON gains no `untracked` key.
+    let tmp = repo();
+    let p = tmp.path();
+    assert!(stacc(p, &["init"]).status.success());
+    run_git(p, &["checkout", "-q", "-b", "a"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "a1"]);
+    assert!(stacc(p, &["track"]).status.success());
+    run_git(p, &["branch", "loose"]); // an untracked local branch
+
+    let s = String::from_utf8_lossy(&stacc(p, &["log"]).stdout).into_owned();
+    assert!(!s.contains("untracked (open PR):"), "offline must not surface PRs: {s}");
+
+    let j = String::from_utf8_lossy(&stacc(p, &["log", "--json"]).stdout).into_owned();
+    assert!(!j.contains("untracked"), "no untracked key without open PRs: {j}");
+}
+
+#[test]
+fn log_surfaces_an_untracked_branch_with_an_open_pr() {
+    // R1/R2: an untracked local branch (made with plain git, not stacc) that has
+    // an open PR appears in the default log and in --json, so `gh pr list` is
+    // unneeded to see in-flight work.
+    let tmp = github_repo();
+    let p = tmp.path();
+    assert!(stacc(p, &["init"]).status.success());
+    run_git(p, &["checkout", "-q", "-b", "a"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "a1"]);
+    assert!(stacc(p, &["track"]).status.success());
+    // `loose`: an untracked sibling off main with an open PR #42.
+    run_git(p, &["checkout", "-q", "main"]);
+    run_git(p, &["checkout", "-q", "-b", "loose"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "l1"]);
+    run_git(p, &["checkout", "-q", "main"]);
+
+    let server = MockServer::start();
+    // Tracked `a` has no recorded PR -> by-head adoption lookup finds nothing.
+    server.mock(|when, then| {
+        when.method(httpmock::Method::GET)
+            .path("/repos/TinyDogTech/stacc/pulls")
+            .query_param("head", "TinyDogTech:a");
+        then.status(200).json_body(serde_json::json!([]));
+    });
+    // Untracked `loose` has an open PR.
+    server.mock(|when, then| {
+        when.method(httpmock::Method::GET)
+            .path("/repos/TinyDogTech/stacc/pulls")
+            .query_param("head", "TinyDogTech:loose");
+        then.status(200).json_body(serde_json::json!([
+            { "number": 42, "html_url": "u", "state": "open", "title": "Loose work", "draft": false, "merged": false }
+        ]));
+    });
+    let base = server.base_url();
+    let envs: &[(&str, &str)] = &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", base.as_str())];
+
+    let s = String::from_utf8_lossy(&stacc_env(p, &["log"], envs).stdout).into_owned();
+    assert!(s.contains("untracked (open PR):"), "section expected: {s}");
+    assert!(s.contains("loose") && s.contains("#42 Open"), "untracked PR shown: {s}");
+
+    let j = String::from_utf8_lossy(&stacc_env(p, &["log", "--json"], envs).stdout).into_owned();
+    assert!(j.contains(r#""untracked":"#), "untracked array expected: {j}");
+    assert!(j.contains(r#""name":"loose""#) && j.contains(r#""number":42"#), "json untracked PR: {j}");
 }
 
 #[test]

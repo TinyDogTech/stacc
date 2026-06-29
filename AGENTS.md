@@ -97,7 +97,7 @@ stderr and stdout is empty on failure.
 |---|---|
 | Create or update PRs (current branch + downstack) | `stacc submit --no-interactive --json` |
 | Refresh a stale PR body from the current commit | `stacc submit --update-body --no-interactive --json` |
-| List stack PR status | `stacc log --no-interactive --json` |
+| List every in-flight PR (tracked stacks + untracked branches with an open PR) | `stacc log --no-interactive --json` |
 | Merge ready PRs (trunk-up, squash) | `stacc merge --no-interactive --json` |
 | View current branch PR number and state | `stacc pr --no-interactive --json` |
 | Per-branch detail (base, diffstat, PR URL) | `stacc info --no-interactive --json` |
@@ -125,31 +125,40 @@ later manual edits are preserved again. No need to drop to `gh pr edit` for this
  "stopped_at":null | {"kind":"...","branch":"...","number":N,"readiness":"...","rejection":{...},"retryable":bool},
  "trunk_protected":bool,
  "synced":{"dropped":[...],"reparented":[{"branch":"...","base":"..."}],"restacked":[...]},
- "cleaned":[...],"cleanup_skipped":[...],"schema_version":2}
+ "cleaned":[...],"cleanup_skipped":[...],"schema_version":3}
 ```
 `stopped_at.retryable` is nested under `stopped_at`, not top-level.
 
 `stacc submit`:
 ```
 {"submitted":[{"status":"created"|"updated","branch":"...","number":N,"url":"https://..."}],
- "skipped":[],"schema_version":2}
+ "skipped":[],"schema_version":3}
 ```
 
 `stacc log` (short or bare):
 ```
-{"trunk":"main","stack":[{"name":"...","base":"...","change":{...},"commit":{...},...}],"schema_version":2}
+{"trunk":"main",
+ "stack":[{"name":"...","base":"...","change":{...},"commit":{...},"current":true,"needs_restack":true,...}],
+ "untracked":[{"name":"...","change":{"number":N,"url":"...","state":"open",...}}],
+ "schema_version":3}
 ```
 `stack` is a recursive tree: each node may have a `children` array of the same
 shape. Leaf nodes have no `children` key (stripped by `print_compact`; do not
-expect `"children":[]`). `stacc log long --json` returns only
-`{"trunk":"...","form":"long","schema_version":N}` -- it does not return tree
-data. Use `stacc log`, `stacc log short`, or bare `stacc log` for tree data.
+expect `"children":[]`). A node carries `"current":true` only when it is the
+checked-out branch, and `"needs_restack":true` only when its base has drifted
+ahead; both keys are absent otherwise (absent means false, do not test for
+`false`). `untracked` lists local branches stacc is not tracking that have an
+open PR, so `gh pr list` is not needed to see in-flight work; the key is absent
+when there are none, and the short form / `--no-status` omit it (offline).
+`stacc log long --json` returns only
+`{"trunk":"...","form":"long","schema_version":N}` -- an intentional stub, not
+tree data. Use `stacc log`, `stacc log short`, or bare `stacc log` for tree data.
 
 `stacc sync`:
 ```
 {"op":"sync","merged":[...],"pruned":[],"adopted":[],"reparented":[{"branch":"...","base":"..."}],
  "restacked":[],"cleaned":[],"cleanup_skipped":[],"detection_skipped":false,
- "likely_merged":[...],"schema_version":2}
+ "likely_merged":[...],"schema_version":3}
 ```
 
 `stacc info` (per-branch detail, includes PR URL):
@@ -157,7 +166,7 @@ data. Use `stacc log`, `stacc log short`, or bare `stacc log` for tree data.
 {"branch":"...","parent":"...","children":[...],"needs_restack":bool,"commits":N,
  "commit":{"sha":"...","subject":"...","age":"..."},
  "diffstat":{"files":N,"insertions":N,"deletions":N},
- "change":{"number":N,"url":"https://..."},"schema_version":2}
+ "change":{"number":N,"url":"https://..."},"schema_version":3}
 ```
 
 `stacc up / down / top / bottom / checkout`:

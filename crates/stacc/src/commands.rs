@@ -539,16 +539,17 @@ pub(crate) fn readiness_str(mergeable_state: Option<&str>) -> &'static str {
 
 /// Strip content an agent does not need from a JSON value before printing it:
 /// object keys whose value is null (an absent key reads as none), an empty
-/// `children` array (a leaf node), and `draft: false` (the non-draft default).
-/// Recurses through objects and arrays. Key names stay descriptive; only
-/// redundant content is dropped, so the output costs fewer tokens with no loss
-/// of signal.
+/// `children` or `untracked` array (a leaf node / nothing to surface), and
+/// `draft: false` (the non-draft default). Recurses through objects and arrays.
+/// Key names stay descriptive; only redundant content is dropped, so the output
+/// costs fewer tokens with no loss of signal.
 pub(crate) fn compact(value: &mut Value) {
     match value {
         Value::Object(map) => {
             map.retain(|key, v| {
                 let is_waste = v.is_null()
-                    || (key == "children" && v.as_array().is_some_and(Vec::is_empty))
+                    || ((key == "children" || key == "untracked")
+                        && v.as_array().is_some_and(Vec::is_empty))
                     || (key == "draft" && v.as_bool() == Some(false));
                 !is_waste
             });
