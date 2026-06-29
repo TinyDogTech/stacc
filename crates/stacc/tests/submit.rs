@@ -957,3 +957,361 @@ fn submit_resubmit_without_description_omits_body_in_patch() {
     assert!(out.status.success(), "resubmit stderr: {}", String::from_utf8_lossy(&out.stderr));
     resubmit_mock.assert();
 }
+
+// STA-131: `--update-body` refreshes the current branch's PR body from the commit
+// body on update, overriding a stale stored description, then clears the stored
+// description so the no-clobber default resumes on the next plain submit.
+
+/// Seed a tracked, already-submitted `feature` branch (PR `number`) with the given
+/// stored description and a commit whose body is `commit_body`.
+fn seed_submitted_feature(
+    tmp: &std::path::Path,
+    number: u64,
+    stored_desc: Option<&str>,
+    commit_message: &str,
+) {
+    assert!(stacc(tmp, &["init"]).status.success());
+    run_git(tmp, &["checkout", "-q", "-b", "feature"]);
+    run_git(tmp, &["commit", "-q", "--allow-empty", "-m", commit_message]);
+
+    let store = StateStore::new(Git::open(tmp));
+    let mut state = store.load().unwrap();
+    state.branches.insert(
+        "feature".to_string(),
+        BranchState {
+            base: Base {
+                name: "main".into(),
+                hash: "deadbeef".into(),
+            },
+            pr: Some(PullRequest { number, url: None }),
+            pr_title: None,
+            pr_description: stored_desc.map(str::to_string),
+        },
+    );
+    store.save(&state).unwrap();
+}
+
+#[test]
+fn submit_update_body_refreshes_from_commit_body_when_no_stored_desc() {
+    let (tmp, _bare) = setup();
+    seed_submitted_feature(
+        tmp.path(),
+        40,
+        None,
+        "Add feature\n\nFresh body line one\nwrapped line two.",
+    );
+
+    let server = MockServer::start();
+    // The PATCH must carry the reflowed commit body; a missing/omitted body would
+    // not match, failing the request and the success assertion below.
+    let mock = server.mock(|when, then| {
+        when.method(httpmock::Method::PATCH)
+            .path("/repos/TinyDogTech/stacc/pulls/40")
+            .body_contains("Fresh body line one wrapped line two.");
+        then.status(200).json_body(pr_body(40));
+    });
+
+    let out = stacc_env(
+        tmp.path(),
+        &["submit", "--update-body", "--json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    mock.assert();
+}
+
+#[test]
+fn submit_update_body_overrides_a_stale_stored_description() {
+    let (tmp, _bare) = setup();
+    seed_submitted_feature(
+        tmp.path(),
+        41,
+        Some("Stale stored body"),
+        "Add feature\n\nCurrent commit body.",
+    );
+
+    let server = MockServer::start();
+    // Only a request carrying the commit body matches; if submit sent the stale
+    // stored description instead, no mock matches and the request fails.
+    let mock = server.mock(|when, then| {
+        when.method(httpmock::Method::PATCH)
+            .path("/repos/TinyDogTech/stacc/pulls/41")
+            .body_contains("Current commit body.");
+        then.status(200).json_body(pr_body(41));
+    });
+
+    let out = stacc_env(
+        tmp.path(),
+        &["submit", "--update-body", "--json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    mock.assert();
+}
+
+#[test]
+fn submit_update_body_is_one_shot_and_clears_stored_description() {
+    let (tmp, _bare) = setup();
+    seed_submitted_feature(
+        tmp.path(),
+        42,
+        Some("Old stored body"),
+        "Refresh me\n\nCurrent commit body.",
+    );
+
+    let server = MockServer::start();
+    // First submit with --update-body: refresh from the commit body.
+    let refresh_mock = server.mock(|when, then| {
+        when.method(httpmock::Method::PATCH)
+            .path("/repos/TinyDogTech/stacc/pulls/42")
+            .body_contains("Current commit body.");
+        then.status(200).json_body(pr_body(42));
+    });
+    // Second, plain submit: the stored description was cleared, so the body field
+    // is omitted entirely and GitHub keeps whatever the refresh wrote.
+    let plain_mock = server.mock(|when, then| {
+        when.method(httpmock::Method::PATCH)
+            .path("/repos/TinyDogTech/stacc/pulls/42")
+            .body(r#"{"title":"Refresh me","base":"main"}"#);
+        then.status(200).json_body(pr_body(42));
+    });
+
+    let out = stacc_env(
+        tmp.path(),
+        &["submit", "--update-body", "--json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(out.status.success(), "first submit stderr: {}", String::from_utf8_lossy(&out.stderr));
+    refresh_mock.assert();
+
+    // The refresh cleared the stored description in state (one-shot, not a stored mode).
+    let show = Command::new("git")
+        .arg("-C")
+        .arg(tmp.path())
+        .args(["show", "refs/stacc/data:branches/feature"])
+        .output()
+        .unwrap();
+    let blob = String::from_utf8_lossy(&show.stdout);
+    assert!(
+        !blob.contains("Old stored body"),
+        "stored description cleared after --update-body refresh: {blob}"
+    );
+
+    let out = stacc_env(
+        tmp.path(),
+        &["submit", "--json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(out.status.success(), "second submit stderr: {}", String::from_utf8_lossy(&out.stderr));
+    plain_mock.assert();
+}
+
+#[test]
+fn submit_description_takes_precedence_over_update_body() {
+    let (tmp, _bare) = setup();
+    seed_submitted_feature(
+        tmp.path(),
+        43,
+        None,
+        "Add feature\n\nCommit body that must not win.",
+    );
+
+    let server = MockServer::start();
+    // --description wins; the explicit text is sent, not the commit body.
+    let mock = server.mock(|when, then| {
+        when.method(httpmock::Method::PATCH)
+            .path("/repos/TinyDogTech/stacc/pulls/43")
+            .body(r#"{"title":"Add feature","body":"Explicit description","base":"main"}"#);
+        then.status(200).json_body(pr_body(43));
+    });
+
+    let out = stacc_env(
+        tmp.path(),
+        &["submit", "--description", "Explicit description", "--update-body", "--json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    mock.assert();
+
+    // The explicit description persists (it was not cleared by --update-body).
+    let show = Command::new("git")
+        .arg("-C")
+        .arg(tmp.path())
+        .args(["show", "refs/stacc/data:branches/feature"])
+        .output()
+        .unwrap();
+    let blob = String::from_utf8_lossy(&show.stdout);
+    assert!(
+        blob.contains(r#""pr_description": "Explicit description""#),
+        "explicit description persists: {blob}"
+    );
+}
+
+#[test]
+fn submit_update_body_is_a_noop_on_create() {
+    let (tmp, _bare) = setup();
+    assert!(stacc(tmp.path(), &["init"]).status.success());
+    run_git(tmp.path(), &["checkout", "-q", "-b", "feature"]);
+    run_git(
+        tmp.path(),
+        &["commit", "-q", "--allow-empty", "-m", "Create subject\n\nCreate body text."],
+    );
+    assert!(stacc(tmp.path(), &["track"]).status.success());
+
+    let server = MockServer::start();
+    // On first submit there is no PR yet, so --update-body changes nothing: the new
+    // PR still takes the commit body through the normal create cascade.
+    let mock = server.mock(|when, then| {
+        when.method(httpmock::Method::POST)
+            .path("/repos/TinyDogTech/stacc/pulls")
+            .body_contains("Create body text.");
+        then.status(201).json_body(pr_body(44));
+    });
+
+    let out = stacc_env(
+        tmp.path(),
+        &["submit", "--update-body", "--json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    mock.assert();
+}
+
+#[test]
+fn submit_update_body_skips_an_empty_commit_body() {
+    let (tmp, _bare) = setup();
+    // Subject-only commit: there is no body to sync from.
+    seed_submitted_feature(tmp.path(), 45, None, "Subject only");
+
+    let server = MockServer::start();
+    // With nothing to refresh, --update-body falls through to the default (here, omit)
+    // rather than blanking an existing PR body to "". The PATCH carries no body field.
+    let mock = server.mock(|when, then| {
+        when.method(httpmock::Method::PATCH)
+            .path("/repos/TinyDogTech/stacc/pulls/45")
+            .body(r#"{"title":"Subject only","base":"main"}"#);
+        then.status(200).json_body(pr_body(45));
+    });
+
+    let out = stacc_env(
+        tmp.path(),
+        &["submit", "--update-body", "--json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    mock.assert();
+}
+
+#[test]
+fn submit_update_body_on_create_preserves_a_stored_description() {
+    // Reachable state (e.g. after `stacc rename` nulls the PR but keeps the stored
+    // description): a branch with a stored description but no PR yet. `--update-body`
+    // must be a true no-op on create -- it must not clear the stored description.
+    let (tmp, _bare) = setup();
+    assert!(stacc(tmp.path(), &["init"]).status.success());
+    run_git(tmp.path(), &["checkout", "-q", "-b", "feature"]);
+    run_git(tmp.path(), &["commit", "-q", "--allow-empty", "-m", "Add feature\n\nCommit body."]);
+
+    let store = StateStore::new(Git::open(tmp.path()));
+    let mut state = store.load().unwrap();
+    state.branches.insert(
+        "feature".to_string(),
+        BranchState {
+            base: Base {
+                name: "main".into(),
+                hash: "deadbeef".into(),
+            },
+            pr: None,
+            pr_title: None,
+            pr_description: Some("Retained description".to_string()),
+        },
+    );
+    store.save(&state).unwrap();
+
+    let server = MockServer::start();
+    // No PR exists, so submit creates one (POST). --update-body has no update path to
+    // act on and must leave the stored description untouched.
+    server.mock(|when, then| {
+        when.method(httpmock::Method::POST)
+            .path("/repos/TinyDogTech/stacc/pulls");
+        then.status(201).json_body(pr_body(46));
+    });
+
+    let out = stacc_env(
+        tmp.path(),
+        &["submit", "--update-body", "--json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+
+    let show = Command::new("git")
+        .arg("-C")
+        .arg(tmp.path())
+        .args(["show", "refs/stacc/data:branches/feature"])
+        .output()
+        .unwrap();
+    let blob = String::from_utf8_lossy(&show.stdout);
+    assert!(
+        blob.contains(r#""pr_description": "Retained description""#),
+        "stored description must survive --update-body on create: {blob}"
+    );
+}
+
+#[test]
+fn submit_update_body_applies_to_current_branch_only() {
+    let (tmp, _bare) = setup();
+    assert!(stacc(tmp.path(), &["init"]).status.success());
+
+    // main -> feature-1 -> feature-2 (current). Give each a distinct commit body.
+    run_git(tmp.path(), &["checkout", "-q", "-b", "feature-1"]);
+    run_git(tmp.path(), &["commit", "-q", "--allow-empty", "-m", "f1\n\nF1 commit body."]);
+    assert!(stacc(tmp.path(), &["track"]).status.success());
+    run_git(tmp.path(), &["checkout", "-q", "-b", "feature-2"]);
+    run_git(tmp.path(), &["commit", "-q", "--allow-empty", "-m", "f2\n\nF2 commit body."]);
+    assert!(stacc(tmp.path(), &["track", "--base", "feature-1"]).status.success());
+
+    let server = MockServer::start();
+    // First submit: create both PRs.
+    server.mock(|when, then| {
+        when.method(httpmock::Method::POST)
+            .path("/repos/TinyDogTech/stacc/pulls")
+            .body_contains(r#""head":"feature-1""#);
+        then.status(201).json_body(pr_body(51));
+    });
+    server.mock(|when, then| {
+        when.method(httpmock::Method::POST)
+            .path("/repos/TinyDogTech/stacc/pulls")
+            .body_contains(r#""head":"feature-2""#);
+        then.status(201).json_body(pr_body(52));
+    });
+    let out = stacc_env(
+        tmp.path(),
+        &["submit", "--json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(out.status.success(), "create stderr: {}", String::from_utf8_lossy(&out.stderr));
+
+    // Re-submit from feature-2 with --update-body. Only feature-2 (current) refreshes
+    // its body; feature-1 (downstack) omits the body field.
+    let f2_refresh = server.mock(|when, then| {
+        when.method(httpmock::Method::PATCH)
+            .path("/repos/TinyDogTech/stacc/pulls/52")
+            .body_contains("F2 commit body.");
+        then.status(200).json_body(pr_body(52));
+    });
+    let f1_untouched = server.mock(|when, then| {
+        when.method(httpmock::Method::PATCH)
+            .path("/repos/TinyDogTech/stacc/pulls/51")
+            .body(r#"{"title":"f1","base":"main"}"#);
+        then.status(200).json_body(pr_body(51));
+    });
+
+    let out = stacc_env(
+        tmp.path(),
+        &["submit", "--update-body", "--json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(out.status.success(), "update stderr: {}", String::from_utf8_lossy(&out.stderr));
+    f2_refresh.assert();
+    f1_untouched.assert();
+}

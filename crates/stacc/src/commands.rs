@@ -692,6 +692,9 @@ pub fn submit(args: &SubmitArgs, format: OutputFormat, work_dir: &Path) -> Resul
     // state so re-submits reuse them without repeating the flags.
     let mut title_update: Option<(String, String)> = None;
     let mut desc_update: Option<(String, String)> = None;
+    // Branch whose stored description `--update-body` refreshed; cleared in state
+    // afterward so the next plain submit returns to the body-omit (no-clobber) arm.
+    let mut desc_clear: Option<String> = None;
 
     for branch in &chain {
         let is_current = branch == &current;
@@ -758,11 +761,30 @@ pub fn submit(args: &SubmitArgs, format: OutputFormat, work_dir: &Path) -> Resul
                 .unwrap_or_else(|| reflow_body(&git.commit_body(branch).unwrap_or_default()))
         };
 
-        // Only include body in PATCH when there is an explicit source: --description
-        // on this run, or a previously-stored description. When neither exists, omit
-        // the field so GitHub preserves any manual PR body edits.
+        // Body on UPDATE follows a precedence: an explicit --description on this run
+        // wins; then --update-body refreshes the current branch from its commit body,
+        // overriding a stale stored description; then a previously-stored description;
+        // else the field is omitted so GitHub preserves any manual PR body edits
+        // (STA-121). --update-body is a one-shot sync, not a stored mode: it records the
+        // branch in `desc_clear` so the stored description is wiped afterward and the
+        // next plain submit returns to the omit arm. It only acts on an actual update
+        // (`existing.is_some()`), so it is a true no-op on create, and an empty reflowed
+        // body (subject-only commit, or a swallowed commit_body error) falls through to
+        // the default rather than blanking an existing PR body.
         let update_body: Option<String> = if is_current {
-            desc_update.as_ref().map(|(_, d)| d.clone()).or(stored_desc)
+            if let Some((_, d)) = &desc_update {
+                Some(d.clone())
+            } else if args.update_body && existing.is_some() {
+                let refreshed = reflow_body(&git.commit_body(branch).unwrap_or_default());
+                if refreshed.is_empty() {
+                    stored_desc
+                } else {
+                    desc_clear = Some(branch.clone());
+                    Some(refreshed)
+                }
+            } else {
+                stored_desc
+            }
         } else {
             stored_desc
         };
@@ -823,6 +845,15 @@ pub fn submit(args: &SubmitArgs, format: OutputFormat, work_dir: &Path) -> Resul
         if let Some((branch, desc)) = &desc_update {
             if let Some(branch_state) = state.branches.get_mut(branch) {
                 branch_state.pr_description = Some(desc.clone());
+            }
+        }
+        // desc_clear and desc_update are mutually exclusive per run; the guard keeps a
+        // future change from letting a clear erase an explicit --description.
+        if desc_update.is_none() {
+            if let Some(branch) = &desc_clear {
+                if let Some(branch_state) = state.branches.get_mut(branch) {
+                    branch_state.pr_description = None;
+                }
             }
         }
         Ok(())

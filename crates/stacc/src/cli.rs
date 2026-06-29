@@ -453,6 +453,9 @@ pub struct CheckoutArgs {
 }
 
 /// Arguments for `stacc submit`.
+// Independent CLI flags are naturally booleans; the count is a surface, not a
+// data-modeling smell (same as SyncArgs and RestackArgs).
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, clap::Args)]
 pub struct SubmitArgs {
     /// PR title for the current branch. Persisted in stack state so re-submits
@@ -480,6 +483,14 @@ pub struct SubmitArgs {
     /// Create new PRs as drafts (existing PRs are updated, never re-drafted).
     #[arg(long)]
     pub draft: bool,
+
+    /// Refresh the current branch's PR body from its latest commit body on
+    /// update, overriding a stale stored description. A one-shot sync: the
+    /// stored description is cleared afterward so later manual edits are
+    /// preserved. Ignored when `--description` is given, and a no-op on first
+    /// submit (a new PR already takes the commit body).
+    #[arg(long)]
+    pub update_body: bool,
 }
 
 /// Arguments for `stacc sync`.
