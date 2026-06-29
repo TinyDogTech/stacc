@@ -371,6 +371,71 @@ fn log_show_untracked_lists_untracked_branches() {
 }
 
 #[test]
+fn log_offline_does_not_surface_untracked_prs() {
+    // R5: with no remote/token, the by-head lookup never runs, so an untracked
+    // branch produces no open-PR section and the JSON gains no `untracked` key.
+    let tmp = repo();
+    let p = tmp.path();
+    assert!(stacc(p, &["init"]).status.success());
+    run_git(p, &["checkout", "-q", "-b", "a"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "a1"]);
+    assert!(stacc(p, &["track"]).status.success());
+    run_git(p, &["branch", "loose"]); // an untracked local branch
+
+    let s = String::from_utf8_lossy(&stacc(p, &["log"]).stdout).into_owned();
+    assert!(!s.contains("untracked (open PR):"), "offline must not surface PRs: {s}");
+
+    let j = String::from_utf8_lossy(&stacc(p, &["log", "--json"]).stdout).into_owned();
+    assert!(!j.contains("untracked"), "no untracked key without open PRs: {j}");
+}
+
+#[test]
+fn log_surfaces_an_untracked_branch_with_an_open_pr() {
+    // R1/R2: an untracked local branch (made with plain git, not stacc) that has
+    // an open PR appears in the default log and in --json, so `gh pr list` is
+    // unneeded to see in-flight work.
+    let tmp = github_repo();
+    let p = tmp.path();
+    assert!(stacc(p, &["init"]).status.success());
+    run_git(p, &["checkout", "-q", "-b", "a"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "a1"]);
+    assert!(stacc(p, &["track"]).status.success());
+    // `loose`: an untracked sibling off main with an open PR #42.
+    run_git(p, &["checkout", "-q", "main"]);
+    run_git(p, &["checkout", "-q", "-b", "loose"]);
+    run_git(p, &["commit", "-q", "--allow-empty", "-m", "l1"]);
+    run_git(p, &["checkout", "-q", "main"]);
+
+    let server = MockServer::start();
+    // Tracked `a` has no recorded PR -> by-head adoption lookup finds nothing.
+    server.mock(|when, then| {
+        when.method(httpmock::Method::GET)
+            .path("/repos/TinyDogTech/stacc/pulls")
+            .query_param("head", "TinyDogTech:a");
+        then.status(200).json_body(serde_json::json!([]));
+    });
+    // Untracked `loose` has an open PR.
+    server.mock(|when, then| {
+        when.method(httpmock::Method::GET)
+            .path("/repos/TinyDogTech/stacc/pulls")
+            .query_param("head", "TinyDogTech:loose");
+        then.status(200).json_body(serde_json::json!([
+            { "number": 42, "html_url": "u", "state": "open", "title": "Loose work", "draft": false, "merged": false }
+        ]));
+    });
+    let base = server.base_url();
+    let envs: &[(&str, &str)] = &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", base.as_str())];
+
+    let s = String::from_utf8_lossy(&stacc_env(p, &["log"], envs).stdout).into_owned();
+    assert!(s.contains("untracked (open PR):"), "section expected: {s}");
+    assert!(s.contains("loose") && s.contains("#42 Open"), "untracked PR shown: {s}");
+
+    let j = String::from_utf8_lossy(&stacc_env(p, &["log", "--json"], envs).stdout).into_owned();
+    assert!(j.contains(r#""untracked":"#), "untracked array expected: {j}");
+    assert!(j.contains(r#""name":"loose""#) && j.contains(r#""number":42"#), "json untracked PR: {j}");
+}
+
+#[test]
 fn log_reverse_and_stack_flags_apply() {
     let tmp = repo();
     let p = tmp.path();
