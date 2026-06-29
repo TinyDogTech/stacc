@@ -2,5 +2,9 @@
   "base": {
     "name": "main",
     "hash": "7a153a312f3e6beec8a7d9f5b8a91ee06423ce79"
+  },
+  "pr": {
+    "number": 125,
+    "url": "https://github.com/TinyDogTech/stacc/pull/125"
   }
 }
