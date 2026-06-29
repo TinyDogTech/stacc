@@ -96,6 +96,7 @@ stderr and stdout is empty on failure.
 | Want to... | Use stacc, not gh |
 |---|---|
 | Create or update PRs (current branch + downstack) | `stacc submit --no-interactive --json` |
+| Refresh a stale PR body from the current commit | `stacc submit --update-body --no-interactive --json` |
 | List stack PR status | `stacc log --no-interactive --json` |
 | Merge ready PRs (trunk-up, squash) | `stacc merge --no-interactive --json` |
 | View current branch PR number and state | `stacc pr --no-interactive --json` |
@@ -107,6 +108,13 @@ stderr and stdout is empty on failure.
 `stacc submit` always pushes the current branch's full downstack (all ancestors
 up to trunk). This is idempotent -- pushing an unchanged branch is a no-op on the
 remote.
+
+On update, `submit` leaves an existing PR body untouched unless you gave a body
+source (`--description`, or one stored from a prior `--description`), so manual PR
+edits are never clobbered. When a PR body has gone stale and you want it
+re-synced from the current commit body, pass `--update-body` (current branch
+only). It is a one-shot refresh: the stored description is cleared afterward, so
+later manual edits are preserved again. No need to drop to `gh pr edit` for this.
 
 ### 4. JSON output shapes (key commands)
 
