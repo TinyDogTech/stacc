@@ -50,17 +50,17 @@ That is the real gap behind the issue's stated motivation: "with the repo now st
 
 ## Key Technical Decisions
 
-- **KTD1 — Display, not auto-track.** Untracked-with-open-PR branches are *shown*, never written into `refs/stacc/data`. Auto-tracking on PR detection is a state mutation with its own correctness and surprise concerns; it is out of scope (see Scope Boundaries). This keeps `stacc log` read-only, as it is today.
+- **KTD1, Display, not auto-track.** Untracked-with-open-PR branches are *shown*, never written into `refs/stacc/data`. Auto-tracking on PR detection is a state mutation with its own correctness and surprise concerns; it is out of scope (see Scope Boundaries). This keeps `stacc log` read-only, as it is today.
 
-- **KTD2 — Scope: local untracked branches only.** Detection uses `git.local_branches()` (already the source for `print_untracked`) filtered to branches not in `state.branches` and not the trunk, then a by-head PR lookup. Open PRs whose branch is not checked out locally are **not** enumerated; that would require a repo-wide `list PRs` call and remote/local dedup, and is deferred (Open Questions). This matches the reporter's case (a local branch) and the branch-per-PR, fully-local stacc model.
+- **KTD2, Scope: local untracked branches only.** Detection uses `git.local_branches()` (already the source for `print_untracked`) filtered to branches not in `state.branches` and not the trunk, then a by-head PR lookup. Open PRs whose branch is not checked out locally are **not** enumerated; that would require a repo-wide `list PRs` call and remote/local dedup, and is deferred (Open Questions). This matches the reporter's case (a local branch) and the branch-per-PR, fully-local stacc model.
 
-- **KTD3 — Online forms only; reuse the existing budget + adoption pattern.** Untracked-PR detection runs only when `want_status` is already true (full pretty form or JSON, and not `--no-status`) — the same gate at `crates/stacc/src/commands/log.rs:152-153`. The lookup mirrors the existing by-head "adoption" pass in `fetch_pr_status` (`crates/stacc/src/commands/log.rs:881-898`): `pull_request_for_branch_within`, spending only leftover `budget_left()`, filtered to **open** PRs, never `?`. The short form stays offline by contract (R5).
+- **KTD3, Online forms only; reuse the existing budget + adoption pattern.** Untracked-PR detection runs only when `want_status` is already true (full pretty form or JSON, and not `--no-status`), the same gate at `crates/stacc/src/commands/log.rs:152-153`. The lookup mirrors the existing by-head "adoption" pass in `fetch_pr_status` (`crates/stacc/src/commands/log.rs:881-898`): `pull_request_for_branch_within`, spending only leftover `budget_left()`, filtered to **open** PRs, never `?`. The short form stays offline by contract (R5).
 
-- **KTD4 — JSON shape: additive `untracked` array + `current`/`needs_restack` keys; no rename, bump to 3.** `stack` is already a recursive forest tree, so it is **not** renamed (avoids gratuitous breakage). The new shape adds a top-level `untracked` array (siblings with no tracked base, so they cannot live inside the trunk-rooted tree) plus per-node `current: true` / `needs_restack: true`. Per stacc convention these booleans are emitted **only when true** and stripped otherwise by `print_compact`, consistent with "absent keys mean null/empty" (`AGENTS.md` section 1). `SCHEMA_VERSION` goes to 3 to signal the shape change.
+- **KTD4, JSON shape: additive `untracked` array + `current`/`needs_restack` keys; no rename, bump to 3.** `stack` is already a recursive forest tree, so it is **not** renamed (avoids gratuitous breakage). The new shape adds a top-level `untracked` array (siblings with no tracked base, so they cannot live inside the trunk-rooted tree) plus per-node `current: true` / `needs_restack: true`. Per stacc convention these booleans are emitted **only when true** and stripped otherwise by `print_compact`, consistent with "absent keys mean null/empty" (`AGENTS.md` section 1). `SCHEMA_VERSION` goes to 3 to signal the shape change.
 
-- **KTD5 — `needs_restack` reuses an already-computed value.** `commit_json` (`crates/stacc/src/commands/log.rs:987-994`) already calls `git.ahead_behind(base, branch)` and discards the `behind` component; `behind > 0` is exactly the pretty path's restack condition (`crates/stacc/src/commands/log.rs:649`). Compute both from the single existing call — no extra git invocations.
+- **KTD5, `needs_restack` reuses an already-computed value.** `commit_json` (`crates/stacc/src/commands/log.rs:987-994`) already calls `git.ahead_behind(base, branch)` and discards the `behind` component; `behind > 0` is exactly the pretty path's restack condition (`crates/stacc/src/commands/log.rs:649`). Compute both from the single existing call, no extra git invocations.
 
-- **KTD6 — Drift-guard test is updated, not deleted.** `log_json_is_not_changed_by_drift` (`crates/stacc/tests/log.rs:232-247`) asserts the JSON never contains `"restack"`/`"needs"` to catch pretty markers leaking into JSON. `needs_restack` is now an intentional JSON field, so the guard is retargeted to the *pretty-only* markers (rail glyphs, ANSI codes, section headers like `untracked:`), keeping the data/render separation it was protecting.
+- **KTD6, Drift-guard test is updated, not deleted.** `log_json_is_not_changed_by_drift` (`crates/stacc/tests/log.rs:232-247`) asserts the JSON never contains `"restack"`/`"needs"` to catch pretty markers leaking into JSON. `needs_restack` is now an intentional JSON field, so the guard is retargeted to the *pretty-only* markers (rail glyphs, ANSI codes, section headers like `untracked:`), keeping the data/render separation it was protecting.
 
 ---
 
@@ -126,7 +126,7 @@ JSON shape (v3), additive over v2:
 
 **Approach:**
 - Thread the already-available `current` branch name into `stack_json`; emit `"current": true` only on the matching node (omit otherwise, so `print_compact` keeps it absent on the rest).
-- In `stack_json`, compute `behind` from the same `git.ahead_behind(base, kid)` call that `commit_json` already makes (refactor so the `(ahead, behind)` pair is computed once and shared between the commit object and the new `needs_restack` flag — see KTD5). Emit `"needs_restack": true` only when `behind > 0`.
+- In `stack_json`, compute `behind` from the same `git.ahead_behind(base, kid)` call that `commit_json` already makes (refactor so the `(ahead, behind)` pair is computed once and shared between the commit object and the new `needs_restack` flag, see KTD5). Emit `"needs_restack": true` only when `behind > 0`.
 - Bump `SCHEMA_VERSION` and its pinning assertion together (the assertion is a deliberate drift guard, not dead code).
 - Retarget `log_json_is_not_changed_by_drift` (KTD6): drop the `"restack"`/`"needs"` substring bans; instead assert that rail glyphs, ANSI escape sequences, and the `untracked:`/`unreachable:` section headers never appear in JSON.
 
@@ -157,18 +157,18 @@ JSON shape (v3), additive over v2:
 - `crates/stacc/src/commands/log.rs` (new helper near `fetch_pr_status` ~825 and `print_untracked` ~1017)
 
 **Approach:**
-- Enumerate candidates with `git.local_branches()` filtered to `name != trunk && !branches.contains_key(name)` — the same filter `print_untracked` already uses (`crates/stacc/src/commands/log.rs:1017-1023`).
-- Only run the network step when status is wanted (caller passes the existing `want_status` decision; the helper itself does no fetch when given an empty client). Build the client once via `build_client` (`crates/stacc/src/commands/log.rs:927`), reusing the same `Option` grace — `None` client yields an empty result, never an error.
+- Enumerate candidates with `git.local_branches()` filtered to `name != trunk && !branches.contains_key(name)`, the same filter `print_untracked` already uses (`crates/stacc/src/commands/log.rs:1017-1023`).
+- Only run the network step when status is wanted (caller passes the existing `want_status` decision; the helper itself does no fetch when given an empty client). Build the client once via `build_client` (`crates/stacc/src/commands/log.rs:927`), reusing the same `Option` grace, `None` client yields an empty result, never an error.
 - For each candidate, do a by-head lookup with `pull_request_for_branch_within` spending only `budget_left()`, mirroring the adoption loop (`crates/stacc/src/commands/log.rs:881-898`). Keep only results whose PR `state == Open`. Never use `?`/`unwrap` on the fetch path (R6).
 - Return an ordered collection of `(branch_name, PrLive)` (or a small struct) so renderers can show number + state without re-fetching.
 
-**Execution note:** Add the failing budget/offline tests first — this unit's correctness is mostly about *not* fetching in the wrong conditions, which is easiest to pin test-first.
+**Execution note:** Add the failing budget/offline tests first, this unit's correctness is mostly about *not* fetching in the wrong conditions, which is easiest to pin test-first.
 
 **Patterns to follow:** `fetch_pr_status` budget loop and `build_client` `Option` handling; `print_untracked` candidate filter.
 
 **Test scenarios:**
 - Happy path: a local branch absent from state with an open PR is returned with its number and `open` state.
-- Offline contract (R5): with `--no-status` (and in `--short` form), the helper performs no network call and returns empty — assert via a no-token / no-remote fixture that no PR data appears and the command still succeeds.
+- Offline contract (R5): with `--no-status` (and in `--short` form), the helper performs no network call and returns empty, assert via a no-token / no-remote fixture that no PR data appears and the command still succeeds.
 - Edge: a local untracked branch with a **closed/merged** PR is excluded (only open PRs surface).
 - Edge: a local untracked branch with **no** PR is excluded (it remains a plain untracked row in the pretty `--show-untracked` path, unchanged).
 - Edge: trunk and tracked branches are never returned (filter correctness).
@@ -179,7 +179,7 @@ JSON shape (v3), additive over v2:
 
 ### U3. Surface untracked-with-open-PR branches in the default pretty log
 
-**Goal:** the full pretty `stacc log` lists untracked branches that have an open PR, with PR number and state, by default — no flag required — so in-flight work is never invisible.
+**Goal:** the full pretty `stacc log` lists untracked branches that have an open PR, with PR number and state, by default, no flag required, so in-flight work is never invisible.
 
 **Requirements:** R1, R5.
 
@@ -219,7 +219,7 @@ JSON shape (v3), additive over v2:
 **Approach:**
 - In the `OutputFormat::Json` arm, call the U2 helper and serialize each result as `{ "name", "change": { number, url, state, ... } }`, matching the `change` sub-object shape used inside `stack_json` (`crates/stacc/src/commands/log.rs:959-970`) as closely as the available `PrLive` allows.
 - Add the array under a top-level `"untracked"` key alongside `"stack"`; rely on `print_compact` to strip it when empty (so existing consumers see no new key when there are no untracked PRs).
-- Do not place untracked branches inside `stack` — they have no tracked base and would corrupt the trunk-rooted tree (KTD4).
+- Do not place untracked branches inside `stack`, they have no tracked base and would corrupt the trunk-rooted tree (KTD4).
 
 **Patterns to follow:** `stack_json` `change` object; `print_compact` empty-array stripping.
 
@@ -259,9 +259,9 @@ JSON shape (v3), additive over v2:
 In scope: surfacing local untracked branches that have an open PR (pretty default + `--json`), `current`/`needs_restack` JSON parity, schema bump to 3, and the related doc updates.
 
 ### Deferred to Follow-Up Work
-- **Auto-tracking** untracked branches on PR detection (state mutation; separate concern — KTD1).
-- **Repo-wide open-PR enumeration** for PRs whose branch is not checked out locally (requires a `list PRs` call + remote/local dedup; bigger fetch and budget profile — see Open Questions).
-- **Real `stacc log long --json` tree data** (long form stays a documented stub here — R8).
+- **Auto-tracking** untracked branches on PR detection (state mutation; separate concern, KTD1).
+- **Repo-wide open-PR enumeration** for PRs whose branch is not checked out locally (requires a `list PRs` call + remote/local dedup; bigger fetch and budget profile, see Open Questions).
+- **Real `stacc log long --json` tree data** (long form stays a documented stub here, R8).
 - **A dedicated flag** to toggle untracked-PR surfacing off; the offline forms (`--short`/`--no-status`) already provide the no-fetch path, so a new flag is unnecessary for v1.
 
 ### Out of scope
@@ -298,5 +298,5 @@ In scope: surfacing local untracked branches that have an open PR (pretty defaul
 
 - Issue STA-132 (Linear, team STA).
 - Code: `crates/stacc/src/commands/log.rs` (`log`, `visible_set`, `fetch_pr_status`, `stack_json`, `commit_json`, `print_untracked`, `build_client`), `crates/stacc-forge/src/lib.rs` (`SCHEMA_VERSION`), `crates/stacc/tests/log.rs` (drift-guard, version pins, `stacc()` helper), `AGENTS.md` sections 3/4/7.
-- Prior art: git-spice `gs log` (`../git-spice`, `internal/ui/fliptree/tree.go`) — confirms the forest/rail model; default-current-stack-with-`--all` there is the inverse of stacc's already-forest default, so not a target for this change.
+- Prior art: git-spice `gs log` (`../git-spice`, `internal/ui/fliptree/tree.go`), confirms the forest/rail model; default-current-stack-with-`--all` there is the inverse of stacc's already-forest default, so not a target for this change.
 - Convention: `SCHEMA_VERSION` pinning assertion is a deliberate drift guard (STA-49 lineage); JSON must not leak pretty-only markers (drift-guard test); tests strip `COLUMNS` via the `stacc()` helper.
