@@ -29,10 +29,11 @@ use std::time::Duration;
 
 /// The version of the neutral CLI JSON schema.
 ///
-/// A present `schema_version` means the versioned v2 schema; a consumer treats
-/// the field's *absence* as legacy/untrusted output, since v1 never emitted it.
-/// This is the first versioned schema, so it is `2`, not `1`.
-pub const SCHEMA_VERSION: u32 = 2;
+/// A present `schema_version` means the versioned schema; a consumer treats the
+/// field's *absence* as legacy/untrusted output, since v1 never emitted it. v2
+/// was the first versioned shape; v3 added the `stacc log` forest extras
+/// (`current` and `needs_restack` per node, plus a top-level `untracked` array).
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// The operations every forge implements, in forge-neutral vocabulary.
 ///
@@ -115,7 +116,7 @@ mod tests {
     fn assert_object_safe(_forge: &dyn Forge) {}
 
     #[test]
-    fn schema_version_is_the_first_versioned_schema() {
-        assert_eq!(SCHEMA_VERSION, 2);
+    fn schema_version_is_pinned() {
+        assert_eq!(SCHEMA_VERSION, 3);
     }
 }

@@ -182,7 +182,7 @@ pub fn log(args: &LogArgs, format: OutputFormat, color: ColorChoice, work_dir: &
 
     match format {
         OutputFormat::Json => {
-            let stack = stack_json(&trunk, &children, branches, &git, &pr_status, &deleted);
+            let stack = stack_json(&trunk, &children, branches, &git, &pr_status, &deleted, &current);
             super::print_compact(json!({
                 "trunk": trunk,
                 "stack": stack,
@@ -948,6 +948,7 @@ fn stack_json(
     git: &Git,
     pr_status: &PrStatusMap,
     deleted: &BTreeSet<String>,
+    current: &str,
 ) -> Vec<Value> {
     let Some(kids) = children.get(node) else {
         return Vec::new();
@@ -968,24 +969,39 @@ fn stack_json(
                     "checks": live.map(|l| checks_state_str(l.checks.checks)),
                 })
             });
-            let commit = if is_deleted { None } else { commit_json(git, kid, node) };
+            // One ahead/behind probe drives both the commit object (ahead > 0,
+            // i.e. the branch has commits of its own) and the needs_restack flag
+            // (behind > 0, i.e. the base drifted ahead). A deleted ref has no
+            // resolvable commits, so it stays at (0, 0).
+            let (ahead, behind) = if is_deleted {
+                (0, 0)
+            } else {
+                git.ahead_behind(node, kid).unwrap_or((0, 0))
+            };
+            let commit = commit_json(git, kid, ahead);
             let mut value = json!({
                 "name": kid,
                 "base": node,
                 "change": change,
                 "commit": commit,
-                "children": stack_json(kid, children, branches, git, pr_status, deleted),
+                "children": stack_json(kid, children, branches, git, pr_status, deleted, current),
             });
             if is_deleted {
                 value["deleted"] = Value::Bool(true);
+            }
+            if kid == current {
+                value["current"] = Value::Bool(true);
+            }
+            if behind > 0 {
+                value["needs_restack"] = Value::Bool(true);
             }
             value
         })
         .collect()
 }
 
-fn commit_json(git: &Git, branch: &str, base: &str) -> Option<Value> {
-    if git.ahead_behind(base, branch).unwrap_or((0, 0)).0 == 0 {
+fn commit_json(git: &Git, branch: &str, ahead: usize) -> Option<Value> {
+    if ahead == 0 {
         return None;
     }
     git.commit_info(branch).ok().map(|info| {

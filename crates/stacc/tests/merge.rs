@@ -1537,7 +1537,7 @@ fn forge_error_envelope_is_neutral_schema_versioned_and_scrubbed() {
     let v: serde_json::Value = serde_json::from_str(&s).unwrap_or_else(|_| panic!("json error: {s}"));
     // Neutral error type (no `github`/`forge` discriminator), schema-versioned.
     assert_eq!(v["type"], "forge_auth", "got: {s}");
-    assert_eq!(v["schema_version"], 2, "got: {s}");
+    assert_eq!(v["schema_version"], 3, "got: {s}");
     // R18: the response body's secret never reaches the error envelope.
     assert!(!s.contains("ghp_SECRET"), "token leaked into error: {s}");
 }
