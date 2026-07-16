@@ -3,6 +3,7 @@
 pub mod auth;
 mod error;
 mod forge;
+mod tls;
 
 pub use auth::{
     clear_token, env_token, gh_token, keychain_token, load_token, store_token, DeviceCode,
@@ -192,7 +193,7 @@ impl GitHub {
     /// Build a client pointed at a specific base URL (used by tests).
     pub fn with_base_url(token: impl Into<String>, base_url: impl Into<String>) -> Self {
         Self {
-            agent: ureq::AgentBuilder::new().timeout(REQUEST_TIMEOUT).build(),
+            agent: tls::agent_builder().timeout(REQUEST_TIMEOUT).build(),
             token: token.into(),
             base_url: base_url.into(),
         }

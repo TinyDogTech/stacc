@@ -71,7 +71,7 @@ impl Default for DeviceFlow {
             ),
             token_url: env_or("STACC_OAUTH_TOKEN_URL", DEFAULT_TOKEN_URL),
             scope: OAUTH_SCOPE.to_string(),
-            agent: ureq::AgentBuilder::new().build(),
+            agent: crate::tls::agent_builder().build(),
         }
     }
 }

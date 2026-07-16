@@ -14,6 +14,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 ureq = { workspace = true }
+rustls = { workspace = true }
+rustls-platform-verifier = { workspace = true }
 
 [dev-dependencies]
 httpmock = "0.7"
