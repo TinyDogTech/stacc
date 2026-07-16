@@ -2469,7 +2469,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "stacc"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "clap",
  "clap_complete",
@@ -2490,7 +2490,7 @@ dependencies = [
 
 [[package]]
 name = "stacc-config"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "serde",
  "stacc-git",
@@ -2502,7 +2502,7 @@ dependencies = [
 
 [[package]]
 name = "stacc-core"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -2514,7 +2514,7 @@ dependencies = [
 
 [[package]]
 name = "stacc-forge"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -2523,7 +2523,7 @@ dependencies = [
 
 [[package]]
 name = "stacc-git"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "tempfile",
  "thiserror 2.0.18",
@@ -2531,7 +2531,7 @@ dependencies = [
 
 [[package]]
 name = "stacc-github"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "httpmock",
  "keyring",
@@ -2547,7 +2547,7 @@ dependencies = [
 
 [[package]]
 name = "stacc-state"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "serde",
  "serde_json",
