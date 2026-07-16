@@ -2,5 +2,10 @@
   "base": {
     "name": "main",
     "hash": "f80868af0b5bf604c5c77e9d76e028b84e600696"
-  }
+  },
+  "pr": {
+    "number": 127,
+    "url": "https://github.com/TinyDogTech/stacc/pull/127"
+  },
+  "pr_description": "## Problem\n\nOn a corporate laptop, `stacc submit` / `sync` / `merge` fail with `invalid peer certificate: UnknownIssuer`. The corporate network runs a MITM proxy that re-signs TLS with a private root CA, and that root is installed only in the macOS keychain.\n\nureq's default `tls` backend verifies against a copy of the Mozilla root set (`webpki-roots`) compiled into the binary, so it never consults the keychain and rejects the proxy's certificate. `git` and `gh` work in the same environment because they verify through the macOS Security framework, which reads the keychain and also tolerates real-world corporate roots that stricter verifiers reject (for example a CA missing the `keyUsage` extension).\n\n## Fix\n\nDelegate certificate verification to the OS platform verifier via `rustls-platform-verifier`, so stacc trusts exactly the roots the rest of the user's toolchain already does (keychain on macOS, CryptoAPI on Windows, system store on Linux). This stays on pure rustls, no system OpenSSL is linked.\n\nA shared `stacc-github/src/tls.rs` builds a `ureq::AgentBuilder` whose rustls `ClientConfig` uses the platform verifier, wired into both Agent construction sites (`GitHub` client and the OAuth `DeviceFlow`). The config is built with an explicit `ring` provider (the same provider ureq already pulls) so it never depends on a process-default crypto provider.\n\n## Verification\n\n- `cargo test --workspace` — 669 passed.\n- `cargo clippy -p stacc-github --all-targets` — clean.\n- Manual smoke: a real HTTPS request through the new agent to `api.github.com` completes (status 200), confirming normal public trust is intact and the provider wiring is sound.\n\nNote: the corporate-proxy path itself could not be exercised from a non-corporate network. The fix rests on delegating to the same OS verifier `git`/`gh` use, which is why they succeed where stacc did not.\n\n## Behaviour change\n\nTLS trust now comes from the OS store for all users, not just behind a proxy. This matches `git`/`gh` and is the intended direction (fewer surprises behind corporate networks).\n\nCloses STA-134."
 }
