@@ -53,6 +53,14 @@ above them are reported in no list at all.
   reaping rule. The cost is that a dead stream is recovered by archaeology over state versions
   rather than by reading a tombstone.
 
+- **A worktree path is never stored, anywhere.** A live path is derived from the git worktree
+  list plus the marker. A dead stream's path is not read at all; `stream restore` computes
+  `.stacc/worktrees/<name>` from the name, because it only ever creates stacc-owned worktrees
+  and stacc only ever creates them there. A local sidecar surviving `stream end` was rejected
+  as a third store with a fresh drift class, and a path in the pushed state ref was rejected as
+  a straight reversal of the no-machine-local-paths rule. The cost is that a stream adopted from
+  another tool's directory comes back at the convention path rather than where it died.
+
 - **Membership is closed under descent, as a hard invariant.** A branch's stream is its base's
   stream. No cross-stream edge is representable, which makes `reorder` and `fold` stream-neutral
   by construction and leaves `move` as the only stream-affecting reordering command.
@@ -92,7 +100,8 @@ Four terms carry the design. They are used precisely throughout this document.
 | **Stream** | A named group of branches bound to one linked worktree. Identified by its name. Exists if any branch carries its tag or any worktree marker names it. |
 | **Slice** | What a bulk command operates on: every branch tagged with the current worktree's stream, plus any untagged branch checked out in that worktree. In the main checkout and in any un-adopted linked worktree, the slice is the untagged branches. |
 | **Band** | One stream's region of `stacc log` output. Its own rendering canvas, which is a forest of that stream's trunk-based roots rather than a tree. |
-| **Dead band** | A stream name present in branch tags whose worktree no longer resolves. Rendered distinctly, ended by hand. |
+| **Dead band** | A stream name present in branch tags whose marker no longer resolves. Rendered distinctly, ended by hand. |
+| **Stranded stream** | Tags and marker both present, directory gone (an `rm -rf` rather than a `git worktree remove`, which leaves the entry prunable). Not dead: nothing was untracked and no ref was dropped, so it is repaired rather than torn down. |
 
 A stream may hold several independent trunk-based roots. That is expected, not a corner case,
 and both the renderer and the slice definition have to handle it.
@@ -107,8 +116,9 @@ flowchart TB
   end
   B --> D{"stream X exists?"}
   M --> D
-  D -->|"tags present, marker resolves"| L["live band"]
-  D -->|"tags present, marker gone"| Z["dead band"]
+  D -->|"tags present, marker resolves, directory present"| L["live band"]
+  D -->|"tags present, marker resolves, directory gone"| S["stranded: recreate the directory"]
+  D -->|"tags present, marker gone"| Z["dead band: restore or end"]
   D -->|"no tags, no marker"| N["no stream"]
 ```
 
@@ -136,7 +146,8 @@ flowchart TB
   state ref, so membership travels with the branch.
 - R2. Which worktree hosts a stream is recorded in a marker file in that worktree's private git
   dir, never in the pushed state ref, because machine-local paths must not reach a teammate's
-  clone.
+  clone. No worktree path is stored anywhere: a live path is derived from the git worktree list
+  plus the marker, and a dead stream's path is computed from the name rather than read.
 - R3. A stream's existence is derived from branch tags plus worktree markers. There is no stream
   record and no worktree table.
 - R4. A stream name is explicit and required. Interactive runs prompt with the worktree
@@ -195,8 +206,11 @@ flowchart TB
   name and the configured prefix.
 - R28. stacc locks the worktrees it creates with a reason naming the stream, so `git worktree
   prune` cannot reap a live stream and teardown can tell its own lock from a foreign one.
-- R29. Worktree paths surfaced by any command come from what stacc recorded, never reconstructed
-  from the path convention, because adopted worktrees legitimately live at arbitrary paths.
+- R29. The path of a worktree that still exists is always derived from the git worktree list,
+  never reconstructed from the path convention, because adopted worktrees legitimately live at
+  arbitrary paths. The convention is consulted in exactly one place, `stream restore`'s target
+  for a worktree that no longer exists, where there is nothing to derive from and stacc creates
+  only its own worktrees anyway.
 - R30. `stacc-git` gains worktree add, remove, lock, unlock, read-lock-reason, and pid-liveness
   primitives; today its worktree support is read-only enumeration.
 - R31. stacc documents the harness setting that disables per-session worktree isolation, so the
@@ -299,7 +313,9 @@ flowchart TB
 - R71. Repo settings and disposal receipts rewind wholesale to the target version's values.
 - R72. `undo` refuses a teardown version and names `stacc stream restore <name>`.
 - R73. `stacc stream restore <name>` restores tracking, local refs from the dropped-tip
-  keep-alive refs, and a stacc-created worktree at the recorded path.
+  keep-alive refs, and a stacc-created worktree at `.stacc/worktrees/<name>`, locked and
+  markered like any stream worktree. A stream that was adopted from another tool's directory
+  therefore returns at the convention path, which the receipt reports.
 - R74. Restore never calls the forge. It reports the PRs that stay closed and the remote
   branches that stay deleted, and states that the next `submit` opens fresh PRs.
 - R75. Restore finds a dead stream by walking the state ref backwards for the version its
@@ -307,6 +323,20 @@ flowchart TB
   restoring when the teardown is out of window.
 - R76. Restore checks every branch it would restore against live tags and refuses when a name
   has been reused, because archaeology cannot distinguish a rename from an end plus a create.
+- R130. Restore refuses when the stream name is live again, as its own refusal kind distinct
+  from R76's branch-level lineage conflict, because the stream-level collision fires even when
+  no branch name overlaps and the two remedies differ. The remedy names the live stream and
+  requires ending or renaming it first. R7's immediate reuse of a freed name stands, so the
+  cost is explicit: starting a second session on an issue id forecloses recovering the first
+  without destroying the second.
+- R131. Restore refuses when its target directory exists and is non-empty, naming the path,
+  because `git worktree add` would fail there anyway and a partially created worktree violates
+  R75's all-or-nothing rule.
+- R132. A stranded stream, tags and marker present with the directory gone, is repaired by
+  `stream restore`, which recreates the directory at the still-derivable path and skips the
+  archaeology entirely, so the version retention window does not apply. Treating it as a dead
+  band was rejected: `stream end` would close PRs and drop tracking that are wholly intact,
+  destroying the cheap recovery on the way to the expensive one.
 
 ### Scoping of bulk operations
 
@@ -351,7 +381,9 @@ flowchart TB
   rewrite.
 - R94. The lock warning is liveness-gated, so it appears exactly when teardown would refuse.
 - R95. Dead bands sort last and replace the path with a worktree-gone marker plus the remedy
-  command inline. No cross-worktree glyph appears inside a dead band.
+  command inline. No cross-worktree glyph appears inside a dead band. A stranded stream gets its
+  own header variant carrying `stream restore` as a repair, not the dead band's teardown
+  remedy, since the two states are one `rm -rf` apart and their remedies are opposite.
 - R96. Independent roots inside a band are separated by a blank line, without which two
   trunk-based roots share a column and read as one chain.
 - R97. The forward and reverse renderers take a root list instead of always rooting at trunk,
@@ -390,8 +422,12 @@ flowchart TB
   answer which branches are in a stream.
 - R113. Base provenance is always emitted when known, because it is a three-valued enum whose
   absence would conflate distinct meanings.
-- R114. `stream list` is metadata only and offline: name, recorded path, provenance, state,
-  branch count, current flag, and remaining retention headroom.
+- R114. `stream list` is metadata only and offline: name, provenance, state, branch count,
+  current flag, and remaining retention headroom. `path` is emitted for a live or stranded
+  stream, derived; a dead entry carries `restore_path` instead, the convention path restore
+  would use, so an agent never reconstructs the convention itself. The two keys never appear
+  together, and because the JSON envelope strips nulls, absence is the only spelling of
+  unknown.
 - R115. Every array is ordered deterministically by branch name, so receipt diffs are stable.
 - R116. Exit codes stay binary; the error type remains the branch point.
 
@@ -473,13 +509,25 @@ flowchart TB
 - F5. Restore an ended stream
   - **Trigger:** `stacc stream restore sta-145`.
   - **Actors:** A2
-  - **Steps:** Walk the state ref backwards for the version the teardown removed; refuse if it
-    is outside the retention window; check each branch against live tags and refuse on a reused
-    name; re-tag the branches; resurrect refs from the keep-alive refs; recreate the worktree at
-    the recorded path if stacc created it.
+  - **Steps:** Refuse if the stream name is live again, or if `.stacc/worktrees/sta-145` exists
+    and is non-empty; walk the state ref backwards for the version the teardown removed; refuse
+    if it is outside the retention window; check each branch against live tags and refuse on a
+    reused name; re-tag the branches; resurrect refs from the keep-alive refs; create the
+    worktree at `.stacc/worktrees/sta-145`, locked and markered.
   - **Outcome:** Local work is back; the PRs stay closed and the remote branches stay deleted,
-    both reported.
-  - **Covers R73, R74, R75, R76, R108.**
+    both reported, as is a path that differs from where an adopted stream died.
+  - **Covers R73, R74, R75, R76, R108, R130, R131.**
+
+- F5b. Repair a stranded stream
+  - **Trigger:** `stacc stream restore sta-145` after the worktree directory was deleted with
+    `rm -rf` rather than `stream end`.
+  - **Actors:** A2
+  - **Steps:** See tags and marker both intact, so skip the archaeology entirely; prune the
+    stale git worktree entry; recreate the directory at the path the marker still yields; check
+    out the stream's root branch.
+  - **Outcome:** The band goes from stranded back to live with no state version consumed and no
+    dependence on the retention window.
+  - **Covers R95, R114, R132.**
 
 - F6. Sync from inside a stream
   - **Trigger:** `stacc sync --no-interactive --json` in a stream worktree.
@@ -749,6 +797,15 @@ PR state against `gh`, which matters because bands put PR state on every branch 
   was measured and cut as over-engineering; the value is one command to correct.
 - A stream abandoned but not torn down is restacked by nobody until someone runs the widened
   pass. It surfaces as a dead band carrying its own remedy.
+- Restore is local-only in a stronger sense than the storage rule implies. Only `refs/stacc/data`
+  is pushed (`crates/stacc-state/src/store.rs:256-259`); the dropped-tip keep-alive refs under
+  `refs/stacc/dropped/` are never pushed, so the commits restore depends on do not exist in a
+  fresh clone under any storage choice. Portability was therefore not a discriminator between
+  the path-storage options, and the deciding grounds were store count and drift.
+- The `.stacc/worktrees/<name>` convention becomes load-bearing rather than cosmetic once
+  restore computes from it: changing the root would strand every stream ended before the change.
+  R24's no-knob rule is what keeps that constant, and it is now a compatibility constraint, not
+  only a scope decision.
 
 ---
 
@@ -756,11 +813,6 @@ PR state against `gh`, which matters because bands put PR state on every branch 
 
 ### Resolve before planning
 
-- **Q1. Where a dead stream's worktree path is read from.** The storage rule bars machine-local
-  paths from the pushed state ref and derives live paths from the git worktree list plus the
-  marker, but `stream restore` recreates the worktree at a recorded path and `stream list`
-  reports one, both after the marker is gone. A local sidecar outside the pushed ref is the
-  obvious candidate, but nothing has decided it.
 - **Q2. Whether `init`'s early return leaves old repos without a branch prefix.** `init` returns
   early on an already-initialized repo. Either that path must still resolve and write the
   prefix, or `stream new` needs a read-time derivation for the absent-key case. Hook
