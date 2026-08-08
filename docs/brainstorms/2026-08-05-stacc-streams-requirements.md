@@ -61,9 +61,11 @@ above them are reported in no list at all.
   a straight reversal of the no-machine-local-paths rule. The cost is that a stream adopted from
   another tool's directory comes back at the convention path rather than where it died.
 
-- **Membership is closed under descent, as a hard invariant.** A branch's stream is its base's
-  stream. No cross-stream edge is representable, which makes `reorder` and `fold` stream-neutral
-  by construction and leaves `move` as the only stream-affecting reordering command.
+- **Membership is closed under descent, as a hard invariant.** A tagged branch's stream is its
+  base's stream. No cross-stream edge is representable, which leaves `move` as the only
+  stream-affecting reordering command. One gap is deliberate: a branch created by plain git on a
+  foreign stream's branch is tracked untagged, because the hook cannot refuse, so `reorder` and
+  `fold` refuse a mixed chain rather than being stream-neutral by construction.
 
 - **`stream end` is a full destroy that never half-destroys.** It removes the worktree
   directory, the tags, the PRs, and the branches; every gate runs before any of it, so a refused
@@ -169,18 +171,28 @@ flowchart TB
 
 ### Membership and closure
 
-- R11. A branch's stream is its base's stream, transitively. No branch may have a base in a
-  different stream.
+- R11. A tagged branch's stream is its base's stream, transitively. No branch may carry a stream
+  tag differing from its base's. An untagged branch on a tagged base is the one permitted
+  exception, created by R40 where the hook cannot refuse, and it is never re-tagged by descent.
 - R12. A command may leave a branch's stream tag unchanged from anywhere. If it would change the
   tag, the new tag must equal the current worktree's stream, else the command refuses.
 - R13. Deriving an untagged tag is refused even from an untagged worktree, because leaving a
   stream belongs to `stream eject` alone.
+- R13a. `stream rename` and `stream eject` are the only commands exempt from R12's
+  equal-to-current-worktree test. Rename rewrites every tag and the marker in one state version,
+  is legal only from the stream's own worktree, leaves the worktree directory path unchanged, and
+  refuses on a name that collides per R6.
 - R14. A trunk-based root's tag is set once, at creation, from the worktree it was created in,
   and is never re-derived.
 - R15. `move --onto X` is legal only from X's stream's worktree; `move --onto <trunk>` keeps the
-  tag and is legal from anywhere; `move` onto an untagged base is refused.
-- R16. `reorder` and `fold` need no stream rule, since closure makes the chains they operate on
-  single-stream.
+  tag and is legal from anywhere; `move` onto an untagged base is refused. A stream-changing
+  `move` retags the moved branch and its whole upstack in one state version, since `move`
+  relocates the subtree by default; `--only` leaves the reparented children on their old base and
+  therefore on their old tag.
+- R16. `reorder` and `fold` need no stream rule for tagged chains, since closure makes those
+  single-stream. Both refuse a chain mixing tagged and untagged branches, with a `stream_refused`
+  kind naming the untagged branch and pointing at `stream eject` or a re-tagging `move`, because
+  R40 admits exactly that shape and nothing else repairs it.
 - R17. Automatic reparenting in `sync` and `merge` never changes a tag, so a merged branch's
   children become roots keeping their stream.
 - R18. `stacc stream eject <branch>` untags a branch and its whole subtree, refuses unless the
@@ -252,6 +264,17 @@ flowchart TB
 - R45. The installed hook file is a logic-free shim that fast-exits in non-stacc repos, is
   packed-ref safe, resolves the common dir inside a worktree, and is rewritten unconditionally
   on every `init` so stale shims upgrade.
+- R45a. That unconditional rewrite applies only to a file carrying stacc's authorship marker.
+  Installation refuses when a `reference-transaction` hook exists that stacc did not author,
+  naming the exact path and requiring `--replace-hook` to overwrite, because git has no hook
+  chaining and under a machine-wide `core.hooksPath` the clobbered file is every other
+  repository's hook too.
+- R45b. The shim's trust contract is fixed: it decides "stacc repo" from local repo config only,
+  never from the presence of a fetched `refs/stacc/*` ref, so cloning a hostile repository cannot
+  activate it; it invokes stacc by the absolute path recorded at install time rather than
+  resolving from `PATH`; and it treats ref names arriving on stdin as data, with no shell word
+  splitting and no name reaching a subprocess as an option, consistent with R5's leading-dash
+  guard.
 - R46. Hook installation runs outside `init`'s already-initialized early return, so re-running
   `init` on an existing repo installs or refreshes the hook. That path is a convergence pass,
   not a no-op: it skips only the state-ref repo config, and also writes the branch prefix per
@@ -260,25 +283,33 @@ flowchart TB
 - R48. `stacc untrack` records a branch as excluded, and the backstop honours that exclusion, so
   `untrack` means "and stay out".
 - R49. State records whether a branch was created by stacc or adopted, and which worktree it was
-  first seen in, because git records nothing about where a branch was born.
+  first seen in, because git records nothing about where a branch was born. That worktree is
+  recorded as a stream name or an opaque id, never a filesystem path or any string derived from
+  one, since this field rides in the pushed state ref and R2 bars machine-local paths from it.
 
 ### Teardown
 
 - R50. `stacc stream end <name>` destroys the stream's branches, their PRs, their remote
   branches, the stream tags, the marker, and the worktree directory.
 - R51. Gates run in a fixed order and every gate precedes every write: dirty check, lock check,
-  classification (no writes), block list, review gate, then the adoption write, then the
-  destroy.
+  classification (no writes), block list, review gate, origin gate, then the adoption write,
+  then the destroy.
 - R52. A dirty worktree refuses the whole teardown. Ignored files do not count as dirty;
   untracked non-ignored files do. `--force` discards.
-- R53. A worktree lock held by a live process refuses the whole teardown and names the session;
-  a lock whose pid is dead is reclaimed and teardown proceeds; an unparseable lock reason is
-  assumed live and refuses.
+- R53. The lock check classifies and writes nothing: a lock held by a live process refuses the
+  whole teardown and names the session; a lock whose pid is dead is classified reclaimable and
+  teardown proceeds; an unparseable lock reason is assumed live and refuses. The unlock is itself
+  a write and lands in the destroy phase beside the worktree removal, so a teardown that reclaims
+  and then refuses at a later gate leaves the worktree still locked, and `--dry-run` stays
+  write-free per R66.
 - R54. Two conditions block: a branch descended from stream work but checked out in another
   worktree, and a detached HEAD carrying commits no branch references.
 - R55. Branches with no PR, and PRs that are draft, merged, or already closed, are destroyed
   silently. Anything carrying review activity (an approval, requested changes, or a human review
-  comment) blocks unless `--destroy-reviewed`.
+  comment) blocks unless `--destroy-reviewed`. The comment case needs a forge capability that does
+  not exist today: the current query reads only `reviewDecision`, which is null for a
+  comment-only review, so the review gate needs the PR's individual reviews with their authors
+  plus a human-versus-bot classification.
 - R56. Branches whose origin is outside this stream (they predate it or were first seen in
   another worktree) get their own gate: a human confirms at a prompt naming them, an agent is
   refused and re-runs with `--destroy-outside-origin`.
@@ -290,7 +321,10 @@ flowchart TB
 - R57. Branches born in this stream's worktree do not trip the origin gate, so the ordinary
   agent habit of `git checkout -b` inside a stream is not friction.
 - R58. Untracked strays that stacc can place are adopted into the stream and then destroyed with
-  it; the adoption lands as its own state version after every gate.
+  it; the adoption lands as its own state version after every gate. A stray has no recorded
+  origin, so it always trips R56's origin gate and needs `--destroy-outside-origin`, and both the
+  `--dry-run` plan and the receipt list inferred strays under their own key, held apart from
+  branches that carried the tag.
 - R59. A stray stacc cannot link to the stream is left untouched and unreported, because naming
   it would imply knowledge stacc does not have.
 - R60. `stream end` deletes the remote branch by default, configurable by a git config key, with
@@ -329,7 +363,10 @@ flowchart TB
   branches that stay deleted, and states that the next `submit` opens fresh PRs.
 - R75. Restore finds a dead stream by walking the state ref backwards for the version its
   teardown removed, bounded by the version retention window, and refuses rather than partially
-  restoring when the teardown is out of window.
+  restoring when the teardown is out of window. It then resolves every dropped-tip keep-alive ref
+  that version names before writing anything, and refuses with its own kind naming the
+  unresolvable branches when the shared ref cap has evicted any, because the ref budget and the
+  version window are independent retention limits and passing one says nothing about the other.
 - R76. Restore checks every branch it would restore against live tags and refuses when a name
   has been reused, because archaeology cannot distinguish a rename from an end plus a create.
 - R130. Restore refuses when the stream name is live again, as its own refusal kind distinct
@@ -386,8 +423,8 @@ flowchart TB
 - R92. The band header carries the stream name, its path, and a foreign-lock warning, and does
   not carry a HEAD field, which measured 95 to 152 columns against the 80-column fallback.
 - R93. A glyph marks the branch checked out in this worktree, and a second glyph marks a branch
-  checked out in another stream's worktree, which is exactly the branch a bulk pass cannot
-  rewrite.
+  checked out in any other worktree, a peer stream's, an un-adopted one, or the main checkout,
+  which is exactly the branch a bulk pass cannot rewrite. The band header names the holder.
 - R94. The lock warning is liveness-gated, so it appears exactly when teardown would refuse.
 - R95. Dead bands sort last and replace the path with a worktree-gone marker plus the remedy
   command inline. No cross-worktree glyph appears inside a dead band. A stranded stream gets its
@@ -487,7 +524,7 @@ flowchart TB
     lock the worktree with a stacc reason; track the branch as a trunk-based root tagged
     `sta-145`; write the marker file.
   - **Outcome:** A locked worktree holding exactly one tracked trunk-based branch.
-  - **Covers R20, R21, R22, R27, R28, R33.**
+  - **Covers R14, R20, R21, R22, R27, R28.**
 
 - F2. Adopt a harness-created worktree
   - **Trigger:** `stacc stream new sta-145` inside a linked worktree the harness created.
@@ -507,7 +544,7 @@ flowchart TB
     worktree.
   - **Outcome:** The branch is tracked, tagged, and destroyable by `stream end` without tripping
     the origin gate.
-  - **Covers R33, R34, R35, R38, R39, R49, R57.**
+  - **Covers R11, R33, R34, R35, R38, R39, R49, R57.**
 
 - F4. End a stream
   - **Trigger:** `stacc stream end sta-145 --no-interactive --json` from the main checkout.
@@ -518,7 +555,7 @@ flowchart TB
     version.
   - **Outcome:** A receipt manifest listing each branch, its local ref, remote ref, and PR
     outcome, plus the state version id that makes a retry idempotent.
-  - **Covers R50, R51, R58, R60, R62, R63, R64, R65, R107.**
+  - **Covers R50, R51, R52, R53, R54, R55, R56, R58, R60, R62, R63, R64, R65, R107.**
 
 - F5. Restore an ended stream
   - **Trigger:** `stacc stream restore sta-145`.
@@ -597,7 +634,7 @@ it they share a column and read as one chain, which is the one defect bands intr
 ## Acceptance Examples
 
 - AE1. One override clears one gate
-  - **Covers R55, R56a, R60.**
+  - **Covers R52, R55, R56a, R60.**
   - **Given** `stacc.stream.deleteRemote` is unset, the worktree is dirty, and one branch's PR
     carries an approval.
   - **When** `stacc stream end sta-145 --force --keep-remote` runs.
@@ -618,11 +655,12 @@ it they share a column and read as one chain, which is the one defect bands intr
     `sen-auth`.
   - **Then** the command refuses, because the derived tag would not equal A's stream.
 
-- AE4. Intra-stream `move` from the main checkout
-  - **Covers R12.**
+- AE4. Intra-stream `move` from the stream's own worktree
+  - **Covers R12, R15.**
   - **Given** both branches are tagged `sen-auth`.
-  - **When** `stacc move` runs from the main checkout.
-  - **Then** it succeeds, because the tag does not change.
+  - **When** `stacc move` runs from `sen-auth`'s worktree.
+  - **Then** it succeeds, because the tag does not change and the command runs from the
+    destination stream's worktree, which is what R15 requires of every `move --onto X`.
 
 - AE5. Foreign lock, dead pid
   - **Covers R53, R111.**
@@ -630,6 +668,13 @@ it they share a column and read as one chain, which is the one defect bands intr
   - **When** `stacc stream end` runs.
   - **Then** stacc reclaims the lock, proceeds with the full teardown, and reports the
     reclamation in the notices array.
+
+- AE5a. Dead pid, then a later gate refuses
+  - **Covers R51, R53, R66.**
+  - **Given** the same dead-pid lock, and one branch whose PR carries an approval.
+  - **When** `stacc stream end` runs without `--destroy-reviewed`.
+  - **Then** it refuses at the review gate and the worktree is still locked, because the lock
+    check only classified it and the unlock is a destroy-phase write.
 
 - AE6. Detached HEAD with unreferenced commits
   - **Covers R54.**
@@ -646,7 +691,7 @@ it they share a column and read as one chain, which is the one defect bands intr
     including no adoption version.
 
 - AE8. Peer stream's merged branch
-  - **Covers R81, R82.**
+  - **Covers R80, R81, R82.**
   - **Given** stream B holds a merged branch checked out in B's worktree.
   - **When** `stacc sync --all` runs from stream A.
   - **Then** A keeps B's record rather than dropping it, and reports the branch under the
@@ -673,7 +718,7 @@ it they share a column and read as one chain, which is the one defect bands intr
   - **Then** it refuses and says so, rather than restoring the part it can still see.
 
 - AE12. No streams, no change
-  - **Covers R87, R80.**
+  - **Covers R87, R77.**
   - **Given** a repo where no stream has ever been created.
   - **When** `stacc log` and `stacc restack --stack` run.
   - **Then** output and behaviour are identical to today, since the untagged slice is
@@ -764,6 +809,11 @@ detail: composes with bands rather than colliding, and the expand-only-the-curre
 bounds its cost), STA-160 (remote state-ref divergence), and STA-136 (`stacc log` under-reports
 PR state against `gh`, which matters because bands put PR state on every branch row).
 
+STA-136 is independent only in the sense that the streams design does not depend on it. It must
+still land no later than band rendering: R91 moves PR state onto every branch row, so shipping
+bands first would make the under-reporting visible everywhere at once, in the one place the
+redesign exists to make PR state readable at a glance.
+
 ---
 
 ## Sources and Research
@@ -809,10 +859,12 @@ PR state against `gh`, which matters because bands put PR state on every branch 
   guaranteed, and reopening after a restore was not verified. Nothing here depends on it.
 - The version retention cap is the binding constraint on `stream restore`. A busy parallel repo
   can bury a teardown out of reach, and refusing honestly is the accepted outcome.
-- A stream's own slice has an empty worktree-skip set by construction, but the untagged slice
-  does not, since an un-adopted linked worktree shares it with the main checkout. The skip
-  reporting path is therefore load-bearing rather than a rarely-hit safety net, and this
-  document cannot claim that `sync` never skips.
+- A tagged branch can be checked out in any other worktree, including the main checkout: nothing
+  confines a stream's branches to its own worktree, and R54 blocks teardown on exactly that
+  state. A stream's own slice therefore hits worktree skips too, not only the untagged slice,
+  which an un-adopted linked worktree shares with the main checkout. The skip reporting path is
+  load-bearing rather than a rarely-hit safety net, and this document cannot claim that `sync`
+  never skips.
 - The shipped default branch prefix will be wrong for this repo, since its branches use a
   personal handle that differs from the configured git `user.name`. Branch-convention detection
   was measured and cut as over-engineering; the value is one command to correct.
@@ -834,14 +886,51 @@ PR state against `gh`, which matters because bands put PR state on every branch 
 
 ### Resolve before planning
 
-None. Q1 was retired by STA-171, Q2 and Q3 by STA-172: the first as R121a, the second as R56a
-plus the flag names in R55 and R56.
+Q1 was retired by STA-171 and Q2 and Q3 by STA-172, the first as R121a, the second as R56a plus
+the flag names in R55 and R56. The four below were raised by the adversarial review of this
+document (2026-08-07) and are open. Each would overturn a decision a closed ticket settled on its
+merits, or widen the command surface, so none was folded in unilaterally.
+
+- Q4. **Does the hook install belong in streams v1?** The document itself says the backstop is
+  the correctness mechanism and the hook "buys precision and immediacy," yet R33, R35 to R37, and
+  R44 to R47 stand up an install path with machine-wide consent, rename-pair detection, and a
+  guard variable on every git subprocess. None of the three problems in the Problem Frame names
+  branches created outside stacc as a driver. Splitting the hook into a follow-on and shipping
+  backstop-only tracking would cut the largest single block of requirements here. Against that,
+  Wave 3 already sequences tracking ahead of the stream commands because sticky roots, the repair
+  pass, and the origin gate assume it, and R45a and R45b (both added by this review) would travel
+  with the hook rather than being resolved here.
+
+- Q5. **Does one-flag-per-gate actually hold the line it was chosen to hold?** R101 requires every
+  refusal to name the flag that resolves it, and R56 describes the agent path as refuse-then-retry
+  with the override. So an agent never has to guess `--force`: the tool tells it which flag to
+  add, one round trip per gate, and `--destroy-reviewed` then closes a PR a human approved with no
+  human in the loop. The reflex the always-confirm decision was rejected to avoid may have been
+  reintroduced with a longer command line. Two independent reviewers converged here. The candidate
+  fix is to make the override carry what it authorizes (`--destroy-reviewed <branch>...`, refusing
+  when the reviewed set has changed since the refusal that named those branches) and to state in
+  R127 that this is the one refusal an agent escalates rather than resolves.
+
+- Q6. **Does `stream eject` need an inverse?** R18 ejects only a trunk-based branch and takes its
+  whole subtree; R14 makes a root's tag set-once and never re-derived. So an ejected root can
+  never rejoin any stream, and the only re-entry is `move --onto <a branch in that stream>`, which
+  rebases the work onto unrelated commits instead of returning it as a root. The sanctioned exit
+  from a stream is currently a trapdoor. A `stream adopt <branch>` inverse would fix it at the
+  cost of a seventh command against the six STA-162 settled.
+
+- Q7. **Should anything enumerate ended streams?** An ended stream has no tags and no marker, so
+  by R3 it does not exist and cannot appear in `stream list`, whose states are live, stranded, and
+  dead. Recovery therefore requires remembering the exact name of a destroyed stream, remembering
+  it was ended rather than dead-banded, and guessing whether it is still inside a window that
+  cannot be inspected, while R7 frees the name for reuse and R130 then forecloses recovery
+  entirely. R65's `stream_end` disposal records already hold the enumeration, so a `stream list
+  --ended` mode would need no new store.
 
 ### Deferred to planning
 
-- Whether the origin field records a worktree path, a stream name, or an opaque id. It must
-  distinguish "born in this stream's worktree" from everything else; the encoding is an
-  implementation choice.
+- Whether the origin field records a stream name or an opaque id. It must distinguish "born in
+  this stream's worktree" from everything else; R49 rules out a filesystem path, and the choice
+  between the two remaining encodings is an implementation choice.
 - The cheap guard for the disposal-receipt rewind: re-adding a receipt present live but absent
   in the target version, since a receipt records something that physically happened. Measured as
   narrow (one call site, merged drops only, beyond the fifty-ref cap) and accepted, with the
