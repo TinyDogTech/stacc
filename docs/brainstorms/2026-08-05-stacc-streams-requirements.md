@@ -69,9 +69,11 @@ above them are reported in no list at all.
   directory, the tags, the PRs, and the branches; every gate runs before any of it, so a refused
   teardown leaves the repo byte-identical.
 
-- **Gates block, they never force.** Every gate refuses and hands back a remedy rather than
-  warning and proceeding. Always-confirm was rejected specifically because it trains agents to
-  pass `--force` reflexively, which defeats the gate.
+- **Gates block, they never force, and each has its own override.** Every gate refuses and hands
+  back a remedy rather than warning and proceeding. Always-confirm was rejected specifically
+  because it trains agents to pass `--force` reflexively, which defeats the gate. For the same
+  reason no flag clears more than one gate: `--force` discards uncommitted changes and nothing
+  else, so a reflexive `--force` cannot reach a reviewed PR or an inherited branch.
 
 - **Every branch is tracked unless explicitly excluded.** A `reference-transaction` git hook
   installed by `init` tracks branches as they are created, and an adopt-on-run backstop in every
@@ -251,7 +253,9 @@ flowchart TB
   packed-ref safe, resolves the common dir inside a worktree, and is rewritten unconditionally
   on every `init` so stale shims upgrade.
 - R46. Hook installation runs outside `init`'s already-initialized early return, so re-running
-  `init` on an existing repo installs or refreshes the hook and touches nothing else.
+  `init` on an existing repo installs or refreshes the hook. That path is a convergence pass,
+  not a no-op: it skips only the state-ref repo config, and also writes the branch prefix per
+  R121a.
 - R47. Declining the hook at `init` is the opt-out. The backstop is not opt-outable.
 - R48. `stacc untrack` records a branch as excluded, and the backstop honours that exclusion, so
   `untrack` means "and stay out".
@@ -274,10 +278,15 @@ flowchart TB
   worktree, and a detached HEAD carrying commits no branch references.
 - R55. Branches with no PR, and PRs that are draft, merged, or already closed, are destroyed
   silently. Anything carrying review activity (an approval, requested changes, or a human review
-  comment) blocks unless `--force`.
+  comment) blocks unless `--destroy-reviewed`.
 - R56. Branches whose origin is outside this stream (they predate it or were first seen in
   another worktree) get their own gate: a human confirms at a prompt naming them, an agent is
-  refused and re-runs with an explicit flag.
+  refused and re-runs with `--destroy-outside-origin`.
+- R56a. Each gate has exactly one override and no override clears a second gate: `--force` for
+  the dirty worktree, `--destroy-reviewed` for review activity, `--destroy-outside-origin` for
+  outside origin. The two block conditions in R54 have no override at all. Every flag is
+  verb-object and names the consequence accepted rather than the check suppressed, so a refusal
+  can name the single flag that resolves it per R101.
 - R57. Branches born in this stream's worktree do not trip the origin gate, so the ordinary
   agent habit of `git checkout -b` inside a stream is not friction.
 - R58. Untracked strays that stacc can place are adopted into the stream and then destroyed with
@@ -285,8 +294,8 @@ flowchart TB
 - R59. A stray stacc cannot link to the stream is left untouched and unreported, because naming
   it would imply knowledge stacc does not have.
 - R60. `stream end` deletes the remote branch by default, configurable by a git config key, with
-  `--keep-remote` and `--delete-remote` flags. `--force` implies deletion; an explicit
-  `--keep-remote` beats `--force`.
+  `--keep-remote` and `--delete-remote` flags. Nothing else implies deletion, so resolution is
+  flags, then `stacc.stream.deleteRemote`, then delete, and there is no flag-precedence rule.
 - R61. A non-boolean value in that config key downgrades to keeping the remote and warns naming
   the key. Absent config deletes, broken config keeps.
 - R62. Teardown does forge work first: PRs are closed before their remote branches are deleted,
@@ -444,6 +453,11 @@ flowchart TB
 - R121. `stacc init` resolves the prefix once and writes it: prompting pre-filled where there is
   a tty, writing the slugified git `user.name` silently otherwise, and writing nothing when
   `user.name` is unset.
+- R121a. `init` writes the prefix on the already-initialized path too, when and only when the
+  key is absent, so a repo inited before this feature converges rather than depending on the
+  arbitrary date it was set up. `stream new` needs no read-time derivation: an absent key is
+  well-defined by R119. The write is safe to make unasked because the key is personal git
+  config, local and unpushed per R122, and R126 reports the resolved value.
 - R122. Personal config lives in git config under `stacc.*`, and the precedence chain becomes
   flags, then git config, then the repo TOML file, then detection.
 - R123. The repo TOML file keeps a narrowed role as the committed team-convention file and now
@@ -582,12 +596,14 @@ it they share a column and read as one chain, which is the one defect bands intr
 
 ## Acceptance Examples
 
-- AE1. Remote kept despite `--force`
-  - **Covers R60.**
-  - **Given** `stacc.stream.deleteRemote` is unset.
+- AE1. One override clears one gate
+  - **Covers R55, R56a, R60.**
+  - **Given** `stacc.stream.deleteRemote` is unset, the worktree is dirty, and one branch's PR
+    carries an approval.
   - **When** `stacc stream end sta-145 --force --keep-remote` runs.
-  - **Then** the review gate is bypassed and the remote branches survive, because an explicit
-    flag beats an implication.
+  - **Then** the teardown still refuses, naming the approved branch and `--destroy-reviewed`,
+    because `--force` clears the dirty gate only. Nothing is written, and the `--keep-remote`
+    flag is moot on a refusal rather than overridden.
 
 - AE2. Broken config downgrades
   - **Covers R61.**
@@ -784,6 +800,11 @@ PR state against `gh`, which matters because bands put PR state on every branch 
 
 ## Assumptions
 
+- `--force` was already accreting gates before it was noticed. This document shipped it
+  covering the dirty worktree, the review gate, and remote deletion, three unrelated
+  consequences, which is the reflex-trained catch-all the always-confirm decision was rejected
+  to avoid. The one-flag-per-gate rule assumes flag count is the cheaper cost, so a forced
+  teardown may legitimately need three flags on one command line.
 - Restoring a deleted head branch from a closed PR through the forge UI is likely but not
   guaranteed, and reopening after a restore was not verified. Nothing here depends on it.
 - The version retention cap is the binding constraint on `stream restore`. A busy parallel repo
@@ -813,13 +834,8 @@ PR state against `gh`, which matters because bands put PR state on every branch 
 
 ### Resolve before planning
 
-- **Q2. Whether `init`'s early return leaves old repos without a branch prefix.** `init` returns
-  early on an already-initialized repo. Either that path must still resolve and write the
-  prefix, or `stream new` needs a read-time derivation for the absent-key case. Hook
-  installation already moves outside that early return, so the two answers should be consistent.
-- **Q3. The final spelling of the stray-adoption flag on `stream end`.** Provisionally
-  `--adopt-untracked`, and deliberately not `--force`, which means discarding uncommitted
-  changes only.
+None. Q1 was retired by STA-171, Q2 and Q3 by STA-172: the first as R121a, the second as R56a
+plus the flag names in R55 and R56.
 
 ### Deferred to planning
 
