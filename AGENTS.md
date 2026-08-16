@@ -75,6 +75,29 @@ This project doubles as a way to learn Rust. When you make changes:
 - Go reference implementation (git-spice) lives at `../git-spice/`, a sibling of
   this repo.
 
+### Issue tracker
+
+Linear, workspace **tiny-dog-tech**, team **STA**. Every ticket is an `STA-<n>`
+issue; branches are `jillian/sta-<n>-<slug>` so the PR auto-links. Drive it with
+the Linear MCP tools (or `/b-linear-cli`); there is no local issue file.
+
+## Wayfinding operations (Linear)
+
+- **Map**: a Linear issue labelled `wayfinder:map`.
+- **Tickets**: native **sub-issues** of the map issue, each labelled
+  `wayfinder:<type>` (`research`, `prototype`, `grilling`, or `task`).
+- **Blocking**: Linear's native **blocking** relationship ("blocked by" /
+  "blocks"), which renders the frontier visually in the Linear UI.
+- **Frontier**: the map's open sub-issues that have no open "blocked by"
+  relations and no assignee.
+- **Claim**: assign the ticket to the driving dev; the assignee is the claim.
+- **Resolution**: post the answer as a comment, close the issue, and add the
+  one-line gist to the map issue's Decisions-so-far.
+
+The `wayfinder:*` labels are team-scoped to STA and already exist; do not
+recreate them at workspace scope, where they collide with the Sendsei team's
+copies.
+
 ## Using stacc as an agent
 
 ### 1. Invocation rule
