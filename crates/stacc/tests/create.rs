@@ -60,13 +60,64 @@ fn init_repo() -> TempDir {
 }
 
 #[test]
+fn create_help_explains_explicit_commit_intent() {
+    let tmp = TempDir::new().expect("temp dir");
+    let out = stacc(tmp.path(), &["create", "--help"]);
+    assert!(out.status.success());
+    let help = String::from_utf8_lossy(&out.stdout);
+    let help = help.split_whitespace().collect::<Vec<_>>().join(" ");
+    for expected in [
+        "Without --message or --all, no commit is made",
+        "staged and unstaged changes are preserved",
+        "git diff --cached",
+        "--message commits the entire current index",
+    ] {
+        assert!(help.contains(expected), "missing {expected:?}: {help}");
+    }
+}
+
+#[test]
+fn create_preserves_pre_existing_index_and_unstaged_edits() {
+    let tmp = init_repo();
+    let p = tmp.path();
+    for file in ["docs.txt", "delete-a.txt", "delete-b.txt"] {
+        std::fs::write(p.join(file), "original\n").expect("write");
+    }
+    run_git(p, &["add", "."]);
+    run_git(p, &["commit", "-q", "-m", "base files"]);
+    std::fs::write(p.join("docs.txt"), "staged\n").expect("write");
+    run_git(p, &["add", "docs.txt"]);
+    run_git(p, &["rm", "delete-a.txt", "delete-b.txt"]);
+    let staged_tree = git_out(p, &["write-tree"]);
+    let head = git_out(p, &["rev-parse", "HEAD"]);
+    std::fs::write(p.join("docs.txt"), "unstaged\n").expect("write");
+    std::fs::write(p.join("new.txt"), "untracked\n").expect("write");
+
+    let out = stacc(p, &["create", "index-only", "--no-interactive", "--json"]);
+    assert!(out.status.success(), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stdout).contains(r#""committed":false"#));
+    assert_eq!(git_out(p, &["write-tree"]), staged_tree);
+    assert_eq!(git_out(p, &["rev-parse", "HEAD"]), head);
+    assert_eq!(current_branch(p), "index-only");
+    assert_eq!(
+        std::fs::read_to_string(p.join("docs.txt")).expect("read"),
+        "unstaged\n"
+    );
+    assert_eq!(
+        git_out(p, &["status", "--porcelain"]),
+        "D  delete-a.txt\nD  delete-b.txt\nMM docs.txt\n?? new.txt"
+    );
+}
+
+#[test]
 fn create_with_staged_changes_commits_and_tracks() {
     let tmp = init_repo();
     let p = tmp.path();
     std::fs::write(p.join("f.txt"), "hi\n").expect("write");
     run_git(p, &["add", "f.txt"]);
 
-    let out = stacc(p, &["create", "feat-x", "--json"]);
+    std::fs::write(p.join("f.txt"), "unstaged\n").expect("write");
+    let out = stacc(p, &["create", "feat-x", "-m", "explicit message", "--json"]);
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -78,11 +129,13 @@ fn create_with_staged_changes_commits_and_tracks() {
     assert!(s.contains(r#""committed":true"#), "got: {s}");
 
     // Switched to the new branch, the staged file is committed, index is clean,
-    // and the default commit message is the branch name.
+    // and the explicit commit message is used.
     assert_eq!(current_branch(p), "feat-x");
     assert!(git_ok(p, &["cat-file", "-e", "HEAD:f.txt"]));
     assert!(git_ok(p, &["diff", "--cached", "--quiet"]));
-    assert_eq!(git_out(p, &["log", "-1", "--format=%s"]), "feat-x");
+    assert_eq!(git_out(p, &["log", "-1", "--format=%s"]), "explicit message");
+    assert_eq!(git_out(p, &["show", "HEAD:f.txt"]), "hi");
+    assert_eq!(std::fs::read_to_string(p.join("f.txt")).unwrap(), "unstaged\n");
     let head = git_out(p, &["rev-parse", "HEAD"]);
     assert!(s.contains(&format!(r#""sha":"{head}""#)), "got: {s}");
 
@@ -223,7 +276,7 @@ fn create_all_stages_tracked_and_untracked_changes() {
     std::fs::write(p.join("tracked.txt"), "v2\n").expect("write");
     std::fs::write(p.join("new.txt"), "new\n").expect("write");
 
-    let out = stacc(p, &["create", "feat-all", "--all", "-m", "all work", "--json"]);
+    let out = stacc(p, &["create", "feat-all", "--all", "--json"]);
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -232,6 +285,7 @@ fn create_all_stages_tracked_and_untracked_changes() {
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains(r#""committed":true"#), "got: {s}");
     assert_eq!(current_branch(p), "feat-all");
+    assert_eq!(git_out(p, &["log", "-1", "--format=%s"]), "feat-all");
     // Both the modification and the untracked file are in the commit, and the
     // working tree is clean afterwards.
     assert_eq!(git_out(p, &["show", "HEAD:tracked.txt"]), "v2");
@@ -333,6 +387,66 @@ fn create_onto_bases_on_the_named_branch() {
         "got: {}",
         String::from_utf8_lossy(&parent.stdout)
     );
+}
+
+#[test]
+fn create_insert_without_commit_refuses_dirty_worktree_before_mutating() {
+    for staged in [false, true] {
+        let tmp = init_repo();
+        let p = tmp.path();
+        std::fs::write(p.join("pending.txt"), "original\n").unwrap();
+        run_git(p, &["add", "."]);
+        run_git(p, &["commit", "-q", "-m", "base"]);
+        std::fs::write(p.join("child.txt"), "child\n").unwrap();
+        run_git(p, &["add", "."]);
+        assert!(stacc(p, &["create", "child", "-m", "child"]).status.success());
+        run_git(p, &["checkout", "-q", "main"]);
+        std::fs::write(p.join("pending.txt"), "pending\n").unwrap();
+        if staged {
+            run_git(p, &["add", "pending.txt"]);
+        }
+        let index = git_out(p, &["write-tree"]);
+        let status = git_out(p, &["status", "--porcelain"]);
+        let before = stacc(p, &["log", "short", "--json"]);
+        let out = stacc(p, &["create", "inserted", "--insert", "--json"]);
+        assert!(!out.status.success(), "{out:?}");
+        assert!(String::from_utf8_lossy(&out.stdout).contains("clean worktree"));
+        assert_eq!(current_branch(p), "main");
+        assert!(!git_ok(p, &["show-ref", "--verify", "refs/heads/inserted"]));
+        assert_eq!(git_out(p, &["write-tree"]), index);
+        assert_eq!(git_out(p, &["status", "--porcelain"]), status);
+        let after = stacc(p, &["log", "short", "--json"]);
+        assert_eq!(after.stdout, before.stdout);
+    }
+}
+
+#[test]
+fn create_onto_preserves_staged_work_or_refuses_conflicting_checkout() {
+    for conflicting in [false, true] {
+        let tmp = init_repo();
+        let p = tmp.path();
+        std::fs::write(p.join("a.txt"), "a\n").unwrap();
+        run_git(p, &["add", "."]);
+        assert!(stacc(p, &["create", "a", "-m", "a"]).status.success());
+        let file = if conflicting { "a.txt" } else { "pending.txt" };
+        std::fs::write(p.join(file), "pending\n").unwrap();
+        run_git(p, &["add", file]);
+        let diff = git_out(p, &["diff", "--cached"]);
+        let out = stacc(p, &["create", "b", "--onto", "main", "--json"]);
+        assert_eq!(out.status.success(), !conflicting, "{out:?}");
+        assert_eq!(git_out(p, &["diff", "--cached"]), diff);
+        if conflicting {
+            assert_eq!(current_branch(p), "a");
+            assert!(!git_ok(p, &["show-ref", "--verify", "refs/heads/b"]));
+        } else {
+            assert_eq!(current_branch(p), "b");
+            assert_eq!(
+                git_out(p, &["rev-parse", "HEAD"]),
+                git_out(p, &["rev-parse", "main"])
+            );
+            assert!(String::from_utf8_lossy(&out.stdout).contains(r#""committed":false"#));
+        }
+    }
 }
 
 #[test]

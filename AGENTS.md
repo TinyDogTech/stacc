@@ -53,6 +53,14 @@ This project doubles as a way to learn Rust. When you make changes:
   branch, commit the staged changes, and track it in one step. Fold follow-up
   edits in with `stacc modify` (amends the tip) or `stacc modify --commit` (adds
   a commit). The branch name must match the Linear branch so the PR auto-links.
+- **Check the index before create:** run `git status` and `git diff --cached`.
+  Bare `stacc create <branch>` preserves staged and unstaged changes without
+  committing. `-m` opts into committing the entire current index, including
+  pre-existing staged changes; `--all` opts into staging and committing all
+  changes (default message: branch name). Do not commit someone else's staged
+  work. No empty marker commit is created. Branch-only `--insert` rejects
+  tracked changes when children exist; do not stash another owner's work
+  without approval.
 - **Submit:** `stacc submit --no-interactive --json` pushes the current branch's
   full downstack and creates or updates its PRs. Idempotent: re-submitting an
   unchanged branch is a no-op on the remote.

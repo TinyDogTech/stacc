@@ -77,10 +77,27 @@ stacc init
 Stage a change and create a branch for it. stacc commits the staged work and
 stacks the new branch on the current one:
 
+**Committing is explicit:** bare `stacc create <branch>` creates and tracks the
+branch without a commit, preserving staged and unstaged work. Pass `-m` /
+`--message` to commit the entire current index, including pre-existing staged
+changes. Check it first. Unstaged edits and untracked files are excluded unless
+you pass `--all`, which also opts into committing (default message: branch name).
+
 ```sh
-git add -A
+git status
+git diff --cached
+git add <intended-paths>
+git diff --cached
 stacc create add-user-api -m "feat: add the user API"
 ```
+
+If you only want a new tracked branch, omit `--message` and `--all`; there is no
+need to unstage anything. An empty index never produces an empty marker commit.
+Branch-only `--insert` rejects staged or unstaged tracked changes when children
+exist; stash your work first. `--onto` uses Git's normal checkout safety checks.
+
+Previously, bare `create` committed staged changes using the branch name. Scripts
+that relied on that behavior must now pass `-m "<message>"` explicitly.
 
 Open a pull request:
 

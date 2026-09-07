@@ -7,6 +7,15 @@ call. Read stdout directly -- no Python, no `jq`, no pipeline post-processing.
 JSON output is one compact line. Nulls and empty arrays are stripped automatically;
 absent keys mean null/empty.
 
+Bare `stacc create <branch>` preserves staged and unstaged work without making
+a commit. Pass `--message` to commit the entire index, including pre-existing
+staged changes, or `--all` to stage and commit all changes (default message:
+branch name). Check `git status` and `git diff --cached` before opting in; never
+commit another owner's staged work. Scripts relying on implicit commits must
+now pass `--message`. No empty marker commit is created. Branch-only `--insert`
+rejects staged or unstaged tracked changes when children exist; do not stash
+another owner's work without approval.
+
 ### 2. Error channel
 
 With `--json`: success output and error JSON both go to stdout; stderr is
