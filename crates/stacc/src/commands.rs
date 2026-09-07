@@ -240,10 +240,11 @@ pub fn untrack(args: &UntrackArgs, format: OutputFormat, work_dir: &Path) -> Res
 }
 
 /// `stacc create`: create a new branch stacked on the current one (or on
-/// `--onto <branch>`), commit any staged changes (`--all` stages everything
-/// first), and track it. `--insert` splices the new branch between the current
-/// branch and its existing children, reparenting and restacking them. Refuses
-/// only on a detached HEAD (unless `--onto` names the base explicitly).
+/// `--onto <branch>`), and track it. Commit staged changes only with `--message`
+/// or `--all` (which stages everything first). `--insert` splices the new branch
+/// between the current branch and its existing children, reparenting and
+/// restacking them. Refuses a detached HEAD unless `--onto` names the base
+/// explicitly, and dirty branch-only inserts that require restacking.
 // A cohesive validate -> branch -> track -> commit -> (insert-restack) -> report
 // sequence; splitting it would only trade this lint for too_many_arguments.
 #[allow(clippy::too_many_lines)]
@@ -289,12 +290,18 @@ pub fn create(args: &CreateArgs, format: OutputFormat, work_dir: &Path) -> Resul
 
     // --insert: the base's existing children move onto the new branch. Capture
     // them and fail fast on a worktree conflict BEFORE mutating anything.
+    let commit_requested = args.message.is_some() || args.all;
     let children = if args.insert {
         ops::children(&state.branches, &base)
     } else {
         Vec::new()
     };
     if !children.is_empty() {
+        if !commit_requested && (git.has_staged_changes()? || git.has_uncommitted_changes()?) {
+            return Err(Error::Usage(
+                "cannot create --insert with uncommitted changes without --message or --all: restacking children requires a clean worktree; stash your changes first, or explicitly request a commit".into(),
+            ));
+        }
         let subtrees: Vec<String> = ops::upstack_order(&state.branches, &base)
             .into_iter()
             .skip(1)
@@ -363,7 +370,7 @@ pub fn create(args: &CreateArgs, format: OutputFormat, work_dir: &Path) -> Resul
     );
     apply_insert(&mut state);
 
-    let (committed, sha) = if git.has_staged_changes()? {
+    let (committed, sha) = if commit_requested && git.has_staged_changes()? {
         let message = args.message.clone().unwrap_or_else(|| args.name.clone());
         git.commit(&message)?;
         (true, Some(git.rev_parse("HEAD")?))

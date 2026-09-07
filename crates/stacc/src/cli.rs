@@ -102,7 +102,16 @@ pub enum Command {
     Config(ConfigArgs),
     /// Resume the operation interrupted by a conflict, after resolving it.
     Continue,
-    /// Create a new branch stacked on the current one and track it.
+    /// Create and track a stacked branch; commit only with --message or --all.
+    ///
+    /// Without --message or --all, no commit is made: staged and unstaged changes
+    /// are preserved. --message commits the entire current index, including
+    /// pre-existing staged changes. Check `git status` and `git diff --cached`
+    /// before requesting a commit to avoid including unrelated or sensitive work.
+    ///
+    /// --all stages and commits changes, using the branch name as the message
+    /// unless --message is supplied. An empty index never creates an empty commit.
+    /// Branch-only --insert rejects tracked changes when children exist.
     Create(CreateArgs),
     /// Delete a branch and its metadata, reparenting and restacking its children onto its base.
     Delete(DeleteArgs),
@@ -292,7 +301,7 @@ pub struct UntrackArgs {
 pub struct CreateArgs {
     /// Name of the new branch.
     pub name: String,
-    /// Commit message for staged changes (defaults to the branch name).
+    /// Commit staged changes with this message (otherwise branch-only unless --all).
     #[arg(long, short)]
     pub message: Option<String>,
     /// Stage all changes, tracked and untracked (`git add -A`), before the
@@ -741,4 +750,3 @@ mod tests {
         );
     }
 }
-
