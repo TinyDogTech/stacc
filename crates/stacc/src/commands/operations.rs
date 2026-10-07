@@ -3732,11 +3732,26 @@ fn fast_forward_trunk(git: &Git, remote: &str, trunk: &str) -> Result<(), Error>
     let remote_tip = git.rev_parse(&format!("{remote}/{trunk}"))?;
     let local_tip = git.rev_parse(trunk)?;
     if local_tip != remote_tip && git.is_ancestor(&local_tip, &remote_tip)? {
-        git.update_ref(
-            &format!("refs/heads/{trunk}"),
-            &remote_tip,
-            Some(local_tip.as_str()),
-        )?;
+        if let Some(worktree) = git
+            .worktrees()?
+            .into_iter()
+            .find(|wt| wt.branch.as_deref() == Some(trunk))
+        {
+            let owner = Git::open(&worktree.path);
+            if owner.current_branch()? != trunk || owner.has_uncommitted_changes()? {
+                return Err(Error::Usage(format!(
+                    "cannot fast-forward `{trunk}` in {}: worktree is dirty or no longer on trunk",
+                    worktree.path.display()
+                )));
+            }
+            owner.merge_ff_only(&remote_tip)?;
+        } else {
+            git.update_ref(
+                &format!("refs/heads/{trunk}"),
+                &remote_tip,
+                Some(local_tip.as_str()),
+            )?;
+        }
     }
     Ok(())
 }

@@ -544,6 +544,12 @@ impl Git {
         }
     }
 
+    /// Fast-forward the checked-out branch and its worktree to `target`.
+    /// Git refuses non-fast-forwards and updates the index and files together.
+    pub fn merge_ff_only(&self, target: &str) -> Result<(), GitError> {
+        self.run(&["merge", "--ff-only", target]).map(|_| ())
+    }
+
     /// Reset the current branch, `HEAD`, and the working tree to `target`
     /// (`git reset --hard`). Discards tracked-file changes, so a caller that must
     /// not lose them checks [`has_uncommitted_changes`] first.

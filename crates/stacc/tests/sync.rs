@@ -156,6 +156,68 @@ fn online_repo() -> (TempDir, TempDir) {
     (tmp, bare)
 }
 
+#[test]
+fn sync_fast_forwards_the_trunk_worktree_without_losing_local_changes() {
+    let (tmp, bare) = online_repo();
+    let main = tmp.path();
+    commit_file(main, "trunk.txt", "old\n", "old trunk");
+    run_git(main, &["push", "-q", "origin", "main"]);
+    let old_tip = git_out(main, &["rev-parse", "main"]);
+
+    run_git(main, &["branch", "feature"]);
+    let linked = TempDir::new().unwrap();
+    run_git(
+        main,
+        &["worktree", "add", "-q", linked.path().to_str().unwrap(), "feature"],
+    );
+    commit_file(linked.path(), "feature.txt", "feature\n", "feature work");
+    assert!(stacc(linked.path(), &["track"]).status.success());
+
+    let writer = TempDir::new().unwrap();
+    run_git(writer.path(), &["clone", "-q", bare.path().to_str().unwrap(), "."]);
+    run_git(writer.path(), &["config", "user.name", "Test"]);
+    run_git(writer.path(), &["config", "user.email", "test@example.com"]);
+    commit_file(writer.path(), "trunk.txt", "new\n", "advance trunk");
+    run_git(writer.path(), &["push", "-q", "origin", "main"]);
+    let new_tip = git_out(writer.path(), &["rev-parse", "HEAD"]);
+
+    write(main, "trunk.txt", "local edit\n");
+    run_git(main, &["add", "trunk.txt"]);
+    let out = stacc(linked.path(), &["sync", "--no-interactive", "--json"]);
+    assert!(
+        !out.status.success(),
+        "sync unexpectedly succeeded: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let response: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(response["type"], "usage", "{response}");
+    assert!(
+        response["message"]
+            .as_str()
+            .unwrap()
+            .contains(&main.display().to_string()),
+        "{response}"
+    );
+    assert_eq!(git_out(main, &["rev-parse", "main"]), old_tip);
+    assert_eq!(git_out(main, &["rev-parse", "origin/main"]), new_tip);
+    assert_eq!(git_out(main, &["status", "--porcelain"]), "M  trunk.txt");
+    assert_eq!(std::fs::read_to_string(main.join("trunk.txt")).unwrap(), "local edit\n");
+
+    run_git(
+        main,
+        &["restore", "--source=HEAD", "--staged", "--worktree", "--", "trunk.txt"],
+    );
+    let retry = stacc(linked.path(), &["sync", "--no-interactive", "--json"]);
+    assert!(
+        retry.status.success(),
+        "sync with clean trunk failed: {}",
+        String::from_utf8_lossy(&retry.stdout)
+    );
+    assert_eq!(git_out(main, &["rev-parse", "main"]), new_tip);
+    assert_eq!(git_out(main, &["status", "--porcelain"]), "");
+    assert_eq!(std::fs::read_to_string(main.join("trunk.txt")).unwrap(), "new\n");
+}
+
 fn show(dir: &std::path::Path, spec: &str) -> Output {
     Command::new("git")
         .arg("-C")
