@@ -615,6 +615,27 @@ fn submit_title_flag_sends_custom_title() {
 }
 
 #[test]
+fn submit_title_flag_updates_existing_pr() {
+    let (tmp, _bare) = setup();
+    seed_submitted_feature(tmp.path(), 75, None, "Commit subject");
+
+    let server = MockServer::start();
+    let mock = server.mock(|when, then| {
+        when.method(httpmock::Method::PATCH)
+            .path("/repos/TinyDogTech/stacc/pulls/75")
+            .body(r#"{"title":"New PR Title","base":"main"}"#);
+        then.status(200).json_body(pr_body(75));
+    });
+    let out = stacc_env(
+        tmp.path(),
+        &["submit", "--title", "New PR Title", "--json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(out.status.success(), "stdout: {}", String::from_utf8_lossy(&out.stdout));
+    mock.assert();
+}
+
+#[test]
 fn submit_title_persists_to_state() {
     let (tmp, _bare) = setup();
     assert!(stacc(tmp.path(), &["init"]).status.success());
@@ -647,7 +668,7 @@ fn submit_title_persists_to_state() {
 }
 
 #[test]
-fn submit_persisted_title_survives_resubmit() {
+fn submit_persisted_title_does_not_override_manual_edits_on_resubmit() {
     let (tmp, _bare) = setup();
     assert!(stacc(tmp.path(), &["init"]).status.success());
     run_git(tmp.path(), &["checkout", "-q", "-b", "feature"]);
@@ -657,14 +678,15 @@ fn submit_persisted_title_survives_resubmit() {
     let server = MockServer::start();
     server.mock(|when, then| {
         when.method(httpmock::Method::POST)
-            .path("/repos/TinyDogTech/stacc/pulls");
+            .path("/repos/TinyDogTech/stacc/pulls")
+            .body_contains(r#""title":"Stored Title""#);
         then.status(201).json_body(pr_body(72));
     });
-    // The re-submit update must carry the stored title, not the commit subject.
+    // A stored title is used for creation, but later manual title edits must survive.
     let resubmit_mock = server.mock(|when, then| {
         when.method(httpmock::Method::PATCH)
             .path("/repos/TinyDogTech/stacc/pulls/72")
-            .body_contains(r#""title":"Stored Title""#);
+            .body(r#"{"base":"main"}"#);
         then.status(200).json_body(pr_body(72));
     });
 
@@ -676,7 +698,7 @@ fn submit_persisted_title_survives_resubmit() {
     );
     assert!(out.status.success(), "first submit stderr: {}", String::from_utf8_lossy(&out.stderr));
 
-    // Second submit: no --title flag; stored title must be used.
+    // Second submit: no --title flag; the remote title must be left untouched.
     let out = stacc_env(
         tmp.path(),
         &["submit", "--json"],
@@ -913,6 +935,30 @@ fn submit_description_flag_bypasses_reflow() {
     mock.assert();
 }
 
+#[test]
+fn submit_description_file_preserves_existing_pr_title() {
+    let (tmp, _bare) = setup();
+    seed_submitted_feature(tmp.path(), 89, None, "docs: update repository and Kev runbooks");
+    let description = tmp.path().join("pr-description.md");
+    std::fs::write(&description, "New PR description\n").unwrap();
+
+    let server = MockServer::start();
+    let mock = server.mock(|when, then| {
+        when.method(httpmock::Method::PATCH)
+            .path("/repos/TinyDogTech/stacc/pulls/89")
+            .body(r#"{"body":"New PR description\n","base":"main"}"#);
+        then.status(200).json_body(pr_body(89));
+    });
+    let file_arg = format!("@{}", description.display());
+    let out = stacc_env(
+        tmp.path(),
+        &["submit", "--description", &file_arg, "--no-interactive", "--json"],
+        &[("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", &server.base_url())],
+    );
+    assert!(out.status.success(), "stdout: {}", String::from_utf8_lossy(&out.stdout));
+    mock.assert();
+}
+
 // STA-121: re-submit without --description and no stored_desc must omit the body
 // field in the PATCH so GitHub preserves any manual PR body edits.
 
@@ -940,12 +986,11 @@ fn submit_resubmit_without_description_omits_body_in_patch() {
     assert!(out.status.success(), "first submit stderr: {}", String::from_utf8_lossy(&out.stderr));
 
     // Second submit: UPDATE. No --description, no stored_desc.
-    // The PATCH body must be exactly {"title":"Preserve body test","base":"main"}
-    // -- the "body" key must be absent so the manual PR body is not overwritten.
+    // Neither title nor body is requested, so both manual PR edits survive.
     let resubmit_mock = server.mock(|when, then| {
         when.method(httpmock::Method::PATCH)
             .path("/repos/TinyDogTech/stacc/pulls/90")
-            .body(r#"{"title":"Preserve body test","base":"main"}"#);
+            .body(r#"{"base":"main"}"#);
         then.status(200).json_body(pr_body(90));
     });
 
@@ -1072,7 +1117,7 @@ fn submit_update_body_is_one_shot_and_clears_stored_description() {
     let plain_mock = server.mock(|when, then| {
         when.method(httpmock::Method::PATCH)
             .path("/repos/TinyDogTech/stacc/pulls/42")
-            .body(r#"{"title":"Refresh me","base":"main"}"#);
+            .body(r#"{"base":"main"}"#);
         then.status(200).json_body(pr_body(42));
     });
 
@@ -1121,7 +1166,7 @@ fn submit_description_takes_precedence_over_update_body() {
     let mock = server.mock(|when, then| {
         when.method(httpmock::Method::PATCH)
             .path("/repos/TinyDogTech/stacc/pulls/43")
-            .body(r#"{"title":"Add feature","body":"Explicit description","base":"main"}"#);
+            .body(r#"{"body":"Explicit description","base":"main"}"#);
         then.status(200).json_body(pr_body(43));
     });
 
@@ -1189,7 +1234,7 @@ fn submit_update_body_skips_an_empty_commit_body() {
     let mock = server.mock(|when, then| {
         when.method(httpmock::Method::PATCH)
             .path("/repos/TinyDogTech/stacc/pulls/45")
-            .body(r#"{"title":"Subject only","base":"main"}"#);
+            .body(r#"{"base":"main"}"#);
         then.status(200).json_body(pr_body(45));
     });
 
@@ -1302,7 +1347,7 @@ fn submit_update_body_applies_to_current_branch_only() {
     let f1_untouched = server.mock(|when, then| {
         when.method(httpmock::Method::PATCH)
             .path("/repos/TinyDogTech/stacc/pulls/51")
-            .body(r#"{"title":"f1","base":"main"}"#);
+            .body(r#"{"base":"main"}"#);
         then.status(200).json_body(pr_body(51));
     });
 

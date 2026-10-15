@@ -696,8 +696,8 @@ pub fn submit(args: &SubmitArgs, format: OutputFormat, work_dir: &Path) -> Resul
     // The PR records to write back, applied together in one transactional update
     // after the network work so a concurrent change to another branch survives.
     let mut pr_updates: Vec<(String, PullRequest)> = Vec::new();
-    // Caller-supplied title/description for the current branch, to persist in
-    // state so re-submits reuse them without repeating the flags.
+    // Caller-supplied title/description for the current branch, persisted for
+    // future PR creation or body updates. Title updates require --title again.
     let mut title_update: Option<(String, String)> = None;
     let mut desc_update: Option<(String, String)> = None;
     // Branch whose stored description `--update-body` refreshed; cleared in state
@@ -739,7 +739,8 @@ pub fn submit(args: &SubmitArgs, format: OutputFormat, work_dir: &Path) -> Resul
 
         git.push_force_with_lease(&repo.remote, branch)?;
 
-        // Title: --title (current branch only) > stored pr_title > commit subject.
+        // Create title: --title (current branch only) > stored pr_title > commit subject.
+        // Updates only send an explicitly requested --title, preserving manual edits.
         // Description: --description (current branch only) > stored pr_description > commit body.
         let title = if is_current {
             match &args.title {
@@ -803,7 +804,7 @@ pub fn submit(args: &SubmitArgs, format: OutputFormat, work_dir: &Path) -> Resul
                 &repo_name,
                 number,
                 &PullRequestUpdate {
-                    title: Some(title),
+                    title: if is_current { args.title.clone() } else { None },
                     body: update_body,
                     base: Some(base),
                 },

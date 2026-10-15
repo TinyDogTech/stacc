@@ -36,8 +36,9 @@ pub struct BranchState {
     pub base: Base,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr: Option<PullRequest>,
-    /// Caller-supplied PR title, persisted across re-submits. Overrides the
-    /// commit subject when set; falls back to commit subject when absent.
+    /// Caller-supplied PR title, used when creating a PR. Falls back to the
+    /// commit subject when absent; updates preserve the remote title unless
+    /// a new title is explicitly supplied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr_title: Option<String>,
     /// Caller-supplied PR body, persisted across re-submits. Overrides the

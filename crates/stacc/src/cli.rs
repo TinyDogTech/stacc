@@ -467,9 +467,9 @@ pub struct CheckoutArgs {
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, clap::Args)]
 pub struct SubmitArgs {
-    /// PR title for the current branch. Persisted in stack state so re-submits
-    /// reuse it without repeating the flag. Defaults to the branch's commit
-    /// subject when not set and no stored title exists.
+    /// PR title for the current branch. On creation, defaults to the stored
+    /// title or commit subject. Existing PR titles change only when this flag
+    /// is supplied; the title is stored for future PR creation.
     #[arg(long)]
     pub title: Option<String>,
 
