@@ -2,5 +2,10 @@
   "base": {
     "name": "main",
     "hash": "e8ee034ef85d6cf677ad707f4176ac29d13fae37"
-  }
+  },
+  "pr": {
+    "number": 140,
+    "url": "https://github.com/TinyDogTech/stacc/pull/140"
+  },
+  "pr_description": "## Goal\nPrepare stacc v0.4.3 with the merged PR-title preservation fix (STA-181).\n\n## Summary\n- Bump the workspace version from 0.4.2 to 0.4.3.\n- Update the seven stacc workspace entries in Cargo.lock.\n\n## Testing\n- `cargo check --workspace --offline`\n- `cargo test --workspace --locked`\n- `cargo clippy --workspace --all-targets --locked` (existing warnings)\n\nAfter merge, tag the merged main commit as `v0.4.3` to trigger cargo-dist.\n\nCloses STA-182"
 }
