@@ -487,7 +487,7 @@ mod tests {
             repo: Some(RepoConfig {
                 trunk: "main".into(),
                 remote: "origin".into(),
-                declined_tracking: Default::default(),
+                declined_tracking: BTreeSet::default(),
             }),
             branches,
             ..State::default()

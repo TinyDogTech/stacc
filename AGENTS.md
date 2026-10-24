@@ -14,13 +14,46 @@ fork). Linear: team **STA** (workspace tiny-dog-tech), branches
 Full decisions in `plans/stacc.md`; deeper notes in the Claude project memory at
 `~/.claude/projects/-Users-jilliankozyra-projects-stacked-diff-tooling/memory/`.
 
+## Mandatory coding standards
+
+Before changing code, tests, crate structure, dependencies, comments, or repository
+documentation, read and follow [`CODING_STANDARDS.md`](CODING_STANDARDS.md).
+It defines crate responsibilities, dependency direction, Rust interfaces, errors,
+tests, and verification. This file owns the stacc workflow and agent rules.
+
 ## Commands
 
 ```bash
 cargo build --workspace
 cargo test --workspace
-cargo clippy --workspace --all-targets    # also the citation source for "idiomatic" claims
+CARGO_BUILD_WARNINGS=deny cargo clippy --workspace --all-targets --all-features --locked
+cargo fmt --all -- --check
 ```
+
+## Structure
+
+- `crates/stacc`: CLI, commands, presentation, and binaries.
+- `crates/stacc-core`: stack operations and recovery.
+- `crates/stacc-git`, `crates/stacc-state`: git and `refs/stacc/` state.
+- `crates/stacc-forge`, `crates/stacc-github`: forge-neutral contract and GitHub adapter.
+- `crates/stacc-config`: configuration and aliases.
+- `plans/`: design and algorithms; `docs/`: research and implementation plans.
+
+## Agent rules
+
+- Keep responses concise; use complete sentences in documentation, PRs, and
+  messages to people. Follow `CODING_STANDARDS.md` for repository prose.
+- Clarify consequential ambiguity before acting. Ask only for requirements that
+  are not already stated; for broad work, agree on scope and completion criteria
+  before implementing. Do not turn a focused, clear request into an interview.
+- Check external or version-specific claims against current primary sources.
+  Do not substitute recalled API behavior for documentation when it matters.
+- `AGENTS.md` is the source of project agent instructions. Keep `CLAUDE.md` as
+  the existing bridge rather than duplicating rules for another harness.
+- Check the working tree and index before committing. Do not commit to `main`,
+  stage another owner's changes, or run destructive git operations without
+  approval. The stacc-specific workflow below takes precedence over generic
+  git/gh advice.
 
 ## Explaining Rust
 

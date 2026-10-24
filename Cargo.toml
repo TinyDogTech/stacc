@@ -45,26 +45,37 @@ shlex = "1"
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust", "vendored"] }
 inquire = "0.9"
 
-# Workspace-wide lints. Member crates opt in with `[lints] workspace = true`.
-#
-# `clippy::pedantic` is enabled as a "second opinion" on idioms, not as a
-# build break. The lints in pedantic express taste more than correctness, so
-# we expect to disagree with some; `priority = -1` lets individual lints below
-# override the group default at the standard priority of 0.
-#
-# `cargo clippy` surfaces these as warnings; we do not pass `-D warnings`
-# against pedantic because that would turn opinion into policy.
-[workspace.lints.clippy]
-pedantic = { level = "warn", priority = -1 }
+# Member crates inherit these lints with `[lints] workspace = true`.
+[workspace.lints.rust]
+# `unreachable_pub` needs a separate CLI API cleanup before it can gate CI.
+unsafe_code = "warn"
 
-# Routinely noisy in practice for our codebase; opt out explicitly so the
-# signal-to-noise ratio of the pedantic warnings stays high.
+[workspace.lints.clippy]
+# Apply pedantic as warnings, with specific exceptions taking precedence.
+# CI denies remaining warnings, following uv's curated-lints approach.
+pedantic = { level = "warn", priority = -2 }
+
+# Pedantic lints that do not fit this CLI or are too noisy for their signal.
+assert_is_empty = "allow"
+map_unwrap_or = "allow"
 missing_errors_doc = "allow"        # we don't write `# Errors` sections
 missing_panics_doc = "allow"        # same, for `# Panics`
 module_name_repetitions = "allow"   # `stacc_config::Config` is fine
 must_use_candidate = "allow"        # libraries care more than CLIs
 doc_markdown = "allow"              # strict backtick rules in doc comments
 unused_self = "allow"               # `self.helper(...)` groups by type even when self is unused
+too_many_lines = "allow"            # long orchestration commands are sometimes clearer together
+
+# Selected restriction lints; stdout and stderr are intentional CLI interfaces.
+# `use_self` would require unrelated enum-wide rewrites.
+dbg_macro = "warn"
+empty_drop = "warn"
+empty_structs_with_brackets = "warn"
+exit = "warn"
+get_unwrap = "warn"
+rc_buffer = "warn"
+rc_mutex = "warn"
+rest_pat_in_fully_bound_structs = "warn"
 
 # The profile that 'dist' will build with
 [profile.dist]

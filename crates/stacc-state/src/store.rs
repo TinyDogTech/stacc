@@ -21,7 +21,7 @@ const SAVE_ATTEMPTS: usize = 10;
 /// How far back `undo` may walk the state-ref commit chain. The bound is
 /// enforced at read time by [`StateStore::version_back`] (a shallow walk), not
 /// by rewriting history, so the chain is never compacted and nothing is lost.
-pub const UNDO_RETENTION: usize = 50;
+const UNDO_RETENTION: usize = 50;
 
 #[derive(Debug, Error)]
 pub enum StateError {
@@ -343,6 +343,8 @@ fn backoff(attempt: usize) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
     use crate::model::{Base, Disposal, PullRequest};
     use tempfile::TempDir;
@@ -388,7 +390,7 @@ mod tests {
             repo: Some(RepoConfig {
                 trunk: "main".into(),
                 remote: "origin".into(),
-                declined_tracking: Default::default(),
+                declined_tracking: BTreeSet::default(),
             }),
             branches,
             ..State::default()
@@ -450,7 +452,7 @@ mod tests {
             repo: Some(RepoConfig {
                 trunk: "main".into(),
                 remote: "origin".into(),
-                declined_tracking: Default::default(),
+                declined_tracking: BTreeSet::default(),
             }),
             ..State::default()
         };
@@ -494,7 +496,7 @@ mod tests {
                 s.repo = Some(RepoConfig {
                     trunk: "main".into(),
                     remote: "origin".into(),
-                    declined_tracking: Default::default(),
+                    declined_tracking: BTreeSet::default(),
                 });
                 s.branches.insert("feature".into(), branch_on_main());
                 Ok(())

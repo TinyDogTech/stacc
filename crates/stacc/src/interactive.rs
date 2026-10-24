@@ -57,19 +57,6 @@ pub fn prompt_multi_select(prompt: &str, items: &[String]) -> Result<Vec<usize>,
     }
 }
 
-/// Prompt the user to confirm or override a pre-filled value. Returns the
-/// accepted or overridden string. Pressing Esc keeps the default.
-pub fn prompt_confirm_or_change(prompt: &str, default: &str) -> Result<String, Error> {
-    let result = inquire::Text::new(prompt).with_default(default).prompt();
-    match result {
-        Ok(val) => Ok(val),
-        Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
-            Ok(default.to_owned())
-        }
-        Err(e) => Err(Error::Usage(e.to_string())),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
