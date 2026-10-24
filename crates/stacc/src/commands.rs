@@ -1,5 +1,6 @@
 //! Implementations of the CLI subcommands.
 
+use std::collections::BTreeSet;
 use std::io::IsTerminal;
 use std::path::Path;
 
@@ -63,7 +64,7 @@ pub fn init(args: &InitArgs, format: OutputFormat, no_interactive: bool, work_di
     let repo = RepoConfig {
         trunk: config.trunk,
         remote: config.remote,
-        declined_tracking: Default::default(),
+        declined_tracking: BTreeSet::default(),
     };
 
     // A concurrent init may have won between the check above and here; only set

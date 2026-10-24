@@ -42,10 +42,11 @@ jobs:
       - name: Build
         run: cargo build --workspace
 
-      # Warnings are intentionally not denied: AGENTS.md keeps clippy::pedantic
-      # as a non-blocking second opinion, so this surfaces lints without gating.
+      # Deny remaining warnings while honoring the workspace's lint exceptions.
       - name: Clippy
-        run: cargo clippy --workspace --all-targets
+        env:
+          CARGO_BUILD_WARNINGS: deny
+        run: cargo clippy --workspace --all-targets --all-features --locked
 
       - name: Test
         run: cargo test --workspace
