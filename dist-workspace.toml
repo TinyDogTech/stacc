@@ -17,3 +17,7 @@ tap = "TinyDogTech/homebrew-tap"
 publish-jobs = ["homebrew"]
 # Sign each artifact with GitHub build provenance (verify with `gh attestation verify`).
 github-attestations = true
+
+# Avoid the retired macOS 14 runner for Apple Silicon builds.
+[dist.github-custom-runners]
+aarch64-apple-darwin = "macos-15"
