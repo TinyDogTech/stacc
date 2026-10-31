@@ -65,6 +65,7 @@ pub fn init(args: &InitArgs, format: OutputFormat, no_interactive: bool, work_di
         trunk: config.trunk,
         remote: config.remote,
         declined_tracking: BTreeSet::default(),
+        merged_tips: std::collections::BTreeMap::default(),
     };
 
     // A concurrent init may have won between the check above and here; only set
@@ -161,6 +162,7 @@ pub(crate) fn track_branch_impl(
         );
         if let Some(repo) = &mut state.repo {
             repo.declined_tracking.remove(branch);
+            repo.merged_tips.remove(branch);
         }
         Ok(())
     })?;
@@ -1181,6 +1183,7 @@ mod tests {
                 trunk: trunk.clone(),
                 remote: "origin".into(),
                 declined_tracking: declined.clone(),
+                merged_tips: std::collections::BTreeMap::default(),
             });
             Ok(())
         }).expect("seed repo config");

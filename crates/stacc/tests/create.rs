@@ -1,6 +1,8 @@
 use std::path::Path;
 use std::process::{Command, Output};
 
+use stacc_git::Git;
+use stacc_state::StateStore;
 use tempfile::TempDir;
 
 fn run_git(dir: &Path, args: &[&str]) {
@@ -407,7 +409,7 @@ fn create_insert_without_commit_refuses_dirty_worktree_before_mutating() {
         }
         let index = git_out(p, &["write-tree"]);
         let status = git_out(p, &["status", "--porcelain"]);
-        let before = stacc(p, &["log", "short", "--json"]);
+        let before = StateStore::new(Git::open(p)).load().unwrap();
         let out = stacc(p, &["create", "inserted", "--insert", "--json"]);
         assert!(!out.status.success(), "{out:?}");
         assert!(String::from_utf8_lossy(&out.stdout).contains("clean worktree"));
@@ -415,8 +417,8 @@ fn create_insert_without_commit_refuses_dirty_worktree_before_mutating() {
         assert!(!git_ok(p, &["show-ref", "--verify", "refs/heads/inserted"]));
         assert_eq!(git_out(p, &["write-tree"]), index);
         assert_eq!(git_out(p, &["status", "--porcelain"]), status);
-        let after = stacc(p, &["log", "short", "--json"]);
-        assert_eq!(after.stdout, before.stdout);
+        let after = StateStore::new(Git::open(p)).load().unwrap();
+        assert_eq!(after, before);
     }
 }
 

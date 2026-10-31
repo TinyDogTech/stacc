@@ -488,6 +488,7 @@ mod tests {
                 trunk: "main".into(),
                 remote: "origin".into(),
                 declined_tracking: BTreeSet::default(),
+                merged_tips: std::collections::BTreeMap::default(),
             }),
             branches,
             ..State::default()

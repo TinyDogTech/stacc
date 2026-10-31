@@ -1,6 +1,6 @@
 //! The serializable shapes that make up stacc's stored state.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -13,6 +13,10 @@ pub struct RepoConfig {
     /// the untracked set on subsequent syncs until `stacc track` clears the entry.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub declined_tracking: BTreeSet<String>,
+    /// Last merged tip retained locally, keyed by branch name. A different tip
+    /// is new work and may be offered for tracking again.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub merged_tips: BTreeMap<String, String>,
 }
 
 /// The branch (and the commit on it) that a tracked branch is stacked on.
@@ -160,6 +164,7 @@ mod tests {
             trunk: "main".into(),
             remote: "origin".into(),
             declined_tracking: BTreeSet::new(),
+            merged_tips: BTreeMap::new(),
         };
         let json = serde_json::to_string(&cfg).unwrap();
         assert_eq!(serde_json::from_str::<RepoConfig>(&json).unwrap(), cfg);
@@ -173,6 +178,7 @@ mod tests {
         assert_eq!(cfg.trunk, "main");
         assert_eq!(cfg.remote, "origin");
         assert!(cfg.declined_tracking.is_empty());
+        assert!(cfg.merged_tips.is_empty());
     }
 
     #[test]
@@ -181,12 +187,15 @@ mod tests {
             trunk: "main".into(),
             remote: "origin".into(),
             declined_tracking: BTreeSet::new(),
+            merged_tips: BTreeMap::new(),
         };
         cfg.declined_tracking.insert("jillian/wip".into());
         cfg.declined_tracking.insert("jillian/old-exp".into());
+        cfg.merged_tips.insert("jillian/merged".into(), "abc123".into());
         let json = serde_json::to_string(&cfg).unwrap();
         let back: RepoConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(back.declined_tracking, cfg.declined_tracking);
+        assert_eq!(back.merged_tips, cfg.merged_tips);
     }
 
     #[test]
@@ -195,8 +204,10 @@ mod tests {
             trunk: "main".into(),
             remote: "origin".into(),
             declined_tracking: BTreeSet::new(),
+            merged_tips: BTreeMap::new(),
         };
         let json = serde_json::to_string(&cfg).unwrap();
         assert!(!json.contains("declined_tracking"), "empty set must be omitted: {json}");
+        assert!(!json.contains("merged_tips"), "empty map must be omitted: {json}");
     }
 }
