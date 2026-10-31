@@ -1112,6 +1112,30 @@ pub fn sync(args: &SyncArgs, format: OutputFormat, no_interactive: bool, work_di
         cleanup_merged_refs(&git, &repo.trunk, &leases)
     };
 
+    // Record only refs still at their merged tip. A moved ref represents new
+    // work, even when cleanup skipped it for worktree safety or a CAS failure.
+    let retained: Vec<(String, String)> = leases
+        .iter()
+        .filter(|(name, tip)| {
+            git.ref_commit(&format!("refs/heads/{name}"))
+                .ok()
+                .flatten()
+                .as_deref()
+                == Some(tip.as_str())
+        })
+        .cloned()
+        .collect();
+    if !retained.is_empty() {
+        store.update(|s| {
+            if let Some(r) = s.repo.as_mut() {
+                for (name, tip) in &retained {
+                    r.merged_tips.insert(name.clone(), tip.clone());
+                }
+            }
+            Ok(())
+        })?;
+    }
+
     // Surface local branches that stacc doesn't track yet (and the user hasn't
     // previously declined). In interactive sessions, offer to track them now.
     // In non-interactive / JSON mode, report them in the output so agents can act.
@@ -1123,6 +1147,11 @@ pub fn sync(args: &SyncArgs, format: OutputFormat, no_interactive: bool, work_di
             b != &repo.trunk
                 && !tracked_names.contains(b.as_str())
                 && !repo.declined_tracking.contains(b)
+                && {
+                    let tip = git.ref_commit(&format!("refs/heads/{b}")).ok().flatten();
+                    !retained.iter().any(|(name, merged_tip)| name == b && tip.as_ref() == Some(merged_tip))
+                        && repo.merged_tips.get(b).is_none_or(|merged_tip| tip.as_ref() != Some(merged_tip))
+                }
         })
         .collect();
 

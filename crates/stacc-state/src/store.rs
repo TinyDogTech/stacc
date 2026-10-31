@@ -391,6 +391,7 @@ mod tests {
                 trunk: "main".into(),
                 remote: "origin".into(),
                 declined_tracking: BTreeSet::default(),
+                merged_tips: std::collections::BTreeMap::default(),
             }),
             branches,
             ..State::default()
@@ -453,6 +454,7 @@ mod tests {
                 trunk: "main".into(),
                 remote: "origin".into(),
                 declined_tracking: BTreeSet::default(),
+                merged_tips: std::collections::BTreeMap::default(),
             }),
             ..State::default()
         };
@@ -497,6 +499,7 @@ mod tests {
                     trunk: "main".into(),
                     remote: "origin".into(),
                     declined_tracking: BTreeSet::default(),
+                merged_tips: std::collections::BTreeMap::default(),
                 });
                 s.branches.insert("feature".into(), branch_on_main());
                 Ok(())

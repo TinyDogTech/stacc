@@ -681,6 +681,8 @@ fn sync_keep_branches_keeps_the_merged_ref() {
     assert!(s.contains(r#""merged":["feature"]"#), "still untracked from state: {s}");
     assert!(s.contains(r#""cleaned":[]"#), "nothing deleted: {s}");
     assert!(ref_exists(p, "feature"), "ref must survive --keep-branches");
+    let response: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(response["untracked"], serde_json::json!([]), "{response}");
 }
 
 #[test]
@@ -711,6 +713,56 @@ fn sync_keeps_a_merged_branch_checked_out_in_another_worktree() {
     assert!(s.contains(r#""cleanup_skipped":[{"branch":"feature""#), "got: {s}");
     assert!(s.contains("checked out in"), "reason names the worktree: {s}");
     assert!(ref_exists(p, "feature"), "checked-out ref must survive");
+    let response: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(response["untracked"], serde_json::json!([]), "{response}");
+    let state = StateStore::new(Git::open(p)).load().unwrap();
+    assert_eq!(
+        state.repo.unwrap().merged_tips.get("feature"),
+        Some(&git_out(p, &["rev-parse", "feature"]))
+    );
+
+    run_git(p, &["branch", "new-work"]);
+    let api_url = server.base_url();
+    let env = [("GITHUB_TOKEN", "x"), ("GITHUB_API_URL", api_url.as_str())];
+    let again = stacc_env(p, &["sync", "--json"], &env);
+    assert!(
+        again.status.success(),
+        "{}",
+        String::from_utf8_lossy(&again.stdout)
+    );
+    let second: serde_json::Value = serde_json::from_slice(&again.stdout).unwrap();
+    assert_eq!(
+        second["untracked"],
+        serde_json::json!(["new-work"]),
+        "{second}"
+    );
+    assert!(ref_exists(p, "feature"));
+
+    // Advancing the retained branch makes it new work again.
+    commit_file(&wt_path, "fresh.txt", "new work", "reuse branch");
+    let moved = stacc_env(p, &["sync", "--json"], &env);
+    assert!(
+        moved.status.success(),
+        "{}",
+        String::from_utf8_lossy(&moved.stdout)
+    );
+    let third: serde_json::Value = serde_json::from_slice(&moved.stdout).unwrap();
+    assert_eq!(
+        third["untracked"],
+        serde_json::json!(["feature", "new-work"]),
+        "{third}"
+    );
+    assert!(!StateStore::new(Git::open(p))
+        .load()
+        .unwrap()
+        .branches
+        .contains_key("feature"));
+
+    let tracked = stacc(&wt_path, &["track", "--base", "main"]);
+    assert!(tracked.status.success(), "{}", String::from_utf8_lossy(&tracked.stderr));
+    let state = StateStore::new(Git::open(p)).load().unwrap();
+    assert!(state.branches.contains_key("feature"));
+    assert!(!state.repo.unwrap().merged_tips.contains_key("feature"));
 }
 
 #[test]
